@@ -338,7 +338,10 @@ with tab1:
 
             col_img, col_info, col_actions = st.columns([1, 4, 3])
             with col_img:
-                st.image(img, width=75) if img and img.startswith("http") else st.markdown("🖼️")
+                if img and img.startswith("http"):
+                    st.image(img, width=75)
+                else:
+                    st.markdown("🖼️")
             with col_info:
                 st.markdown(f"**SKU:** `{sku}`")
                 st.markdown(f"**Quantity | الكمية:** {qty}")
@@ -411,7 +414,10 @@ with tab2:
 
             col_img, col_info, col_del = st.columns([1, 5, 1])
             with col_img:
-                st.image(img, width=70) if img and img.startswith("http") else st.markdown("🖼️")
+                if img and img.startswith("http"):
+                    st.image(img, width=70)
+                else:
+                    st.markdown("🖼️")
             with col_info:
                 st.markdown(f"**SKU:** `{sku}`")
                 if qty_app and qty_app != qty_req:
@@ -473,7 +479,10 @@ with tab3:
 
             col_img, col_info, col_del = st.columns([1, 5, 1])
             with col_img:
-                st.image(img, width=70) if img and img.startswith("http") else st.markdown("🖼️")
+                if img and img.startswith("http"):
+                    st.image(img, width=70)
+                else:
+                    st.markdown("🖼️")
             with col_info:
                 st.markdown(f"**SKU:** `{sku}` | **Quantity | الكمية:** {qty}")
                 st.caption(f"📅 طُلب | Requested: {date_add} | ❌ غير متوفر | Unavailable: {date_marked}")
@@ -607,12 +616,15 @@ with tab4:
 
             col_img, col_info, col_del = st.columns([1, 5, 1])
             with col_img:
-                st.image(img, width=70) if img and img.startswith("http") else st.markdown("🖼️")
+                if img and img.startswith("http"):
+                    st.image(img, width=70)
+                else:
+                    st.markdown("🖼️")
             with col_info:
                 st.markdown(f"**ASN:** `{asn}` | **SKU:** `{sku}`")
                 st.markdown(f"**Quantity | الكمية:** {qty}")
                 status = "⚠️ منتهي | Expired" if is_expired else "✅ ساري | Active"
-                st.caption(f"📅 تاريخ الجدولة | Schedule Date: {sched_date} — {status}")
+                st.markdown(f"📅 **تاريخ الجدولة | Schedule Date: {sched_date}** — {status}")
             with col_del:
                 if st.button("🗑️", key=f"del_sc_{i}", help="حذف | Delete"):
                     safe_delete(scheduled_sheet, i)
@@ -661,7 +673,10 @@ with tab5:
 
             col_img, col_info, col_del = st.columns([1, 5, 1])
             with col_img:
-                st.image(img, width=70) if img and img.startswith("http") else st.markdown("🖼️")
+                if img and img.startswith("http"):
+                    st.image(img, width=70)
+                else:
+                    st.markdown("🖼️")
             with col_info:
                 st.markdown(f"**ASN:** `{asn}` | **SKU:** `{sku}`")
                 st.markdown(f"**Quantity | الكمية:** {qty}")
