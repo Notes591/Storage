@@ -28,6 +28,7 @@ TABS_CONFIG = {
     "Expired":           ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Date Expired"],
     "Inventory":         ["SKU","Warehouse","Stock","Monthly Sales","Image URL","Date Uploaded"],
     "Settings":          ["Key","Value"],
+    "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
 }
 
 sheets = {}
@@ -300,6 +301,7 @@ tabs = st.tabs([
     "❌ غير متوفر | Unavailable",
     "🛒 تم الطلب | Ordered",
     "📅 الجدولة | Scheduled",
+    "☑️ تشييك | Check",
     "🚫 جدولة ملغية | Cancelled",
     "🔄 تعديل موعد | Rescheduled",
     "⚠️ تنبيهات | Alerts",
@@ -308,7 +310,7 @@ tabs = st.tabs([
     "🗂️ منتهية | Expired",
     "⚙️ الإعدادات | Settings",
 ])
-(tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9,tab10,tab11,tab12) = tabs
+(tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12) = tabs
 
 # ══ TAB 1 — الطلبات ══
 with tab1:
@@ -722,8 +724,44 @@ with tab5:
                     if is_al:
                         st.markdown(f"&nbsp;&nbsp;🔴 **تنبيه | Alert:** الكمية ({qty}) > المبيع ({monthly})")
 
-            ca,cb,cc = st.columns(3)
+            # إشعار كنسل من تاب Check لهذا ASN
+            chk_notifs = st.session_state.get("check_cancel_notifications",[])
+            for notif in chk_notifs:
+                if f"ASN **{asn}**" in notif:
+                    st.error(notif)
+
+            ca,cb,cc,cd = st.columns(4)
             with ca:
+                with st.popover("☑️ Check"):
+                    st.markdown(f"**ASN:** `{asn}` — اختر SKUs للتشييك | Select SKUs to check")
+                    select_all = st.checkbox("تحديد الكل | Select All", key=f"chk_all_{asn}")
+                    selected_skus = {}
+                    for ri2,r in enumerate(skus_):
+                        while len(r)<6: r.append("")
+                        sku2 = r[1].strip()
+                        default_val = select_all
+                        selected_skus[sku2] = st.checkbox(f"`{sku2}` — Qty: {r[2]}", value=default_val, key=f"chk_sku_{asn}_{ri2}")
+                    if st.button("✅ أرسل للتشييك | Send to Check", key=f"send_chk_{asn}"):
+                        dn = now_str()
+                        all_selected = all(selected_skus.values())
+                        to_add = []
+                        for r in skus_:
+                            while len(r)<6: r.append("")
+                            sku2 = r[1].strip()
+                            flag = "" if (all_selected or selected_skus.get(sku2,False)) else "highlighted" if not all_selected and not selected_skus.get(sku2,True) else ""
+                            # لو اخترنا بعض: الغير محدد يتعلّم highlighted
+                            if not all_selected:
+                                flag = "highlighted" if selected_skus.get(sku2,False) else ""
+                            to_add.append([r[0],r[1],r[2],r[3],r[4],dn,"",flag])
+                        safe_batch_append(sheets["Check"], to_add)
+                        # حذف من Scheduled
+                        sch_d = get_cached(scheduled_sheet, force=True)
+                        del_i = [i2 for i2,sr in enumerate(sch_d[1:],start=2) if sr[0].strip().upper()==asn.upper()]
+                        for i2 in sorted(del_i,reverse=True):
+                            safe_delete(scheduled_sheet,i2)
+                        st.success(f"☑️ تم الإرسال للتشييك | Sent to Check — ASN: {asn}")
+                        st.rerun()
+            with cb:
                 with st.popover("🚫 كنسل - غير متوفر\nCancel - Unavailable"):
                     reason_u = st.text_input("سبب إضافي | Additional reason", key=f"rsn_u_{asn}", placeholder="اختياري | Optional")
                     if st.button("✅ تأكيد الكنسل | Confirm Cancel", key=f"can_u_{asn}"):
@@ -735,7 +773,7 @@ with tab5:
                         for idx in sorted(del_idx, reverse=True):
                             safe_delete(scheduled_sheet,idx)
                         st.success("🚫 تم الكنسل | Cancelled"); st.rerun()
-            with cb:
+            with cc:
                 with st.popover("🔄 كنسل - تغيير موعد\nReschedule"):
                     reason_r = st.text_input("سبب التغيير | Reschedule reason", key=f"rsn_r_{asn}", placeholder="مثال: تأخير مورد")
                     if st.button("✅ تأكيد | Confirm", key=f"can_r_{asn}"):
@@ -747,8 +785,456 @@ with tab5:
                         for idx in sorted(del_idx, reverse=True):
                             safe_delete(scheduled_sheet,idx)
                         st.success("🔄 تم النقل لتعديل الموعد | Moved to Rescheduled"); st.rerun()
-            with cc:
+            with cd:
                 status = "⚠️ منتهي | Expired" if is_exp else "✅ ساري | Active"
                 st.markdown(f"&nbsp;{status}")
             st.divider()
 
+
+
+# ══ TAB CHECK — تشييك ══
+with tab_check:
+    st.subheader("☑️ قيد التشييك | Under Check")
+    st.caption("ASNs المحولة للتشييك | ASNs moved to check — رجّعها للجدولة أو كنسلها | Return to schedule or cancel")
+
+    # إشعارات الكنسل من التشييك (موجودة في session state)
+    if st.session_state.get("check_cancel_notifications"):
+        st.markdown("---")
+        st.markdown("### 🔔 إشعارات الكنسل الأخيرة | Recent Cancel Notifications")
+        for notif in st.session_state["check_cancel_notifications"]:
+            st.error(notif)
+        if st.button("✖️ مسح الإشعارات | Clear Notifications", key="clear_notifs"):
+            st.session_state["check_cancel_notifications"] = []
+            st.rerun()
+        st.markdown("---")
+
+    data_chk = get_cached(sheets["Check"])
+    if len(data_chk) <= 1:
+        st.info("لا يوجد | No items under check.")
+    else:
+        rows_chk = data_chk[1:]
+        # تجميع حسب ASN
+        chk_groups = {}
+        for idx, r in enumerate(rows_chk, start=2):
+            while len(r) < 8: r.append("")
+            asn = r[0].strip()
+            if asn not in chk_groups:
+                chk_groups[asn] = {"date":r[3],"skus":[],"indices":[]}
+            chk_groups[asn]["skus"].append(r)
+            chk_groups[asn]["indices"].append(idx)
+
+        df_chk = pd.DataFrame(rows_chk, columns=data_chk[0])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_chk,"check")
+        with c2:
+            if st.button("🗑️ مسح الكل | Clear All", type="secondary", key="btn_clear_chk", use_container_width=True):
+                st.session_state["confirm_clear_chk"] = True
+        confirm_clear("clear_chk", sheets["Check"], "التشييك | Check")
+
+        st.write(f"**إجمالي ASN | Total ASNs: {len(chk_groups)}**")
+
+        for asn, grp in chk_groups.items():
+            sdate = grp["date"]
+            skus_ = grp["skus"]
+            # هل في SKUs مميزة (highlighted)
+            has_highlighted = any(len(r)>7 and r[7]=="highlighted" for r in skus_)
+
+            st.markdown(
+                f'<div style="border-left:5px solid #8b5cf6;background:#1a0a2e;border-radius:10px;padding:8px 14px;margin-bottom:4px;">'
+                f'<b>ASN:</b> {asn} &nbsp;|&nbsp; 📅 <b>تاريخ الجدولة | Schedule Date:</b> <b>{sdate}</b>'
+                + (' &nbsp; 🔴 <b>يوجد SKUs مميزة | Has highlighted SKUs</b>' if has_highlighted else '') +
+                f'</div>', unsafe_allow_html=True)
+
+            for r in skus_:
+                while len(r)<8: r.append("")
+                sku,qty,img,flag = r[1].strip(),r[2],r[4],r[7]
+                is_highlighted = flag=="highlighted"
+                bg_color = "#2d0a0a" if is_highlighted else "#0f172a"
+                border_c = "#ef4444" if is_highlighted else "#8b5cf6"
+
+                st.markdown(
+                    f'<div style="border-left:4px solid {border_c};background:{bg_color};'
+                    f'border-radius:8px;padding:6px 10px;margin:4px 0;">',
+                    unsafe_allow_html=True)
+                c_img2,c_info2 = st.columns([1,6])
+                with c_img2: show_img(img,60)
+                with c_info2:
+                    tag = " 🔴 **مميز | Highlighted**" if is_highlighted else ""
+                    st.markdown(f"**SKU:** `{sku}` | **Qty:** {qty}{tag}")
+                    show_sku_inv(sku)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            # أزرار التحكم
+            ca,cb = st.columns(2)
+            with ca:
+                if st.button(f"↩️ رجّع للجدولة | Return to Schedule — {asn}", key=f"ret_chk_{asn}", type="primary"):
+                    dn = now_str()
+                    lm = get_links_map()
+                    to_add = [[r[0],r[1],r[2],r[3],lm.get(r[1].strip().upper(),r[4]),dn] for r in skus_]
+                    safe_batch_append(scheduled_sheet, to_add)
+                    for idx in sorted(grp["indices"], reverse=True):
+                        safe_delete(sheets["Check"], idx)
+                    st.success(f"✅ تم الإرجاع للجدولة | Returned — ASN: {asn}")
+                    st.rerun()
+            with cb:
+                with st.popover(f"🚫 كنسل | Cancel — {asn}"):
+                    cancel_reason = st.text_input("سبب الكنسل | Cancel reason", key=f"chk_rsn_{asn}")
+                    if st.button("✅ تأكيد الكنسل | Confirm Cancel", key=f"chk_can_{asn}"):
+                        dn = now_str()
+                        to_add = [[r[0],r[1],r[2],r[3],r[4],r[5],
+                                   f"تشييك — {cancel_reason} | Check — {cancel_reason}",dn] for r in skus_]
+                        safe_batch_append(cancelled_sheet, to_add)
+                        for idx in sorted(grp["indices"], reverse=True):
+                            safe_delete(sheets["Check"], idx)
+                        # إشعار للجدولة
+                        hl_skus = [r[1].strip() for r in skus_ if r[7]=="highlighted"]
+                        all_skus = [r[1].strip() for r in skus_]
+                        notif_skus = hl_skus if hl_skus else all_skus
+                        notif = (f"🚫 ASN **{asn}** (📅 {sdate}) — تم الكنسل | Cancelled — "
+                                 f"SKUs: {', '.join(notif_skus[:5])}{'...' if len(notif_skus)>5 else ''} "
+                                 f"— السبب | Reason: {cancel_reason} — {dn}")
+                        if "check_cancel_notifications" not in st.session_state:
+                            st.session_state["check_cancel_notifications"] = []
+                        st.session_state["check_cancel_notifications"].insert(0, notif)
+                        st.session_state["check_cancel_notifications"] = st.session_state["check_cancel_notifications"][:10]
+                        st.success("🚫 تم الكنسل | Cancelled")
+                        st.rerun()
+            st.divider()
+
+
+# ══ TAB 6 — جدولة ملغية ══
+with tab6:
+    st.subheader("🚫 الجدولة الملغية | Cancelled Schedule")
+    data_can = get_cached(cancelled_sheet)
+    if len(data_can) <= 1:
+        st.info("لا يوجد إلغاء | No cancelled schedules.")
+    else:
+        rows_can = data_can[1:]
+        srch = st.text_input("🔍 بحث ASN | Search ASN", key="srch_can", placeholder="اكتب ASN...")
+        filtered = [r for r in rows_can if not srch or srch.strip().upper() in r[0].upper()]
+        df_can = pd.DataFrame(rows_can, columns=data_can[0])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_can,"cancelled")
+        with c2:
+            if st.button("🗑️ مسح الكل | Clear All", type="secondary", key="btn_clear_can", use_container_width=True):
+                st.session_state["confirm_clear_can"] = True
+        confirm_clear("clear_can", cancelled_sheet, "الملغية | Cancelled")
+        st.write(f"**عرض | Showing: {len(filtered)} / {len(rows_can)}**")
+        for row in filtered:
+            ri = rows_can.index(row)+2
+            while len(row)<8: row.append("")
+            asn,sku,qty,sd,img,dadd,reason,dcan = row[0],row[1],row[2],row[3],row[4],row[5],row[6],row[7]
+            c_img,c_info,c_del = st.columns([1,5,1])
+            with c_img: show_img(img,70)
+            with c_info:
+                st.markdown(f"**ASN:** `{asn}` | **SKU:** `{sku}`")
+                show_sku_inv(sku)
+                st.markdown(f"**Qty | الكمية:** {qty}")
+                st.caption(f"📅 Schedule | جدولة: {sd} | 🚫 Cancelled | ألغي: {dcan}")
+                if reason: st.caption(f"📝 السبب | Reason: {reason}")
+            with c_del:
+                if st.button("🗑️", key=f"del_can_{ri}"):
+                    safe_delete(cancelled_sheet,ri); st.rerun()
+            st.divider()
+
+# ══ TAB 7 — تعديل الموعد ══
+with tab7:
+    st.subheader("🔄 تعديل الموعد | Rescheduled Items")
+    st.caption("عدّل الكميات وأضف ASN جديد وأرجع للجدولة | Edit quantities, add new ASN, return to schedule")
+    data_res = get_cached(reschedule_sheet)
+    if len(data_res) <= 1:
+        st.info("لا يوجد | No rescheduled items.")
+    else:
+        rows_res = data_res[1:]
+        # تجميع حسب ASN
+        asn_res_groups = {}
+        for idx, r in enumerate(rows_res, start=2):
+            while len(r)<8: r.append("")
+            asn = r[0].strip()
+            if asn not in asn_res_groups:
+                asn_res_groups[asn] = {"old_date":r[3],"reason":r[6],"date_moved":r[7],"skus":[],"indices":[]}
+            asn_res_groups[asn]["skus"].append(r)
+            asn_res_groups[asn]["indices"].append(idx)
+
+        df_res = pd.DataFrame(rows_res, columns=data_res[0])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_res,"rescheduled")
+        with c2:
+            if st.button("🗑️ مسح الكل | Clear All", type="secondary", key="btn_clear_res", use_container_width=True):
+                st.session_state["confirm_clear_res"] = True
+        confirm_clear("clear_res", reschedule_sheet, "تعديل الموعد | Rescheduled")
+
+        links_map2 = get_links_map()
+        for asn, grp in asn_res_groups.items():
+            st.markdown(
+                f'<div style="border-left:5px solid #f59e0b;background:#1a1500;border-radius:10px;padding:8px 14px;margin-bottom:4px;">'
+                f'<b>ASN:</b> {asn} &nbsp;|&nbsp; 📅 <b>موعد قديم | Old Date:</b> {grp["old_date"]}</div>',
+                unsafe_allow_html=True)
+            if grp["reason"]:
+                st.caption(f"📝 سبب التعديل | Reason: {grp['reason']}")
+            with st.expander(f"✏️ تعديل وإرجاع للجدولة | Edit & Reschedule ASN {asn}", expanded=False):
+                new_asn  = st.text_input("ASN جديد | New ASN", value=asn, key=f"new_asn_{asn}")
+                new_date = st.text_input("تاريخ جديد | New Schedule Date (YYYY-MM-DD)", value="", key=f"new_date_{asn}", placeholder="2025-08-15")
+                edited_skus = []
+                for ri2, r in enumerate(grp["skus"]):
+                    while len(r)<6: r.append("")
+                    sku,qty,img = r[1].strip(),r[2],r[4]
+                    c_img2,c_s2,c_q2 = st.columns([1,3,2])
+                    with c_img2: show_img(img,55)
+                    with c_s2:
+                        st.markdown(f"**SKU:** `{sku}`")
+                        show_sku_inv(sku)
+                    with c_q2:
+                        new_qty = st.text_input("Qty | الكمية", value=qty, key=f"res_qty_{asn}_{ri2}")
+                    edited_skus.append((sku, new_qty, img))
+                if st.button("✅ أرجع للجدولة | Return to Schedule", key=f"ret_sch_{asn}", type="primary"):
+                    if not new_date.strip():
+                        st.error("❌ أدخل تاريخ جديد | Enter new schedule date")
+                    else:
+                        dn = now_str()
+                        to_add = [[new_asn, sku, qty, new_date, links_map2.get(sku.upper(), img), dn] for sku,qty,img in edited_skus]
+                        safe_batch_append(scheduled_sheet, to_add)
+                        for idx in sorted(grp["indices"], reverse=True):
+                            safe_delete(reschedule_sheet, idx)
+                        st.success(f"✅ تم الإرجاع للجدولة | Returned to schedule — ASN: {new_asn}")
+                        st.rerun()
+            st.divider()
+
+# ══ TAB 8 — تنبيهات ══
+with tab8:
+    st.subheader("⚠️ تنبيهات الجدولة | Schedule Alerts")
+    st.caption("الكمية المجدولة أعلى من المبيع الشهري | Scheduled qty > Monthly sales")
+    data_sc8 = get_cached(scheduled_sheet)
+    alerts = []
+    if len(data_sc8) > 1:
+        for row in data_sc8[1:]:
+            while len(row)<6: row.append("")
+            asn,sku,qty,sdate,img = row[0],row[1],row[2],row[3],row[4]
+            info    = inv_map.get(sku.upper(),{})
+            monthly = info.get("sales",0)
+            stock   = info.get("total_stock",0)
+            try:
+                if monthly>0 and _to_int(qty)>monthly:
+                    alerts.append((asn,sku,qty,monthly,stock,sdate,img))
+            except: pass
+    if not inv_map:
+        st.info("ارفع ملف المخزون أولاً | Upload Inventory first")
+    elif not alerts:
+        st.success("✅ لا توجد تنبيهات | No alerts")
+    else:
+        df_al = pd.DataFrame(alerts, columns=["ASN","SKU","Scheduled Qty","Monthly Sales","Total Stock","Schedule Date","Image URL"])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_al,"alerts")
+        with c2: st.error(f"⚠️ تنبيهات | Alerts: {len(alerts)}")
+        for asn,sku,qty,monthly,stock,sdate,img in alerts:
+            c_img,c_info = st.columns([1,6])
+            with c_img: show_img(img,70)
+            with c_info:
+                st.markdown(f"**ASN:** `{asn}` | **SKU:** `{sku}`")
+                show_sku_inv(sku)
+                st.markdown(f"🔴 **الكمية المجدولة | Scheduled:** {qty} > **المبيع الشهري | Monthly Sales:** {monthly}")
+                st.caption(f"📅 تاريخ الجدولة | Schedule Date: {sdate}")
+            st.divider()
+
+
+# ══ TAB 9 — المخزون ══
+with tab9:
+    st.subheader("📊 المخزون والمبيع الشهري | Inventory & Monthly Sales")
+    links_map = get_links_map()
+    col_t,_ = st.columns([1,3])
+    with col_t:
+        st.download_button("⬇️ Template المخزون | Inventory Template",
+            data=make_empty_template(["warehouse_code","sku","STOCCCCK.QTY","مبيع شهر جدول.QTY"]),
+            file_name=f"inventory_template_{file_timestamp()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+    upl_inv = st.file_uploader("ارفع ملف المخزون | Upload Inventory File", type=["xlsx","xls","xlsm","csv"], key="inv_upload")
+    if upl_inv:
+        try:
+            df_inv = pd.read_csv(upl_inv,dtype=str).fillna("") if upl_inv.name.endswith(".csv") else pd.read_excel(upl_inv,dtype=str).fillna("")
+            wh_col=sku_col=stock_col=sales_col=None
+            for c in df_inv.columns:
+                cl = c.strip().lower()
+                if "warehouse" in cl: wh_col=c
+                if cl in ("sku","item nr","item_nr"): sku_col=c
+                if "stock" in cl: stock_col=c
+                if "مبيع" in cl or "sales" in cl: sales_col=c
+                if "qty" in cl and sales_col is None: sales_col=c
+            if not wh_col:    wh_col    = df_inv.columns[0]
+            if not sku_col:   sku_col   = df_inv.columns[1] if len(df_inv.columns)>1 else df_inv.columns[0]
+            if not stock_col: stock_col = df_inv.columns[2] if len(df_inv.columns)>2 else None
+            if not sales_col: sales_col = df_inv.columns[3] if len(df_inv.columns)>3 else None
+            st.info(f"📊 {len(df_inv)} صف | WH:`{wh_col}` SKU:`{sku_col}` Stock:`{stock_col}` Sales:`{sales_col}`")
+            st.dataframe(df_inv.head(10), use_container_width=True, height=180)
+            def do_upload(replace=False):
+                dn = now_str()
+                to_add = []
+                for _,row in df_inv.iterrows():
+                    wh  = str(row[wh_col]).strip()    if wh_col    else ""
+                    sku = str(row[sku_col]).strip()   if sku_col   else ""
+                    stk = str(row[stock_col]).strip() if stock_col else ""
+                    sal = str(row[sales_col]).strip() if sales_col else ""
+                    img = links_map.get(sku.upper(),"")
+                    if sku and sku.lower()!="nan":
+                        to_add.append([sku,wh,stk,sal,img,dn])
+                if replace: safe_delete_all(inventory_sheet)
+                safe_batch_append(inventory_sheet,to_add)
+                clear_cache(inventory_sheet)
+                return len(to_add)
+            ca,cb = st.columns(2)
+            with ca:
+                if st.button("📤 إضافة للموجود | Append", type="primary", use_container_width=True):
+                    n = do_upload(replace=False)
+                    st.success(f"✅ أُضيف {n} صف | rows added"); st.rerun()
+            with cb:
+                if st.button("🔄 استبدال الكل | Replace All", type="secondary", use_container_width=True):
+                    st.session_state["confirm_replace_inv"] = True
+            if st.session_state.get("confirm_replace_inv"):
+                st.warning("⚠️ هيمسح الكل ويرفع الجديد؟ | Replace all data?")
+                cy,cn = st.columns(2)
+                if cy.button("✅ نعم | Yes", key="yes_rep_inv"):
+                    n = do_upload(replace=True)
+                    st.session_state["confirm_replace_inv"] = False
+                    st.success(f"✅ تم الاستبدال — {n} صف"); st.rerun()
+                if cn.button("❌ لا | No", key="no_rep_inv"):
+                    st.session_state["confirm_replace_inv"] = False; st.rerun()
+        except Exception as e:
+            st.error(f"❌ {e}")
+    st.divider()
+    st.subheader("📋 بيانات المخزون الحالية | Current Inventory")
+    if not inv_map:
+        st.info("لم يُرفع ملف مخزون بعد | No inventory uploaded yet.")
+    else:
+        if excluded_wh:
+            st.info(f"⚙️ مستثنى من الإجمالي | Excluded: **{', '.join(sorted(excluded_wh))}**")
+        srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_inv", placeholder="اكتب SKU...")
+        raw_inv = get_cached(inventory_sheet)
+        df_inv_dl = pd.DataFrame(raw_inv[1:], columns=raw_inv[0])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_inv_dl,"inventory")
+        with c2:
+            if st.button("🗑️ مسح الكل | Clear All", type="secondary", key="btn_clear_inv", use_container_width=True):
+                st.session_state["confirm_clear_inv"] = True
+        confirm_clear("clear_inv", inventory_sheet, "المخزون | Inventory")
+        filtered_inv = {k:v for k,v in inv_map.items() if not srch or srch.strip().upper() in k}
+        st.write(f"**SKUs: {len(filtered_inv)}**")
+        for sku_key,info in filtered_inv.items():
+            c_img,c_info = st.columns([1,6])
+            with c_img: show_img(info["img"],70)
+            with c_info:
+                st.markdown(f"**SKU:** `{info['sku']}`")
+                st.markdown(f"📦 **إجمالي المخزون | Stock:** **{info['total_stock']}** &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly Sales:** **{info['sales']}**")
+                badges = []
+                for wh,stk in sorted(info["warehouses"].items()):
+                    is_ex=wh.upper() in excluded_wh
+                    bg="#4b1010" if is_ex else "#1e3a5f"
+                    color="#fca5a5" if is_ex else "#93c5fd"
+                    strike="text-decoration:line-through;" if is_ex else ""
+                    badges.append(f'<span class="wh-badge" style="background:{bg};color:{color};{strike}">{wh}: {stk}</span>')
+                st.markdown("🏭 "+"".join(badges), unsafe_allow_html=True)
+                st.caption(f"📅 {info['date']}")
+            st.divider()
+
+# ══ TAB 10 — مخزون منخفض ══
+with tab10:
+    st.subheader("🔴 مخزون منخفض | Low Stock")
+    st.caption("المخزون الإجمالي أقل من 50% من المبيع الشهري | Total stock < 50% of monthly sales")
+    low_stock = []
+    for sku_key,info in inv_map.items():
+        total=info["total_stock"]; sales=info["sales"]
+        if sales>0 and total<sales*0.5:
+            pct=round(total/sales*100,1)
+            low_stock.append((info["sku"],total,sales,pct,info["img"]))
+    low_stock.sort(key=lambda x:x[3])
+    if not inv_map:
+        st.info("ارفع ملف المخزون أولاً | Upload Inventory first")
+    elif not low_stock:
+        st.success("✅ كل المخزون كافي | All stock levels sufficient (≥ 50% of sales)")
+    else:
+        df_low = pd.DataFrame(low_stock, columns=["SKU","Total Stock","Monthly Sales","Stock %","Image URL"])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_low,"low_stock")
+        with c2: st.error(f"🔴 SKUs منخفضة | Low Stock SKUs: {len(low_stock)}")
+        for sku,total,sales,pct,img in low_stock:
+            if pct<20:   color="#ef4444"; label="⛔ حرج جداً | Critical"
+            elif pct<35: color="#f97316"; label="🔴 منخفض جداً | Very Low"
+            else:        color="#eab308"; label="🟡 منخفض | Low"
+            c_img,c_info = st.columns([1,6])
+            with c_img: show_img(img,70)
+            with c_info:
+                st.markdown(f"**SKU:** `{sku}`")
+                show_sku_inv(sku)
+                st.progress(min(pct/100,1.0))
+                st.markdown(f"{label} — **{pct}%** &nbsp;|&nbsp; مخزون | Stock: **{total}** / مبيع | Sales: **{sales}**")
+            st.divider()
+
+# ══ TAB 11 — منتهية الصلاحية ══
+with tab11:
+    st.subheader("🗂️ الجدولة منتهية الصلاحية | Expired Schedule")
+    data_ex = get_cached(expired_sheet)
+    if len(data_ex) <= 1:
+        st.info("لا يوجد منتهي | No expired items.")
+    else:
+        rows_ex = data_ex[1:]
+        df_ex = pd.DataFrame(rows_ex, columns=data_ex[0])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_ex,"expired")
+        with c2:
+            if st.button("🗑️ مسح الكل | Clear All", type="secondary", key="btn_clear_ex", use_container_width=True):
+                st.session_state["confirm_clear_ex"] = True
+        confirm_clear("clear_ex", expired_sheet, "المنتهية | Expired")
+        st.write(f"**الإجمالي | Total: {len(rows_ex)}**")
+        for i,row in enumerate(rows_ex, start=2):
+            while len(row)<7: row.append("")
+            asn,sku,qty,sd,img,dadd,dexp = row[0],row[1],row[2],row[3],row[4],row[5],row[6]
+            c_img,c_info,c_del = st.columns([1,5,1])
+            with c_img: show_img(img,70)
+            with c_info:
+                st.markdown(f"**ASN:** `{asn}` | **SKU:** `{sku}`")
+                show_sku_inv(sku)
+                st.markdown(f"**Quantity | الكمية:** {qty}")
+                st.caption(f"📅 Schedule | جدولة: {sd} | 🗂️ Expired | انتهى: {dexp}")
+            with c_del:
+                if st.button("🗑️", key=f"del_ex_{i}"):
+                    safe_delete(expired_sheet,i); st.rerun()
+            st.divider()
+
+# ══ TAB 12 — الإعدادات ══
+with tab12:
+    st.subheader("⚙️ الإعدادات | Settings")
+    st.caption("الإعدادات محفوظة في جوجل شيت وتبقى بعد الإغلاق | Settings saved in Google Sheets and persist")
+    current_settings = load_settings()
+    st.markdown("### 🏭 المستودعات المستثناة من حساب المخزون | Excluded Warehouses")
+    st.caption("المستودعات المستثناة لا تُحسب في الإجمالي وتظهر بشطب | Excluded warehouses are struck-through and not counted")
+    all_wh = sorted({r[1].strip() for r in get_cached(inventory_sheet)[1:] if len(r)>1 and r[1].strip()})
+    current_ex_str  = current_settings.get("excluded_warehouses","")
+    current_ex_list = [w.strip() for w in current_ex_str.split(",") if w.strip()]
+    if all_wh:
+        st.write("**المستودعات المتاحة | Available Warehouses:**")
+        selected_ex = st.multiselect("اختر المستودعات المستثناة | Select excluded warehouses:",
+            options=all_wh, default=[w for w in current_ex_list if w in all_wh], key="wh_multi")
+    else:
+        st.info("ارفع ملف المخزون أولاً لتظهر المستودعات | Upload inventory first to see warehouses")
+        manual = st.text_input("أو اكتب يدوياً | Or type manually (comma-separated):", value=current_ex_str, key="wh_manual")
+        selected_ex = [w.strip() for w in manual.split(",") if w.strip()]
+    if st.button("💾 حفظ الإعدادات | Save Settings", type="primary"):
+        save_setting("excluded_warehouses",",".join(selected_ex))
+        st.success("✅ تم الحفظ | Saved — ستُطبَّق عند إعادة التحميل | Will apply on next reload")
+        st.rerun()
+    st.divider()
+    st.markdown("### 📋 الإعدادات الحالية | Current Settings")
+    if excluded_wh:
+        st.warning(f"🚫 مستودعات مستثناة الآن | Currently excluded: **{', '.join(sorted(excluded_wh))}**")
+    else:
+        st.success("✅ لا توجد مستودعات مستثناة | All warehouses included in totals")
+    if inv_map and all_wh:
+        st.markdown("### 🏭 ملخص المستودعات | Warehouse Summary")
+        wh_totals = {}
+        for info in inv_map.values():
+            for wh,stk in info["warehouses"].items():
+                wh_totals[wh] = wh_totals.get(wh,0)+stk
+        wh_df = pd.DataFrame(
+            [(wh,stk,"🚫 مستثنى | Excluded" if wh.upper() in excluded_wh else "✅ محسوب | Included")
+             for wh,stk in sorted(wh_totals.items())],
+            columns=["Warehouse | المستودع","Total Stock | إجمالي المخزون","Status | الحالة"])
+        st.dataframe(wh_df, use_container_width=True, hide_index=True)
