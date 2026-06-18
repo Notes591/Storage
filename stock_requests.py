@@ -221,10 +221,28 @@ def make_empty_template(columns):
     return to_excel(pd.DataFrame(columns=columns))
 
 def parse_excel_date(val):
+    if val is None:
+        return None
     try:
         if isinstance(val,(int,float)):
             return datetime(1899,12,30)+timedelta(days=int(val))
-        return datetime.strptime(str(val).strip()[:10],"%Y-%m-%d")
+        s = str(val).strip().replace(" ","").replace(" ","")
+        # try YYYY-MM-DD
+        try:
+            return datetime.strptime(s[:10],"%Y-%m-%d")
+        except:
+            pass
+        # try DD/MM/YYYY
+        try:
+            return datetime.strptime(s[:10],"%d/%m/%Y")
+        except:
+            pass
+        # try MM/DD/YYYY
+        try:
+            return datetime.strptime(s[:10],"%m/%d/%Y")
+        except:
+            pass
+        return None
     except:
         return None
 
@@ -999,8 +1017,8 @@ with tab7:
         links_map2 = get_links_map()
         for asn, grp in asn_res_groups.items():
             st.markdown(
-                f'<div style="border-left:5px solid #f59e0b;background:#1a1500;border-radius:10px;padding:8px 14px;margin-bottom:4px;">'
-                f'<b>ASN:</b> {asn} &nbsp;|&nbsp; 📅 <b>موعد قديم | Old Date:</b> {grp["old_date"]}</div>',
+                f'<div style="border-left:5px solid #f59e0b;background:#1a1500;border-radius:10px;padding:8px 14px;margin-bottom:4px;color:white;">'
+                f'<span style="font-size:15px;font-weight:bold;color:white;">ASN: {asn}</span><br><span style="color:white;">📅 <b style="font-size:16px;color:#fcd34d;">موعد قديم | Old Date: {grp["old_date"]}</b></span></div>',
                 unsafe_allow_html=True)
             if grp["reason"]:
                 st.caption(f"📝 سبب التعديل | Reason: {grp['reason']}")
