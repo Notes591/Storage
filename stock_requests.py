@@ -22,7 +22,7 @@ TABS_CONFIG = {
     "Approved":          ["SKU","Quantity Requested","Quantity Approved","Image URL","Date Added","Date Approved"],
     "Unavailable":       ["SKU","Quantity","Image URL","Date Added","Date Marked Unavailable"],
     "Ordered":           ["SKU","Quantity","Image URL","Date Added","Order Count","Notes"],
-    "Scheduled":         ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added"],
+    "Scheduled":         ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelledSchedule": ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Cancel Reason","Date Cancelled"],
     "Rescheduled":       ["ASN","SKU","Quantity","Old Schedule Date","Image URL","Date Added","Reschedule Reason","Date Moved"],
     "Expired":           ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Date Expired"],
@@ -135,22 +135,32 @@ def build_inv_map(excluded_wh: set):
     return inv_map
 
 # ══ Sheets helpers ══
-def safe_append(sheet, row, retries=4, delay=1):
-    for _ in range(retries):
+def safe_append(sheet, row, retries=5, delay=1):
+    for attempt in range(retries):
         try:
             sheet.append_row(row, value_input_option="USER_ENTERED")
             clear_cache(sheet)
             return True
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                time.sleep(delay * (2 ** attempt))  # exponential backoff
+            else:
+                time.sleep(delay)
         except Exception:
             time.sleep(delay)
     return False
 
-def safe_delete(sheet, row_idx, retries=4, delay=1):
-    for _ in range(retries):
+def safe_delete(sheet, row_idx, retries=5, delay=1):
+    for attempt in range(retries):
         try:
             sheet.delete_rows(row_idx)
             clear_cache(sheet)
             return True
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                time.sleep(delay * (2 ** attempt))
+            else:
+                time.sleep(delay)
         except Exception:
             time.sleep(delay)
     return False
@@ -165,14 +175,21 @@ def safe_delete_all(sheet):
     except Exception:
         return False
 
-def safe_batch_append(sheet, rows_data, retries=4, delay=1):
+def safe_batch_append(sheet, rows_data, retries=5, delay=1):
     if not rows_data:
         return True
-    for _ in range(retries):
+    for attempt in range(retries):
         try:
             sheet.append_rows(rows_data, value_input_option="USER_ENTERED")
             clear_cache(sheet)
             return True
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                wait = delay * (2 ** attempt)
+                st.toast(f"⏳ Google Sheets API limit — waiting {wait}s...", icon="⏳")
+                time.sleep(wait)
+            else:
+                time.sleep(delay)
         except Exception:
             time.sleep(delay)
     return False
@@ -226,15 +243,21 @@ def check_expired_scheduled():
     for i, row in enumerate(data[1:], start=2):
         while len(row) < 6: row.append("")
         d = parse_excel_date(row[3])
-        if d and today > d.date() + timedelta(days=1):
-            expired_rows.append(row + [now_str()])
+        if d and today > d.date():
+            expired_rows.append(row[:6] + [now_str()])
         else:
             keep.append(i)
     if expired_rows:
         safe_batch_append(expired_sheet, expired_rows)
         del_idx = sorted([x for x in range(2,len(data[1:])+2) if x not in keep], reverse=True)
-        for idx in del_idx:
-            safe_delete(scheduled_sheet, idx)
+        # batch delete: حذف نطاق واحد لو متتالية
+        if del_idx:
+            try:
+                scheduled_sheet.delete_rows(del_idx[-1], del_idx[0] - del_idx[-1] + 1)
+                clear_cache(scheduled_sheet)
+            except Exception:
+                for idx in del_idx:
+                    safe_delete(scheduled_sheet, idx)
 
 # ══ CSS ══
 st.markdown("""
@@ -671,12 +694,19 @@ with tab5:
         rows_sch_sorted = sorted(rows_sch, key=sort_key)
 
         # تجميع SKUs تحت كل ASN
+        # جلب ASNs اللي اتشيكت
+        chk_data_t5 = get_cached(sheets["Check"])
+        checked_asns = set()
+        if len(chk_data_t5) > 1:
+            for cr in chk_data_t5[1:]:
+                if cr: checked_asns.add(cr[0].strip().upper())
+
         asn_groups = {}
         for r in rows_sch_sorted:
             while len(r)<6: r.append("")
             asn = r[0].strip()
             if asn not in asn_groups:
-                asn_groups[asn] = {"date":r[3],"skus":[]}
+                asn_groups[asn] = {"date":r[3],"skus":[],"checked": asn.upper() in checked_asns}
             asn_groups[asn]["skus"].append(r)
 
         df_sch = pd.DataFrame(rows_sch, columns=data_sch[0])
@@ -696,7 +726,7 @@ with tab5:
                 continue
             sdate   = group["date"]
             pd_date = parse_excel_date(sdate)
-            is_exp  = pd_date and today > pd_date.date() + timedelta(days=1)
+            is_exp  = pd_date and today > pd_date.date()
             skus_   = group["skus"]
             has_alert = any(
                 inv_map.get(r[1].strip().upper(),{}).get("sales",0) > 0 and
@@ -719,7 +749,8 @@ with tab5:
                 c_img2,c_info2 = st.columns([1,6])
                 with c_img2: show_img(img,60)
                 with c_info2:
-                    st.markdown(f"&nbsp;&nbsp;**SKU:** `{sku}` | **Qty:** {qty}")
+                    note_badge = ' &nbsp;<span style="background:#8b5cf6;color:white;border-radius:5px;padding:1px 7px;font-size:11px;">☑️ تم تشييكه | Checked</span>' if (len(r)>6 and "تم تشييكه" in str(r[6])) else ""
+                    st.markdown(f"&nbsp;&nbsp;**SKU:** `{sku}` | **Qty:** {qty}" + note_badge, unsafe_allow_html=True)
                     show_sku_inv(sku)
                     if is_al:
                         st.markdown(f"&nbsp;&nbsp;🔴 **تنبيه | Alert:** الكمية ({qty}) > المبيع ({monthly})")
@@ -870,7 +901,8 @@ with tab_check:
                 if st.button(f"↩️ رجّع للجدولة | Return to Schedule — {asn}", key=f"ret_chk_{asn}", type="primary"):
                     dn = now_str()
                     lm = get_links_map()
-                    to_add = [[r[0],r[1],r[2],r[3],lm.get(r[1].strip().upper(),r[4]),dn] for r in skus_]
+                    # نضيف ملاحظة "تم تشييكه" في حقل Notes
+                    to_add = [[r[0],r[1],r[2],r[3],lm.get(r[1].strip().upper(),r[4]),dn,"تم تشييكه | Checked",""] for r in skus_]
                     safe_batch_append(scheduled_sheet, to_add)
                     for idx in sorted(grp["indices"], reverse=True):
                         safe_delete(sheets["Check"], idx)
