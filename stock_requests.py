@@ -14,7 +14,18 @@ st.set_page_config(page_title="📦 Stock Requests | طلبات المخزون",
 scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
 client = gspread.authorize(creds)
-ss = client.open("Complaints")
+
+def open_spreadsheet(retries=5, delay=2):
+    for attempt in range(retries):
+        try:
+            return client.open("Complaints")
+        except gspread.exceptions.APIError as e:
+            if attempt < retries - 1:
+                time.sleep(delay * (2 ** attempt))
+            else:
+                raise e
+
+ss = open_spreadsheet()
 
 # ══ الأوراق ══
 TABS_CONFIG = {
@@ -31,20 +42,51 @@ TABS_CONFIG = {
     "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
 }
 
+def get_or_create_worksheet(tab, headers, retries=5, delay=2):
+    for attempt in range(retries):
+        try:
+            return ss.worksheet(tab)
+        except gspread.exceptions.WorksheetNotFound:
+            try:
+                ws = ss.add_worksheet(title=tab, rows="3000", cols="12")
+                ws.append_row(headers)
+                return ws
+            except gspread.exceptions.APIError as e:
+                if attempt < retries - 1:
+                    time.sleep(delay * (2 ** attempt))
+                else:
+                    raise e
+        except gspread.exceptions.APIError as e:
+            if attempt < retries - 1:
+                time.sleep(delay * (2 ** attempt))
+            else:
+                raise e
+
 sheets = {}
 for tab, headers in TABS_CONFIG.items():
-    try:
-        ws = ss.worksheet(tab)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = ss.add_worksheet(title=tab, rows="3000", cols="12")
-        ws.append_row(headers)
-    sheets[tab] = ws
+    sheets[tab] = get_or_create_worksheet(tab, headers)
 
-try:
-    links_ws = ss.worksheet("links n")
-except gspread.exceptions.WorksheetNotFound:
-    links_ws = ss.add_worksheet(title="links n", rows="2000", cols="2")
-    links_ws.append_row(["SKU","Image URL"])
+def get_or_create_links_ws(retries=5, delay=2):
+    for attempt in range(retries):
+        try:
+            return ss.worksheet("links n")
+        except gspread.exceptions.WorksheetNotFound:
+            try:
+                ws = ss.add_worksheet(title="links n", rows="2000", cols="2")
+                ws.append_row(["SKU","Image URL"])
+                return ws
+            except gspread.exceptions.APIError as e:
+                if attempt < retries - 1:
+                    time.sleep(delay * (2 ** attempt))
+                else:
+                    raise e
+        except gspread.exceptions.APIError as e:
+            if attempt < retries - 1:
+                time.sleep(delay * (2 ** attempt))
+            else:
+                raise e
+
+links_ws = get_or_create_links_ws()
 
 requests_sheet    = sheets["Requests"]
 approved_sheet    = sheets["Approved"]
@@ -143,7 +185,7 @@ def safe_append(sheet, row, retries=5, delay=1):
             return True
         except gspread.exceptions.APIError as e:
             if "429" in str(e) or "quota" in str(e).lower():
-                time.sleep(delay * (2 ** attempt))  # exponential backoff
+                time.sleep(delay * (2 ** attempt))
             else:
                 time.sleep(delay)
         except Exception:
@@ -226,18 +268,15 @@ def parse_excel_date(val):
     try:
         if isinstance(val,(int,float)):
             return datetime(1899,12,30)+timedelta(days=int(val))
-        s = str(val).strip().replace(" ","").replace(" ","")
-        # try YYYY-MM-DD
+        s = str(val).strip().replace(" ","").replace(" ","")
         try:
             return datetime.strptime(s[:10],"%Y-%m-%d")
         except:
             pass
-        # try DD/MM/YYYY
         try:
             return datetime.strptime(s[:10],"%d/%m/%Y")
         except:
             pass
-        # try MM/DD/YYYY
         try:
             return datetime.strptime(s[:10],"%m/%d/%Y")
         except:
@@ -268,7 +307,6 @@ def check_expired_scheduled():
     if expired_rows:
         safe_batch_append(expired_sheet, expired_rows)
         del_idx = sorted([x for x in range(2,len(data[1:])+2) if x not in keep], reverse=True)
-        # batch delete: حذف نطاق واحد لو متتالية
         if del_idx:
             try:
                 scheduled_sheet.delete_rows(del_idx[-1], del_idx[0] - del_idx[-1] + 1)
@@ -284,6 +322,26 @@ st.markdown("""
 .stTabs [data-baseweb="tab"]{background:#1e293b;color:white;border-radius:8px;padding:6px 12px;font-weight:bold;font-size:11px;}
 .stTabs [aria-selected="true"]{background:#3b82f6!important;}
 .wh-badge{display:inline-block;border-radius:6px;padding:2px 9px;margin:2px;font-size:12px;}
+.cancel-notif-card{
+    background: linear-gradient(135deg,#2d0a0a,#1a0000);
+    border: 1px solid #ef4444;
+    border-left: 5px solid #ef4444;
+    border-radius:10px;
+    padding:10px 14px;
+    margin-bottom:8px;
+    color:white;
+}
+.cancel-notif-card .asn-num{font-size:16px;font-weight:bold;color:#fca5a5;}
+.cancel-notif-card .sku-chip{
+    display:inline-block;
+    background:#4b1010;
+    color:#fca5a5;
+    border-radius:5px;
+    padding:1px 7px;
+    margin:2px;
+    font-size:11px;
+}
+.cancel-notif-card .reason-text{color:#fcd34d;font-size:12px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -292,8 +350,69 @@ if "expired_checked" not in st.session_state:
     check_expired_scheduled()
     st.session_state["expired_checked"] = True
 
+if "check_cancel_notifications" not in st.session_state:
+    st.session_state["check_cancel_notifications"] = []
+
 excluded_wh = get_excluded_warehouses()
 inv_map     = build_inv_map(excluded_wh)
+
+# ══════════════════════════════════════════════
+# ══ SIDEBAR — إشعارات الكنسل ══
+# ══════════════════════════════════════════════
+def render_sidebar_notifications():
+    notifs = st.session_state.get("check_cancel_notifications", [])
+    if not notifs:
+        return
+    with st.sidebar:
+        st.markdown("## 🔔 إشعارات الكنسل | Cancel Alerts")
+        st.markdown(f"**{len(notifs)} إشعار نشط | Active Alerts**")
+        st.markdown("---")
+        links_map_sb = get_links_map()
+        for ni, notif in enumerate(notifs):
+            asn   = notif.get("asn","")
+            sdate = notif.get("sdate","")
+            skus  = notif.get("skus",[])
+            reason= notif.get("reason","")
+            ts    = notif.get("ts","")
+
+            # بناء الـ SKU chips مع الصور
+            sku_chips_html = ""
+            for sk in skus[:5]:
+                sku_chips_html += f'<span class="sku-chip">{sk}</span>'
+            if len(skus) > 5:
+                sku_chips_html += f'<span class="sku-chip">+{len(skus)-5} more</span>'
+
+            st.markdown(f"""
+<div class="cancel-notif-card">
+  <div>🚫 <span class="asn-num">ASN: {asn}</span></div>
+  <div style="font-size:12px;color:#94a3b8;">📅 {sdate}</div>
+  <div style="margin:6px 0;">{sku_chips_html}</div>
+  <div class="reason-text">📝 {reason if reason else '—'}</div>
+  <div style="font-size:10px;color:#64748b;margin-top:4px;">🕐 {ts}</div>
+</div>
+""", unsafe_allow_html=True)
+
+            # عرض الصور بشكل مصغر
+            img_cols = st.columns(min(len(skus[:4]), 4))
+            for ci2, sk in enumerate(skus[:4]):
+                img_url = links_map_sb.get(sk.strip().upper(), "")
+                with img_cols[ci2]:
+                    if img_url and img_url.startswith("http"):
+                        st.image(img_url, width=55, caption=sk[:8])
+                    else:
+                        st.markdown(f"🖼️ `{sk[:8]}`")
+
+            if st.button(f"✖️ حذف | Remove #{ni+1}", key=f"sb_rm_notif_{ni}", use_container_width=True):
+                st.session_state["check_cancel_notifications"].pop(ni)
+                st.rerun()
+            st.markdown("---")
+
+        if st.button("🗑️ مسح كل الإشعارات | Clear All", key="sb_clear_all_notifs",
+                     use_container_width=True, type="secondary"):
+            st.session_state["check_cancel_notifications"] = []
+            st.rerun()
+
+render_sidebar_notifications()
 
 # ══ UI helpers ══
 def show_img(img, width=75):
@@ -458,7 +577,6 @@ with tab1:
 
         confirm_clear("clear_req", requests_sheet, "الطلبات | Requests")
 
-        # بناء قائمة SKUs الموجودة في Ordered
         ordered_data = get_cached(ordered_sheet)
         ordered_skus = {}
         if len(ordered_data) > 1:
@@ -685,7 +803,6 @@ with tab5:
                     if pd_:
                         ds = pd_.strftime("%Y-%m-%d")
                     else:
-                        # حاول تقرأ التاريخ من الـ cell مباشرة
                         ds = str(dval).strip()[:10] if dval else ""
                     pair = (asn.upper(),sku.upper())
                     if asn and asn.lower()!="nan":
@@ -709,13 +826,17 @@ with tab5:
     else:
         rows_sch = data_sch[1:]
 
-        # ترتيب من الأقرب للأبعد
         def sort_key(r):
             d = parse_excel_date(r[3] if len(r)>3 else "")
             return d if d else datetime(2099,1,1)
         rows_sch_sorted = sorted(rows_sch, key=sort_key)
 
-        # تجميع SKUs تحت كل ASN
+        # جلب الإشعارات لعرض علامة بجانب ASN
+        cancel_notif_asns = {
+            n["asn"].upper()
+            for n in st.session_state.get("check_cancel_notifications", [])
+        }
+
         # جلب ASNs اللي اتشيكت
         chk_data_t5 = get_cached(sheets["Check"])
         checked_asns = set()
@@ -754,14 +875,57 @@ with tab5:
                 inv_map.get(r[1].strip().upper(),{}).get("sales",0) > 0 and
                 _to_int(r[2]) > inv_map.get(r[1].strip().upper(),{}).get("sales",0)
                 for r in skus_)
+
+            # هل عنده إشعار كنسل؟
+            has_cancel_notif = asn.upper() in cancel_notif_asns
+
             border = "#ef4444" if has_alert else "#f59e0b" if is_exp else "#3b82f6"
             bg     = "#2d1515" if has_alert else "#2d2000" if is_exp else "#0f172a"
 
-            st.markdown(f'<div style="border-left:5px solid {border};background:{bg};color:white;border-radius:10px;padding:8px 14px;margin-bottom:4px;">'
-                
-                f'<b>ASN:</b> {asn} &nbsp;|&nbsp; 📅 <b>تاريخ الجدولة | Schedule Date:</b> <b>{sdate}</b></div>',
+            # ══ ASN Header ══
+            cancel_badge = ""
+            if has_cancel_notif:
+                cancel_badge = ' &nbsp;<span style="background:#7f1d1d;color:#fca5a5;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:bold;">🚫 اتشيك واتكنسل | Checked & Cancelled</span>'
+
+            st.markdown(
+                f'<div style="border-left:5px solid {border};background:{bg};color:white;border-radius:10px;padding:8px 14px;margin-bottom:4px;">'
+                f'<b>ASN:</b> {asn} &nbsp;|&nbsp; 📅 <b>تاريخ الجدولة | Schedule Date:</b> <b>{sdate}</b>'
+                f'{cancel_badge}</div>',
                 unsafe_allow_html=True)
 
+            # ══ عرض إشعار الكنسل التفصيلي بجانب الـ ASN ══
+            if has_cancel_notif:
+                # إيجاد الإشعار المناسب
+                for notif in st.session_state.get("check_cancel_notifications", []):
+                    if notif.get("asn","").upper() == asn.upper():
+                        notif_skus_list = notif.get("skus", [])
+                        notif_reason    = notif.get("reason","")
+                        notif_ts        = notif.get("ts","")
+
+                        with st.container():
+                            st.markdown(
+                                f'<div style="background:#1a0000;border:1px solid #ef4444;border-radius:8px;'
+                                f'padding:8px 12px;margin:4px 0 8px 0;">'
+                                f'<span style="color:#fca5a5;font-weight:bold;">🚫 تم الكنسل من التشييك | Cancelled from Check</span><br>'
+                                f'<span style="color:#fcd34d;font-size:12px;">📝 السبب | Reason: {notif_reason if notif_reason else "—"}</span><br>'
+                                f'<span style="color:#94a3b8;font-size:11px;">🕐 {notif_ts}</span>'
+                                f'</div>',
+                                unsafe_allow_html=True)
+
+                            # صور الـ SKUs المكنسلة
+                            if notif_skus_list:
+                                lm_t5 = get_links_map()
+                                img_cols_t5 = st.columns(min(len(notif_skus_list[:6]), 6))
+                                for ci3, sk3 in enumerate(notif_skus_list[:6]):
+                                    img_url3 = lm_t5.get(sk3.strip().upper(), "")
+                                    with img_cols_t5[ci3]:
+                                        if img_url3 and img_url3.startswith("http"):
+                                            st.image(img_url3, width=60, caption=sk3[:10])
+                                        else:
+                                            st.markdown(f"🖼️ `{sk3[:10]}`")
+                        break
+
+            # ══ SKUs ══
             for r in skus_:
                 while len(r)<6: r.append("")
                 sku,qty,img = r[1].strip(),r[2],r[4]
@@ -776,12 +940,6 @@ with tab5:
                     show_sku_inv(sku)
                     if is_al:
                         st.markdown(f"&nbsp;&nbsp;🔴 **تنبيه | Alert:** الكمية ({qty}) > المبيع ({monthly})")
-
-            # إشعار كنسل من تاب Check لهذا ASN
-            chk_notifs = st.session_state.get("check_cancel_notifications",[])
-            for notif in chk_notifs:
-                if f"ASN **{asn}**" in notif:
-                    st.error(notif)
 
             ca,cb,cc,cd = st.columns(4)
             with ca:
@@ -801,13 +959,12 @@ with tab5:
                         for r in skus_:
                             while len(r)<6: r.append("")
                             sku2 = r[1].strip()
-                            flag = "" if (all_selected or selected_skus.get(sku2,False)) else "highlighted" if not all_selected and not selected_skus.get(sku2,True) else ""
-                            # لو اخترنا بعض: الغير محدد يتعلّم highlighted
                             if not all_selected:
                                 flag = "highlighted" if selected_skus.get(sku2,False) else ""
+                            else:
+                                flag = ""
                             to_add.append([r[0],r[1],r[2],r[3],r[4],dn,"",flag])
                         safe_batch_append(sheets["Check"], to_add)
-                        # حذف من Scheduled
                         sch_d = get_cached(scheduled_sheet, force=True)
                         del_i = [i2 for i2,sr in enumerate(sch_d[1:],start=2) if sr[0].strip().upper()==asn.upper()]
                         for i2 in sorted(del_i,reverse=True):
@@ -844,18 +1001,23 @@ with tab5:
             st.divider()
 
 
-
 # ══ TAB CHECK — تشييك ══
 with tab_check:
     st.subheader("☑️ قيد التشييك | Under Check")
     st.caption("ASNs المحولة للتشييك | ASNs moved to check — رجّعها للجدولة أو كنسلها | Return to schedule or cancel")
 
-    # إشعارات الكنسل من التشييك (موجودة في session state)
+    # إشعارات الكنسل من التشييك
     if st.session_state.get("check_cancel_notifications"):
         st.markdown("---")
         st.markdown("### 🔔 إشعارات الكنسل الأخيرة | Recent Cancel Notifications")
         for notif in st.session_state["check_cancel_notifications"]:
-            st.error(notif)
+            asn_n   = notif.get("asn","")
+            sdate_n = notif.get("sdate","")
+            skus_n  = notif.get("skus",[])
+            reason_n= notif.get("reason","")
+            ts_n    = notif.get("ts","")
+            skus_str = ", ".join(skus_n[:5]) + ("..." if len(skus_n)>5 else "")
+            st.error(f"🚫 ASN **{asn_n}** (📅 {sdate_n}) — SKUs: {skus_str} — السبب | Reason: {reason_n} — {ts_n}")
         if st.button("✖️ مسح الإشعارات | Clear Notifications", key="clear_notifs"):
             st.session_state["check_cancel_notifications"] = []
             st.rerun()
@@ -866,7 +1028,6 @@ with tab_check:
         st.info("لا يوجد | No items under check.")
     else:
         rows_chk = data_chk[1:]
-        # تجميع حسب ASN
         chk_groups = {}
         for idx, r in enumerate(rows_chk, start=2):
             while len(r) < 8: r.append("")
@@ -889,7 +1050,6 @@ with tab_check:
         for asn, grp in chk_groups.items():
             sdate = grp["date"]
             skus_ = grp["skus"]
-            # هل في SKUs مميزة (highlighted)
             has_highlighted = any(len(r)>7 and r[7]=="highlighted" for r in skus_)
 
             st.markdown(
@@ -917,13 +1077,11 @@ with tab_check:
                     show_sku_inv(sku)
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            # أزرار التحكم
             ca,cb = st.columns(2)
             with ca:
                 if st.button(f"↩️ رجّع للجدولة | Return to Schedule — {asn}", key=f"ret_chk_{asn}", type="primary"):
                     dn = now_str()
                     lm = get_links_map()
-                    # نضيف ملاحظة "تم تشييكه" في حقل Notes
                     to_add = [[r[0],r[1],r[2],r[3],lm.get(r[1].strip().upper(),r[4]),dn,"تم تشييكه | Checked",""] for r in skus_]
                     safe_batch_append(scheduled_sheet, to_add)
                     for idx in sorted(grp["indices"], reverse=True):
@@ -940,16 +1098,22 @@ with tab_check:
                         safe_batch_append(cancelled_sheet, to_add)
                         for idx in sorted(grp["indices"], reverse=True):
                             safe_delete(sheets["Check"], idx)
-                        # إشعار للجدولة
-                        hl_skus = [r[1].strip() for r in skus_ if r[7]=="highlighted"]
-                        all_skus = [r[1].strip() for r in skus_]
-                        notif_skus = hl_skus if hl_skus else all_skus
-                        notif = (f"🚫 ASN **{asn}** (📅 {sdate}) — تم الكنسل | Cancelled — "
-                                 f"SKUs: {', '.join(notif_skus[:5])}{'...' if len(notif_skus)>5 else ''} "
-                                 f"— السبب | Reason: {cancel_reason} — {dn}")
+
+                        # ══ إشعار الكنسل — الصيغة الجديدة كـ dict ══
+                        hl_skus = [r[1].strip() for r in skus_ if len(r)>7 and r[7]=="highlighted"]
+                        all_skus_list = [r[1].strip() for r in skus_]
+                        notif_skus_final = hl_skus if hl_skus else all_skus_list
+
+                        new_notif = {
+                            "asn":    asn,
+                            "sdate":  sdate,
+                            "skus":   notif_skus_final,
+                            "reason": cancel_reason,
+                            "ts":     dn,
+                        }
                         if "check_cancel_notifications" not in st.session_state:
                             st.session_state["check_cancel_notifications"] = []
-                        st.session_state["check_cancel_notifications"].insert(0, notif)
+                        st.session_state["check_cancel_notifications"].insert(0, new_notif)
                         st.session_state["check_cancel_notifications"] = st.session_state["check_cancel_notifications"][:10]
                         st.success("🚫 تم الكنسل | Cancelled")
                         st.rerun()
@@ -1000,7 +1164,6 @@ with tab7:
         st.info("لا يوجد | No rescheduled items.")
     else:
         rows_res = data_res[1:]
-        # تجميع حسب ASN
         asn_res_groups = {}
         for idx, r in enumerate(rows_res, start=2):
             while len(r)<8: r.append("")
@@ -1022,7 +1185,8 @@ with tab7:
         for asn, grp in asn_res_groups.items():
             st.markdown(
                 f'<div style="border-left:5px solid #f59e0b;background:#1a1500;border-radius:10px;padding:8px 14px;margin-bottom:4px;color:white;">'
-                f'<span style="font-size:15px;font-weight:bold;color:white;">ASN: {asn}</span><br><span style="color:white;">📅 <b style="font-size:16px;color:#fcd34d;">موعد قديم | Old Date: {grp["old_date"]}</b></span></div>',
+                f'<span style="font-size:15px;font-weight:bold;color:white;">ASN: {asn}</span><br>'
+                f'<span style="color:white;">📅 <b style="font-size:16px;color:#fcd34d;">موعد قديم | Old Date: {grp["old_date"]}</b></span></div>',
                 unsafe_allow_html=True)
             if grp["reason"]:
                 st.caption(f"📝 سبب التعديل | Reason: {grp['reason']}")
