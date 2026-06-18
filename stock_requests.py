@@ -682,7 +682,11 @@ with tab5:
                     dval = str(row[date_c]).strip() if date_c else ""
                     img  = links_map.get(sku.upper(),"")
                     pd_  = parse_excel_date(dval)
-                    ds   = pd_.strftime("%Y-%m-%d") if pd_ else dval
+                    if pd_:
+                        ds = pd_.strftime("%Y-%m-%d")
+                    else:
+                        # حاول تقرأ التاريخ من الـ cell مباشرة
+                        ds = str(dval).strip()[:10] if dval else ""
                     pair = (asn.upper(),sku.upper())
                     if asn and asn.lower()!="nan":
                         if pair in ex_pairs:
