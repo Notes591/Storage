@@ -40,6 +40,7 @@ TABS_CONFIG = {
     "Inventory":         ["SKU","Warehouse","Stock","Monthly Sales","Image URL","Date Uploaded"],
     "Settings":          ["Key","Value"],
     "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
+    "CancelNotifications": ["ASN","SKUs","Schedule Date","Reason","Timestamp"],
 }
 
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
@@ -96,8 +97,9 @@ scheduled_sheet   = sheets["Scheduled"]
 cancelled_sheet   = sheets["CancelledSchedule"]
 reschedule_sheet  = sheets["Rescheduled"]
 expired_sheet     = sheets["Expired"]
-inventory_sheet   = sheets["Inventory"]
-settings_sheet    = sheets["Settings"]
+inventory_sheet      = sheets["Inventory"]
+settings_sheet       = sheets["Settings"]
+cancel_notif_sheet   = sheets["CancelNotifications"]
 
 # ══ كاش ══
 def get_cached(sheet, force=False):
@@ -291,6 +293,59 @@ def dl_btn(df, prefix, label="⬇️ Excel | Download"):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True)
 
+# ══ CancelNotifications — حفظ/تحميل/تنظيف ══
+def load_cancel_notifications():
+    """تحمّل الإشعارات من Sheets وتحذف المنتهية تلقائياً"""
+    data = get_cached(cancel_notif_sheet, force=False)
+    today = datetime.now().date()
+    notifs = []
+    rows_to_delete = []
+    if len(data) <= 1:
+        return notifs
+    for i, row in enumerate(data[1:], start=2):
+        while len(row) < 5: row.append("")
+        asn, skus_str, sdate, reason, ts = row[0], row[1], row[2], row[3], row[4]
+        if not asn.strip():
+            continue
+        # تحقق من انتهاء تاريخ الجدولة
+        pd_ = parse_excel_date(sdate)
+        if pd_ and today > pd_.date():
+            rows_to_delete.append(i)
+            continue
+        notifs.append({
+            "asn":    asn.strip(),
+            "skus":   [s.strip() for s in skus_str.split("|") if s.strip()],
+            "sdate":  sdate.strip(),
+            "reason": reason.strip(),
+            "ts":     ts.strip(),
+        })
+    # حذف المنتهية من الشيت
+    for idx in sorted(rows_to_delete, reverse=True):
+        safe_delete(cancel_notif_sheet, idx)
+    if rows_to_delete:
+        clear_cache(cancel_notif_sheet)
+    return notifs
+
+def save_cancel_notification(asn, skus_list, sdate, reason, ts):
+    """يحفظ إشعار كنسل جديد في Sheets"""
+    skus_str = "|".join(skus_list)
+    safe_append(cancel_notif_sheet, [asn, skus_str, sdate, reason, ts])
+    clear_cache(cancel_notif_sheet)
+
+def delete_cancel_notification_by_asn(asn):
+    """يحذف إشعار معين بالـ ASN"""
+    data = get_cached(cancel_notif_sheet, force=True)
+    for i, row in enumerate(data[1:], start=2):
+        if row and row[0].strip().upper() == asn.strip().upper():
+            safe_delete(cancel_notif_sheet, i)
+            clear_cache(cancel_notif_sheet)
+            return
+
+def delete_all_cancel_notifications():
+    """يمسح كل الإشعارات"""
+    safe_delete_all(cancel_notif_sheet)
+    clear_cache(cancel_notif_sheet)
+
 def check_expired_scheduled():
     data = get_cached(scheduled_sheet, force=True)
     if len(data) <= 1:
@@ -350,7 +405,11 @@ if "expired_checked" not in st.session_state:
     check_expired_scheduled()
     st.session_state["expired_checked"] = True
 
-if "check_cancel_notifications" not in st.session_state:
+# تحميل الإشعارات من Sheets عند كل تشغيل (تدوم بعد الإغلاق)
+if "cancel_notifs_loaded" not in st.session_state:
+    st.session_state["check_cancel_notifications"] = load_cancel_notifications()
+    st.session_state["cancel_notifs_loaded"] = True
+elif "check_cancel_notifications" not in st.session_state:
     st.session_state["check_cancel_notifications"] = []
 
 excluded_wh = get_excluded_warehouses()
@@ -403,12 +462,14 @@ def render_sidebar_notifications():
                         st.markdown(f"🖼️ `{sk[:8]}`")
 
             if st.button(f"✖️ حذف | Remove #{ni+1}", key=f"sb_rm_notif_{ni}", use_container_width=True):
+                delete_cancel_notification_by_asn(notif.get("asn",""))
                 st.session_state["check_cancel_notifications"].pop(ni)
                 st.rerun()
             st.markdown("---")
 
         if st.button("🗑️ مسح كل الإشعارات | Clear All", key="sb_clear_all_notifs",
                      use_container_width=True, type="secondary"):
+            delete_all_cancel_notifications()
             st.session_state["check_cancel_notifications"] = []
             st.rerun()
 
@@ -1019,6 +1080,7 @@ with tab_check:
             skus_str = ", ".join(skus_n[:5]) + ("..." if len(skus_n)>5 else "")
             st.error(f"🚫 ASN **{asn_n}** (📅 {sdate_n}) — SKUs: {skus_str} — السبب | Reason: {reason_n} — {ts_n}")
         if st.button("✖️ مسح الإشعارات | Clear Notifications", key="clear_notifs"):
+            delete_all_cancel_notifications()
             st.session_state["check_cancel_notifications"] = []
             st.rerun()
         st.markdown("---")
@@ -1111,10 +1173,12 @@ with tab_check:
                             "reason": cancel_reason,
                             "ts":     dn,
                         }
+                        # حفظ في Google Sheets (يدوم بعد الإغلاق)
+                        save_cancel_notification(asn, notif_skus_final, sdate, cancel_reason, dn)
                         if "check_cancel_notifications" not in st.session_state:
                             st.session_state["check_cancel_notifications"] = []
                         st.session_state["check_cancel_notifications"].insert(0, new_notif)
-                        st.session_state["check_cancel_notifications"] = st.session_state["check_cancel_notifications"][:10]
+                        st.session_state["check_cancel_notifications"] = st.session_state["check_cancel_notifications"][:50]
                         st.success("🚫 تم الكنسل | Cancelled")
                         st.rerun()
             st.divider()
