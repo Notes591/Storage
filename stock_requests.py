@@ -757,8 +757,8 @@ with tab5:
             border = "#ef4444" if has_alert else "#f59e0b" if is_exp else "#3b82f6"
             bg     = "#2d1515" if has_alert else "#2d2000" if is_exp else "#0f172a"
 
-            st.markdown(
-                f'<div style="border-left:5px solid {border};background:{bg};border-radius:10px;padding:8px 14px;margin-bottom:4px;">'
+            st.markdown(f'<div style="border-left:5px solid {border};background:{bg};color:white;border-radius:10px;padding:8px 14px;margin-bottom:4px;">'
+                
                 f'<b>ASN:</b> {asn} &nbsp;|&nbsp; 📅 <b>تاريخ الجدولة | Schedule Date:</b> <b>{sdate}</b></div>',
                 unsafe_allow_html=True)
 
