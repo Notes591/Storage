@@ -647,7 +647,8 @@ with tab2:
     else:
         rows_ap = data_ap[1:]
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_ap", placeholder="اكتب SKU...")
-        filtered = [r for r in rows_ap if not srch or srch.strip().upper() in r[0].upper()]
+        indexed_ap = [(i+2, r) for i, r in enumerate(rows_ap)]
+        filtered = [(ri, r) for ri, r in indexed_ap if not srch or srch.strip().upper() in r[0].upper()]
         df_ap = pd.DataFrame(rows_ap, columns=data_ap[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_ap,"approved")
@@ -656,8 +657,7 @@ with tab2:
                 st.session_state["confirm_clear_ap"] = True
         confirm_clear("clear_ap", approved_sheet, "الموافقة | Approved")
         st.write(f"**عرض | Showing: {len(filtered)} / {len(rows_ap)}**")
-        for row in filtered:
-            ri = rows_ap.index(row)+2
+        for ri, row in filtered:
             while len(row)<6: row.append("")
             sku,qty_r,qty_a,img,da,dap = row[0],row[1],row[2],row[3],row[4],row[5]
             c_img,c_info,c_del = st.columns([1,5,1])
@@ -684,7 +684,8 @@ with tab3:
     else:
         rows_un = data_un[1:]
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_un", placeholder="اكتب SKU...")
-        filtered = [r for r in rows_un if not srch or srch.strip().upper() in r[0].upper()]
+        indexed_un = [(i+2, r) for i, r in enumerate(rows_un)]
+        filtered = [(ri, r) for ri, r in indexed_un if not srch or srch.strip().upper() in r[0].upper()]
         df_un = pd.DataFrame(rows_un, columns=data_un[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_un,"unavailable")
@@ -693,8 +694,7 @@ with tab3:
                 st.session_state["confirm_clear_un"] = True
         confirm_clear("clear_un", unavailable_sheet, "غير المتوفر | Unavailable")
         st.write(f"**عرض | Showing: {len(filtered)} / {len(rows_un)}**")
-        for row in filtered:
-            ri = rows_un.index(row)+2
+        for ri, row in filtered:
             while len(row)<5: row.append("")
             sku,qty,img,da,dm = row[0],row[1],row[2],row[3],row[4]
             c_img,c_info,c_del = st.columns([1,5,1])
@@ -718,7 +718,8 @@ with tab4:
     else:
         rows_ord = data_ord[1:]
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_ord", placeholder="اكتب SKU...")
-        filtered = [r for r in rows_ord if not srch or srch.strip().upper() in r[0].upper()]
+        indexed_ord = [(i+2, r) for i, r in enumerate(rows_ord)]
+        filtered = [(ri, r) for ri, r in indexed_ord if not srch or srch.strip().upper() in r[0].upper()]
         df_ord = pd.DataFrame(rows_ord, columns=data_ord[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_ord,"ordered")
@@ -727,8 +728,7 @@ with tab4:
                 st.session_state["confirm_clear_ord"] = True
         confirm_clear("clear_ord", ordered_sheet, "تم الطلب | Ordered")
         st.write(f"**عرض | Showing: {len(filtered)} / {len(rows_ord)}**")
-        for row in filtered:
-            ri = rows_ord.index(row)+2
+        for ri, row in filtered:
             while len(row)<6: row.append("")
             sku,qty,img,da,cnt,note = row[0],row[1],row[2],row[3],row[4],row[5]
             c_img,c_info,c_act = st.columns([1,4,2])
@@ -1129,7 +1129,8 @@ with tab6:
     else:
         rows_can = data_can[1:]
         srch = st.text_input("🔍 بحث ASN | Search ASN", key="srch_can", placeholder="اكتب ASN...")
-        filtered = [r for r in rows_can if not srch or srch.strip().upper() in r[0].upper()]
+        indexed_can = [(i+2, r) for i, r in enumerate(rows_can)]
+        filtered = [(ri, r) for ri, r in indexed_can if not srch or srch.strip().upper() in r[0].upper()]
         df_can = pd.DataFrame(rows_can, columns=data_can[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_can,"cancelled")
@@ -1138,8 +1139,7 @@ with tab6:
                 st.session_state["confirm_clear_can"] = True
         confirm_clear("clear_can", cancelled_sheet, "الملغية | Cancelled")
         st.write(f"**عرض | Showing: {len(filtered)} / {len(rows_can)}**")
-        for row in filtered:
-            ri = rows_can.index(row)+2
+        for ri, row in filtered:
             while len(row)<8: row.append("")
             asn,sku,qty,sd,img,dadd,reason,dcan = row[0],row[1],row[2],row[3],row[4],row[5],row[6],row[7]
             c_img,c_info,c_del = st.columns([1,5,1])
