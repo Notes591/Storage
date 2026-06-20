@@ -138,6 +138,15 @@ def get_excluded_warehouses():
         return set()
     return {w.strip().upper() for w in val.split(",") if w.strip()}
 
+def get_system_delay_days():
+    """عدد الأيام اللي المخزون بياخدها لحد ما ينزل ع السيستم بعد وصول الجدولة"""
+    val = load_settings().get("system_update_delay_days","2")
+    try:
+        d = int(float(val))
+        return d if d >= 0 else 2
+    except:
+        return 2
+
 # ══ links map ══
 @st.cache_data(ttl=300)
 def get_links_map():
@@ -414,6 +423,7 @@ elif "check_cancel_notifications" not in st.session_state:
 
 excluded_wh = get_excluded_warehouses()
 inv_map     = build_inv_map(excluded_wh)
+system_delay_days = get_system_delay_days()
 
 # ══════════════════════════════════════════════
 # ══ SIDEBAR — إشعارات الكنسل ══
@@ -510,6 +520,67 @@ def confirm_clear(key, sheet, label=""):
         if cn.button("❌ لا | No", key=f"no_{key}"):
             st.session_state[f"confirm_{key}"] = False
             st.rerun()
+
+# ══ خرائط حالة الـ SKU (للمخزون المنخفض) ══
+def build_sku_schedule_map():
+    """لكل SKU: أقرب جدولة قادمة (تاريخ + كمية + ASN) لسه ما اتشيكتش ولا اتكنسلتش"""
+    data = get_cached(scheduled_sheet)
+    m = {}
+    if len(data) <= 1:
+        return m
+    for r in data[1:]:
+        while len(r) < 6: r.append("")
+        asn, sku, qty, sdate = r[0].strip(), r[1].strip().upper(), r[2], r[3]
+        if not sku:
+            continue
+        d = parse_excel_date(sdate)
+        entry = {"asn":asn,"qty":_to_int(qty),"date":sdate,"date_obj":d}
+        if sku not in m:
+            m[sku] = []
+        m[sku].append(entry)
+    # رتب كل واحد حسب أقرب تاريخ
+    for sku in m:
+        m[sku].sort(key=lambda e: e["date_obj"] if e["date_obj"] else datetime(2099,1,1))
+    return m
+
+def build_sku_check_map():
+    """SKUs قيد التشييك (محولة من الجدولة) — لسه مش نهائية"""
+    data = get_cached(sheets["Check"])
+    m = {}
+    if len(data) <= 1:
+        return m
+    for r in data[1:]:
+        while len(r) < 6: r.append("")
+        asn, sku, qty, sdate = r[0].strip(), r[1].strip().upper(), r[2], r[3]
+        if not sku:
+            continue
+        d = parse_excel_date(sdate)
+        entry = {"asn":asn,"qty":_to_int(qty),"date":sdate,"date_obj":d}
+        m.setdefault(sku, []).append(entry)
+    for sku in m:
+        m[sku].sort(key=lambda e: e["date_obj"] if e["date_obj"] else datetime(2099,1,1))
+    return m
+
+def build_sku_ordered_set():
+    data = get_cached(ordered_sheet)
+    s = set()
+    if len(data) <= 1:
+        return s
+    for r in data[1:]:
+        if r and r[0].strip():
+            s.add(r[0].strip().upper())
+    return s
+
+def build_sku_unavailable_set():
+    data = get_cached(unavailable_sheet)
+    s = set()
+    if len(data) <= 1:
+        return s
+    for r in data[1:]:
+        if r and r[0].strip():
+            s.add(r[0].strip().upper())
+    return s
+
 
 ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الرابعة|Fourth",4:"الخامسة|Fifth"}
 
@@ -922,12 +993,17 @@ with tab5:
         confirm_clear("clear_sc", scheduled_sheet, "الجدولة | Schedule")
 
         srch_asn = st.text_input("🔍 بحث ASN | Search by ASN", key="srch_asn", placeholder="اكتب رقم ASN...")
+        srch_sku_sch = st.text_input("🔍 بحث SKU | Search by SKU", key="srch_sku_sch", placeholder="اكتب SKU...")
         today = datetime.now().date()
         st.write(f"**إجمالي ASN | Total ASNs: {len(asn_groups)}**")
 
         for asn, group in asn_groups.items():
             if srch_asn and srch_asn.strip().upper() not in asn.upper():
                 continue
+            if srch_sku_sch:
+                skus_upper_in_group = {r[1].strip().upper() for r in group["skus"]}
+                if not any(srch_sku_sch.strip().upper() in s for s in skus_upper_in_group):
+                    continue
             sdate   = group["date"]
             pd_date = parse_excel_date(sdate)
             is_exp  = pd_date and today > pd_date.date()
@@ -1421,6 +1497,14 @@ with tab9:
 with tab10:
     st.subheader("🔴 مخزون منخفض | Low Stock")
     st.caption("المخزون الإجمالي أقل من 50% من المبيع الشهري | Total stock < 50% of monthly sales")
+    st.caption(f"⏱️ فرضية تأخر تحديث المخزون على السيستم بعد وصول الجدولة: **{system_delay_days} يوم** — عدّلها من تاب الإعدادات | Assumed system stock-update delay after schedule arrival: **{system_delay_days} day(s)** — adjustable in Settings tab")
+
+    today = datetime.now().date()
+    sched_map  = build_sku_schedule_map()
+    check_map  = build_sku_check_map()
+    ordered_set = build_sku_ordered_set()
+    unavail_set = build_sku_unavailable_set()
+
     low_stock = []
     for sku_key,info in inv_map.items():
         total=info["total_stock"]; sales=info["sales"]
@@ -1428,27 +1512,144 @@ with tab10:
             pct=round(total/sales*100,1)
             low_stock.append((info["sku"],total,sales,pct,info["img"]))
     low_stock.sort(key=lambda x:x[3])
+
     if not inv_map:
         st.info("ارفع ملف المخزون أولاً | Upload Inventory first")
     elif not low_stock:
         st.success("✅ كل المخزون كافي | All stock levels sufficient (≥ 50% of sales)")
     else:
-        df_low = pd.DataFrame(low_stock, columns=["SKU","Total Stock","Monthly Sales","Stock %","Image URL"])
-        c1,c2 = st.columns(2)
-        with c1: dl_btn(df_low,"low_stock")
-        with c2: st.error(f"🔴 SKUs منخفضة | Low Stock SKUs: {len(low_stock)}")
+        # ══ تجهيز بيانات كل SKU مع الحالة والتحليل ══
+        enriched = []
         for sku,total,sales,pct,img in low_stock:
-            if pct<20:   color="#ef4444"; label="⛔ حرج جداً | Critical"
-            elif pct<35: color="#f97316"; label="🔴 منخفض جداً | Very Low"
-            else:        color="#eab308"; label="🟡 منخفض | Low"
+            sku_up = sku.strip().upper()
+            daily_sales = (sales / 30.0) if sales > 0 else 0
+            coverage_days = (total / daily_sales) if daily_sales > 0 else None
+
+            # أقرب جدولة قادمة (من تاب الجدولة أو التشييك)
+            sched_entries = sched_map.get(sku_up, []) + check_map.get(sku_up, [])
+            sched_entries = [e for e in sched_entries if e["date_obj"]]
+            sched_entries.sort(key=lambda e: e["date_obj"])
+            next_sched = sched_entries[0] if sched_entries else None
+
+            is_ordered  = sku_up in ordered_set
+            is_unavail  = sku_up in unavail_set
+
+            # ══ تحديد الحالة الأساسية ══
+            gap_days = None
+            schedule_covers = None
+            if next_sched:
+                days_until_sched = (next_sched["date_obj"].date() - today).days
+                required_coverage_days = max(days_until_sched, 0) + system_delay_days
+                if coverage_days is not None:
+                    schedule_covers = coverage_days >= required_coverage_days
+                    gap_days = round(required_coverage_days - coverage_days, 1)
+                status = "scheduled_ok" if schedule_covers else "scheduled_gap"
+            elif is_unavail:
+                status = "unavailable"
+            elif is_ordered:
+                status = "ordered"
+            else:
+                status = "action_needed"
+
+            enriched.append({
+                "sku":sku,"total":total,"sales":sales,"pct":pct,"img":img,
+                "daily_sales":round(daily_sales,2),"coverage_days":coverage_days,
+                "next_sched":next_sched,"status":status,
+                "schedule_covers":schedule_covers,"gap_days":gap_days,
+                "is_ordered":is_ordered,"is_unavail":is_unavail,
+            })
+
+        STATUS_META = {
+            "action_needed": {"label":"🆘 محتاج إجراء | Needs Action",          "color":"#ef4444"},
+            "scheduled_gap": {"label":"⚠️ مجدول لكن الجدولة مش هتكفي | Scheduled but Gap","color":"#f97316"},
+            "scheduled_ok":  {"label":"📅 مجدول وكافي | Scheduled & Covered",   "color":"#3b82f6"},
+            "ordered":       {"label":"🛒 تم الطلب | Ordered",                  "color":"#a855f7"},
+            "unavailable":   {"label":"❌ غير متوفر | Unavailable",             "color":"#6b7280"},
+        }
+
+        # ══ فلتر الحالة ══
+        c1,c2 = st.columns(2)
+        with c1:
+            df_low = pd.DataFrame([
+                {"SKU":e["sku"],"Total Stock":e["total"],"Monthly Sales":e["sales"],"Stock %":e["pct"],
+                 "Daily Sales":e["daily_sales"],"Coverage Days":e["coverage_days"],
+                 "Status":STATUS_META[e["status"]]["label"],
+                 "Next Schedule Date": e["next_sched"]["date"] if e["next_sched"] else "",
+                 "Gap Days": e["gap_days"] if e["gap_days"] is not None else "",
+                 "Image URL":e["img"]}
+                for e in enriched
+            ])
+            dl_btn(df_low,"low_stock")
+        with c2:
+            st.error(f"🔴 SKUs منخفضة | Low Stock SKUs: {len(low_stock)}")
+
+        status_options = ["الكل | All"] + [v["label"] for v in STATUS_META.values()]
+        chosen_status = st.selectbox("🔎 فلترة بالحالة | Filter by Status", status_options, key="low_stock_status_filter")
+        srch_low = st.text_input("🔍 بحث SKU | Search SKU", key="srch_low_stock", placeholder="اكتب SKU...")
+
+        # ملخص سريع للحالات
+        summary_cols = st.columns(len(STATUS_META))
+        status_counts = {k:0 for k in STATUS_META}
+        for e in enriched:
+            status_counts[e["status"]] += 1
+        for i,(k,meta) in enumerate(STATUS_META.items()):
+            with summary_cols[i]:
+                st.markdown(
+                    f'<div style="background:{meta["color"]}22;border:1px solid {meta["color"]};border-radius:8px;'
+                    f'padding:6px 8px;text-align:center;">'
+                    f'<div style="font-size:11px;color:white;">{meta["label"]}</div>'
+                    f'<div style="font-size:18px;font-weight:bold;color:white;">{status_counts[k]}</div></div>',
+                    unsafe_allow_html=True)
+
+        st.divider()
+
+        for e in enriched:
+            if srch_low and srch_low.strip().upper() not in e["sku"].upper():
+                continue
+            if chosen_status != "الكل | All" and STATUS_META[e["status"]]["label"] != chosen_status:
+                continue
+
+            sku, total, sales, pct, img = e["sku"], e["total"], e["sales"], e["pct"], e["img"]
+            if pct<20:   sev_color="#ef4444"; sev_label="⛔ حرج جداً | Critical"
+            elif pct<35: sev_color="#f97316"; sev_label="🔴 منخفض جداً | Very Low"
+            else:        sev_color="#eab308"; sev_label="🟡 منخفض | Low"
+
+            meta = STATUS_META[e["status"]]
+            border = meta["color"]
+            bg = border + "1a"
+
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(img,70)
             with c_info:
+                st.markdown(
+                    f'<div style="border-left:4px solid {border};background:{bg};border-radius:8px;padding:6px 12px;margin-bottom:6px;">'
+                    f'<b>{meta["label"]}</b></div>', unsafe_allow_html=True)
                 st.markdown(f"**SKU:** `{sku}`")
                 show_sku_inv(sku)
                 st.progress(min(pct/100,1.0))
-                st.markdown(f"{label} — **{pct}%** &nbsp;|&nbsp; مخزون | Stock: **{total}** / مبيع | Sales: **{sales}**")
+                st.markdown(f"{sev_label} — **{pct}%** &nbsp;|&nbsp; مخزون | Stock: **{total}** / مبيع شهري | Monthly Sales: **{sales}**")
+                if e["daily_sales"]:
+                    cov_txt = f"{e['coverage_days']:.1f} يوم | days" if e["coverage_days"] is not None else "—"
+                    st.caption(f"📈 مبيع يومي تقريبي | Approx Daily Sales: **{e['daily_sales']}** &nbsp;|&nbsp; ⏳ تغطية المخزون الحالي | Current Stock Covers: **{cov_txt}**")
+
+                if e["status"] == "scheduled_ok":
+                    ns = e["next_sched"]
+                    st.success(f"📅 أقرب جدولة | Next Schedule: **{ns['date']}** (ASN: `{ns['asn']}`, Qty: {ns['qty']}) — هتوصل وتتفعل قبل ما المخزون يخلص | Will arrive & activate before stock runs out ✅")
+                elif e["status"] == "scheduled_gap":
+                    ns = e["next_sched"]
+                    st.warning(
+                        f"📅 أقرب جدولة | Next Schedule: **{ns['date']}** (ASN: `{ns['asn']}`, Qty: {ns['qty']}) — "
+                        f"⚠️ فيه فجوة محتملة قبل ما المخزون الجديد يتفعل على السيستم بحوالي **{e['gap_days']} يوم** "
+                        f"(محسوبة باعتبار {system_delay_days} يوم تأخر تحديث) | "
+                        f"Possible stockout gap before new stock reflects on system: ~**{e['gap_days']} day(s)**")
+                elif e["status"] == "ordered":
+                    st.info("🛒 موجود في تاب «تم الطلب» — مفيش جدولة بتاريخ محدد لسه | Currently in 'Ordered' tab — no dated schedule yet")
+                elif e["status"] == "unavailable":
+                    st.error("❌ مسجل في تاب «غير متوفر» | Marked as 'Unavailable'")
+                else:
+                    st.error("🆘 مفيش جدولة ولا طلب ولا حتى مسجل غير متوفر — يحتاج متابعة فورية | No schedule, no order, not marked unavailable — needs immediate attention")
             st.divider()
+
 
 # ══ TAB 11 — منتهية الصلاحية ══
 with tab11:
@@ -1503,6 +1704,14 @@ with tab12:
         save_setting("excluded_warehouses",",".join(selected_ex))
         st.success("✅ تم الحفظ | Saved — ستُطبَّق عند إعادة التحميل | Will apply on next reload")
         st.rerun()
+    st.divider()
+    st.markdown("### ⏱️ تأخر تحديث المخزون على السيستم | System Stock Update Delay")
+    st.caption("بعد ما الجدولة توصل، المخزون مش بينزل ع السيستم فورًا — حدد كام يوم بياخد عشان نحسب تغطية المخزون المنخفض بدقة | After a schedule arrives, stock doesn't reflect on the system instantly — set how many days it takes so Low Stock coverage is calculated accurately")
+    current_delay = system_delay_days
+    new_delay = st.number_input("عدد الأيام | Number of days", min_value=0, max_value=14, value=current_delay, step=1, key="delay_days_input")
+    if st.button("💾 حفظ مدة التأخير | Save Delay", type="primary", key="save_delay_btn"):
+        save_setting("system_update_delay_days", str(int(new_delay)))
+        st.success("✅ تم الحفظ | Saved"); st.rerun()
     st.divider()
     st.markdown("### 📋 الإعدادات الحالية | Current Settings")
     if excluded_wh:
