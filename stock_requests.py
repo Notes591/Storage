@@ -31,7 +31,7 @@ ss = open_spreadsheet()
 TABS_CONFIG = {
     "Requests":          ["SKU","Quantity","Image URL","Date Added","File Name"],
     "Approved":          ["SKU","Quantity Requested","Quantity Approved","Image URL","Date Added","Date Approved"],
-    "Unavailable":       ["SKU","Quantity","Image URL","Date Added","Date Marked Unavailable"],
+    "Unavailable":       ["SKU","Quantity","Image URL","Date Added","Date Marked Unavailable","Times Marked Unavailable"],
     "Ordered":           ["SKU","Quantity","Image URL","Date Added","Order Count","Notes"],
     "Scheduled":         ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelledSchedule": ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Cancel Reason","Date Cancelled"],
@@ -257,6 +257,22 @@ def safe_update_row(sheet, row_idx, values, retries=4, delay=1):
         except Exception:
             time.sleep(delay)
     return False
+
+def upsert_unavailable(sku, qty, img, date_added):
+    """لو الـ SKU موجود بالفعل في غير متوفر، حدّث صفه (الكمية + التاريخ + العداد) بدل ما يتضاف صف جديد"""
+    dn = now_str()
+    sku_clean = sku.strip()
+    data = get_cached(unavailable_sheet, force=True)
+    if len(data) > 1:
+        for ri, r in enumerate(data[1:], start=2):
+            while len(r) < 6: r.append("")
+            if r[0].strip().upper() == sku_clean.upper():
+                prev_count = _to_int(r[5]) if r[5] else 1
+                new_count = prev_count + 1
+                new_img = img if img else r[2]
+                safe_update_row(unavailable_sheet, ri, [sku_clean, qty, new_img, r[3], dn, str(new_count)])
+                return
+    safe_append(unavailable_sheet, [sku_clean, qty, img, date_added, dn, "1"])
 
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -571,15 +587,22 @@ def build_sku_ordered_set():
             s.add(r[0].strip().upper())
     return s
 
-def build_sku_unavailable_set():
+def build_sku_unavailable_map():
+    """SKU -> {date, count} — تاريخ آخر مرة اتسجل غير متوفر وعدد المرات"""
     data = get_cached(unavailable_sheet)
-    s = set()
+    m = {}
     if len(data) <= 1:
-        return s
+        return m
     for r in data[1:]:
-        if r and r[0].strip():
-            s.add(r[0].strip().upper())
-    return s
+        while len(r) < 6: r.append("")
+        sku = r[0].strip()
+        if sku:
+            m[sku.upper()] = {"date": r[4], "count": _to_int(r[5]) if r[5] else 1}
+    return m
+
+# للتوافق الخلفي مع أي استخدام كـ set
+def build_sku_unavailable_set():
+    return set(build_sku_unavailable_map().keys())
 
 
 ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الرابعة|Fourth",4:"الخامسة|Fifth"}
@@ -698,8 +721,8 @@ with tab1:
             st.warning("⚠️ رفض كل الطلبات؟ | Reject all?")
             cy,cn = st.columns(2)
             if cy.button("✅ نعم | Yes", key="yes_rej_all"):
-                dn = now_str()
-                safe_batch_append(unavailable_sheet, [[r[0],r[1],r[2] if len(r)>2 else "",r[3] if len(r)>3 else "",dn] for r in rows])
+                for r in rows:
+                    upsert_unavailable(r[0], r[1], r[2] if len(r)>2 else "", r[3] if len(r)>3 else "")
                 safe_delete_all(requests_sheet)
                 st.session_state["confirm_reject_all"] = False
                 st.rerun()
@@ -743,7 +766,7 @@ with tab1:
                             st.rerun()
                 with cb:
                     if st.button("❌ غير\nمتوفر\nUnavailable", key=f"unavail_{i}"):
-                        safe_append(unavailable_sheet,[sku,qty,img,date_added,now_str()])
+                        upsert_unavailable(sku, qty, img, date_added)
                         safe_delete(requests_sheet,i)
                         st.rerun()
                 with cc:
@@ -827,18 +850,36 @@ with tab3:
         confirm_clear("clear_un", unavailable_sheet, "غير المتوفر | Unavailable")
         st.write(f"**عرض | Showing: {len(filtered)} / {len(rows_un)}**")
         for ri, row in filtered:
-            while len(row)<5: row.append("")
-            sku,qty,img,da,dm = row[0],row[1],row[2],row[3],row[4]
-            c_img,c_info,c_del = st.columns([1,5,1])
+            while len(row)<6: row.append("")
+            sku,qty,img,da,dm,cnt = row[0],row[1],row[2],row[3],row[4],row[5]
+            c_img,c_info,c_act = st.columns([1,4,2])
             with c_img: show_img(img,70)
             with c_info:
-                st.markdown(f"**SKU:** `{sku}`")
+                cnt_badge = ""
+                try:
+                    cnt_n = int(float(cnt)) if cnt else 1
+                except:
+                    cnt_n = 1
+                if cnt_n > 1:
+                    cnt_badge = f' &nbsp;<span style="background:#7c2d12;color:#fdba74;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:bold;">🔁 تكرر {cnt_n} مرات | Repeated {cnt_n}x</span>'
+                st.markdown(f"**SKU:** `{sku}`" + cnt_badge, unsafe_allow_html=True)
                 show_sku_inv(sku)
                 st.markdown(f"**Qty طلب | Requested:** {qty}")
                 st.caption(f"📅 Requested | طُلب: {da} | ❌ Unavailable | غير متوفر: {dm}")
-            with c_del:
-                if st.button("🗑️", key=f"del_un_{ri}"):
-                    safe_delete(unavailable_sheet,ri); st.rerun()
+            with c_act:
+                ca,cb = st.columns(2)
+                with ca:
+                    with st.popover("↩️ رجّع للموافقة\nReturn to Approved"):
+                        st.caption("لو المخزون بقى متوفر | If stock is now available")
+                        nq = st.text_input("الكمية المعتمدة | Approved Qty", value=qty, key=f"ret_un_qty_{ri}")
+                        if st.button("✅ أرسل للموافقة | Send to Approved", key=f"ret_un_conf_{ri}"):
+                            safe_append(approved_sheet,[sku,qty,nq,img,da,now_str()])
+                            safe_delete(unavailable_sheet,ri)
+                            st.success("✅ تم الإرجاع للموافقة | Returned to Approved")
+                            st.rerun()
+                with cb:
+                    if st.button("🗑️", key=f"del_un_{ri}"):
+                        safe_delete(unavailable_sheet,ri); st.rerun()
             st.divider()
 
 # ══ TAB 4 — تم الطلب ══
@@ -1503,7 +1544,7 @@ with tab10:
     sched_map  = build_sku_schedule_map()
     check_map  = build_sku_check_map()
     ordered_set = build_sku_ordered_set()
-    unavail_set = build_sku_unavailable_set()
+    unavail_map = build_sku_unavailable_map()
 
     low_stock = []
     for sku_key,info in inv_map.items():
@@ -1532,7 +1573,10 @@ with tab10:
             next_sched = sched_entries[0] if sched_entries else None
 
             is_ordered  = sku_up in ordered_set
-            is_unavail  = sku_up in unavail_set
+            unavail_info = unavail_map.get(sku_up)
+            unavail_date = unavail_info["date"] if unavail_info else None
+            unavail_count = unavail_info["count"] if unavail_info else None
+            is_unavail  = unavail_info is not None
 
             # ══ تحديد الحالة الأساسية ══
             gap_days = None
@@ -1556,7 +1600,7 @@ with tab10:
                 "daily_sales":round(daily_sales,2),"coverage_days":coverage_days,
                 "next_sched":next_sched,"status":status,
                 "schedule_covers":schedule_covers,"gap_days":gap_days,
-                "is_ordered":is_ordered,"is_unavail":is_unavail,
+                "is_ordered":is_ordered,"is_unavail":is_unavail,"unavail_date":unavail_date,"unavail_count":unavail_count,
             })
 
         STATUS_META = {
@@ -1576,6 +1620,7 @@ with tab10:
                  "Status":STATUS_META[e["status"]]["full"],
                  "Next Schedule Date": e["next_sched"]["date"] if e["next_sched"] else "",
                  "Gap Days": e["gap_days"] if e["gap_days"] is not None else "",
+                 "Unavailable Since": e["unavail_date"] or "",
                  "Image URL":e["img"]}
                 for e in enriched
             ])
@@ -1618,7 +1663,8 @@ with tab10:
                 elif e["status"] == "ordered":
                     st.info("🛒 موجود في تاب «تم الطلب» — مفيش جدولة بتاريخ محدد لسه | Currently in 'Ordered' tab — no dated schedule yet")
                 elif e["status"] == "unavailable":
-                    st.error("❌ مسجل في تاب «غير متوفر» | Marked as 'Unavailable'")
+                    repeat_txt = f" &nbsp;| 🔁 تكرر {e['unavail_count']} مرات | Repeated {e['unavail_count']}x" if e["unavail_count"] and e["unavail_count"] > 1 else ""
+                    st.error(f"❌ مسجل في تاب «غير متوفر» | Marked as 'Unavailable' — 📅 بتاريخ | Since: **{e['unavail_date'] or '—'}**{repeat_txt}")
                 else:
                     st.error("🆘 مفيش جدولة ولا طلب ولا حتى مسجل غير متوفر — يحتاج متابعة فورية | No schedule, no order, not marked unavailable — needs immediate attention")
             st.divider()
