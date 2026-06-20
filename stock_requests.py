@@ -31,7 +31,7 @@ ss = open_spreadsheet()
 TABS_CONFIG = {
     "Requests":          ["SKU","Quantity","Image URL","Date Added","File Name"],
     "Approved":          ["SKU","Quantity Requested","Quantity Approved","Image URL","Date Added","Date Approved"],
-    "Unavailable":       ["SKU","Quantity","Image URL","Date Added","Date Marked Unavailable","Times Marked Unavailable"],
+    "Unavailable":       ["SKU","Quantity","Image URL","Date Added","Date Marked Unavailable"],
     "Ordered":           ["SKU","Quantity","Image URL","Date Added","Order Count","Notes"],
     "Scheduled":         ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelledSchedule": ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Cancel Reason","Date Cancelled"],
@@ -66,25 +66,6 @@ def get_or_create_worksheet(tab, headers, retries=5, delay=2):
 sheets = {}
 for tab, headers in TABS_CONFIG.items():
     sheets[tab] = get_or_create_worksheet(tab, headers)
-
-def sync_header(sheet, expected_headers, retries=3, delay=1):
-    """لو الشيت قديم وناقصه أعمدة جديدة من TABS_CONFIG، يضيفها لصف الهيدر من غير ما يلمس البيانات"""
-    for attempt in range(retries):
-        try:
-            current = sheet.row_values(1)
-            if len(current) >= len(expected_headers):
-                return
-            missing = expected_headers[len(current):]
-            for offset, col_name in enumerate(missing):
-                sheet.update_cell(1, len(current) + offset + 1, col_name)
-            return
-        except gspread.exceptions.APIError:
-            time.sleep(delay * (2 ** attempt))
-        except Exception:
-            return
-
-for tab, headers in TABS_CONFIG.items():
-    sync_header(sheets[tab], headers)
 
 def get_or_create_links_ws(retries=5, delay=2):
     for attempt in range(retries):
@@ -156,15 +137,6 @@ def get_excluded_warehouses():
     if not val.strip():
         return set()
     return {w.strip().upper() for w in val.split(",") if w.strip()}
-
-def get_system_delay_days():
-    """عدد الأيام اللي المخزون بياخدها لحد ما ينزل ع السيستم بعد وصول الجدولة"""
-    val = load_settings().get("system_update_delay_days","2")
-    try:
-        d = int(float(val))
-        return d if d >= 0 else 2
-    except:
-        return 2
 
 # ══ links map ══
 @st.cache_data(ttl=300)
@@ -277,40 +249,11 @@ def safe_update_row(sheet, row_idx, values, retries=4, delay=1):
             time.sleep(delay)
     return False
 
-def upsert_unavailable(sku, qty, img, date_added):
-    """لو الـ SKU موجود بالفعل في غير متوفر، حدّث صفه (الكمية + التاريخ + العداد) بدل ما يتضاف صف جديد"""
-    dn = now_str()
-    sku_clean = sku.strip()
-    data = get_cached(unavailable_sheet, force=True)
-    if len(data) > 1:
-        for ri, r in enumerate(data[1:], start=2):
-            while len(r) < 6: r.append("")
-            if r[0].strip().upper() == sku_clean.upper():
-                prev_count = _to_int(r[5]) if r[5] else 1
-                new_count = prev_count + 1
-                new_img = img if img else r[2]
-                safe_update_row(unavailable_sheet, ri, [sku_clean, qty, new_img, r[3], dn, str(new_count)])
-                return
-    safe_append(unavailable_sheet, [sku_clean, qty, img, date_added, dn, "1"])
-
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def file_timestamp():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-def rows_to_df(rows, headers):
-    """يبني DataFrame من صفوف الشيت حتى لو أطوالها مش متطابقة مع الهيدر (صفوف قديمة قبل إضافة عمود جديد مثلاً)"""
-    n = len(headers)
-    fixed = []
-    for r in rows:
-        r = list(r)
-        if len(r) < n:
-            r = r + [""] * (n - len(r))
-        elif len(r) > n:
-            r = r[:n]
-        fixed.append(r)
-    return pd.DataFrame(fixed, columns=headers)
 
 def to_excel(df):
     buf = io.BytesIO()
@@ -471,7 +414,6 @@ elif "check_cancel_notifications" not in st.session_state:
 
 excluded_wh = get_excluded_warehouses()
 inv_map     = build_inv_map(excluded_wh)
-system_delay_days = get_system_delay_days()
 
 # ══════════════════════════════════════════════
 # ══ SIDEBAR — إشعارات الكنسل ══
@@ -568,74 +510,6 @@ def confirm_clear(key, sheet, label=""):
         if cn.button("❌ لا | No", key=f"no_{key}"):
             st.session_state[f"confirm_{key}"] = False
             st.rerun()
-
-# ══ خرائط حالة الـ SKU (للمخزون المنخفض) ══
-def build_sku_schedule_map():
-    """لكل SKU: أقرب جدولة قادمة (تاريخ + كمية + ASN) لسه ما اتشيكتش ولا اتكنسلتش"""
-    data = get_cached(scheduled_sheet)
-    m = {}
-    if len(data) <= 1:
-        return m
-    for r in data[1:]:
-        while len(r) < 6: r.append("")
-        asn, sku, qty, sdate = r[0].strip(), r[1].strip().upper(), r[2], r[3]
-        if not sku:
-            continue
-        d = parse_excel_date(sdate)
-        entry = {"asn":asn,"qty":_to_int(qty),"date":sdate,"date_obj":d}
-        if sku not in m:
-            m[sku] = []
-        m[sku].append(entry)
-    # رتب كل واحد حسب أقرب تاريخ
-    for sku in m:
-        m[sku].sort(key=lambda e: e["date_obj"] if e["date_obj"] else datetime(2099,1,1))
-    return m
-
-def build_sku_check_map():
-    """SKUs قيد التشييك (محولة من الجدولة) — لسه مش نهائية"""
-    data = get_cached(sheets["Check"])
-    m = {}
-    if len(data) <= 1:
-        return m
-    for r in data[1:]:
-        while len(r) < 6: r.append("")
-        asn, sku, qty, sdate = r[0].strip(), r[1].strip().upper(), r[2], r[3]
-        if not sku:
-            continue
-        d = parse_excel_date(sdate)
-        entry = {"asn":asn,"qty":_to_int(qty),"date":sdate,"date_obj":d}
-        m.setdefault(sku, []).append(entry)
-    for sku in m:
-        m[sku].sort(key=lambda e: e["date_obj"] if e["date_obj"] else datetime(2099,1,1))
-    return m
-
-def build_sku_ordered_set():
-    data = get_cached(ordered_sheet)
-    s = set()
-    if len(data) <= 1:
-        return s
-    for r in data[1:]:
-        if r and r[0].strip():
-            s.add(r[0].strip().upper())
-    return s
-
-def build_sku_unavailable_map():
-    """SKU -> {date, count} — تاريخ آخر مرة اتسجل غير متوفر وعدد المرات"""
-    data = get_cached(unavailable_sheet)
-    m = {}
-    if len(data) <= 1:
-        return m
-    for r in data[1:]:
-        while len(r) < 6: r.append("")
-        sku = r[0].strip()
-        if sku:
-            m[sku.upper()] = {"date": r[4], "count": _to_int(r[5]) if r[5] else 1}
-    return m
-
-# للتوافق الخلفي مع أي استخدام كـ set
-def build_sku_unavailable_set():
-    return set(build_sku_unavailable_map().keys())
-
 
 ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الرابعة|Fourth",4:"الخامسة|Fifth"}
 
@@ -753,8 +627,8 @@ with tab1:
             st.warning("⚠️ رفض كل الطلبات؟ | Reject all?")
             cy,cn = st.columns(2)
             if cy.button("✅ نعم | Yes", key="yes_rej_all"):
-                for r in rows:
-                    upsert_unavailable(r[0], r[1], r[2] if len(r)>2 else "", r[3] if len(r)>3 else "")
+                dn = now_str()
+                safe_batch_append(unavailable_sheet, [[r[0],r[1],r[2] if len(r)>2 else "",r[3] if len(r)>3 else "",dn] for r in rows])
                 safe_delete_all(requests_sheet)
                 st.session_state["confirm_reject_all"] = False
                 st.rerun()
@@ -798,7 +672,7 @@ with tab1:
                             st.rerun()
                 with cb:
                     if st.button("❌ غير\nمتوفر\nUnavailable", key=f"unavail_{i}"):
-                        upsert_unavailable(sku, qty, img, date_added)
+                        safe_append(unavailable_sheet,[sku,qty,img,date_added,now_str()])
                         safe_delete(requests_sheet,i)
                         st.rerun()
                 with cc:
@@ -836,7 +710,7 @@ with tab2:
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_ap", placeholder="اكتب SKU...")
         indexed_ap = [(i+2, r) for i, r in enumerate(rows_ap)]
         filtered = [(ri, r) for ri, r in indexed_ap if not srch or srch.strip().upper() in r[0].upper()]
-        df_ap = rows_to_df(rows_ap, data_ap[0])
+        df_ap = pd.DataFrame(rows_ap, columns=data_ap[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_ap,"approved")
         with c2:
@@ -873,7 +747,7 @@ with tab3:
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_un", placeholder="اكتب SKU...")
         indexed_un = [(i+2, r) for i, r in enumerate(rows_un)]
         filtered = [(ri, r) for ri, r in indexed_un if not srch or srch.strip().upper() in r[0].upper()]
-        df_un = rows_to_df(rows_un, data_un[0])
+        df_un = pd.DataFrame(rows_un, columns=data_un[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_un,"unavailable")
         with c2:
@@ -882,36 +756,18 @@ with tab3:
         confirm_clear("clear_un", unavailable_sheet, "غير المتوفر | Unavailable")
         st.write(f"**عرض | Showing: {len(filtered)} / {len(rows_un)}**")
         for ri, row in filtered:
-            while len(row)<6: row.append("")
-            sku,qty,img,da,dm,cnt = row[0],row[1],row[2],row[3],row[4],row[5]
-            c_img,c_info,c_act = st.columns([1,4,2])
+            while len(row)<5: row.append("")
+            sku,qty,img,da,dm = row[0],row[1],row[2],row[3],row[4]
+            c_img,c_info,c_del = st.columns([1,5,1])
             with c_img: show_img(img,70)
             with c_info:
-                cnt_badge = ""
-                try:
-                    cnt_n = int(float(cnt)) if cnt else 1
-                except:
-                    cnt_n = 1
-                if cnt_n > 1:
-                    cnt_badge = f' &nbsp;<span style="background:#7c2d12;color:#fdba74;border-radius:6px;padding:2px 10px;font-size:12px;font-weight:bold;">🔁 تكرر {cnt_n} مرات | Repeated {cnt_n}x</span>'
-                st.markdown(f"**SKU:** `{sku}`" + cnt_badge, unsafe_allow_html=True)
+                st.markdown(f"**SKU:** `{sku}`")
                 show_sku_inv(sku)
                 st.markdown(f"**Qty طلب | Requested:** {qty}")
                 st.caption(f"📅 Requested | طُلب: {da} | ❌ Unavailable | غير متوفر: {dm}")
-            with c_act:
-                ca,cb = st.columns(2)
-                with ca:
-                    with st.popover("↩️ رجّع للموافقة\nReturn to Approved"):
-                        st.caption("لو المخزون بقى متوفر | If stock is now available")
-                        nq = st.text_input("الكمية المعتمدة | Approved Qty", value=qty, key=f"ret_un_qty_{ri}")
-                        if st.button("✅ أرسل للموافقة | Send to Approved", key=f"ret_un_conf_{ri}"):
-                            safe_append(approved_sheet,[sku,qty,nq,img,da,now_str()])
-                            safe_delete(unavailable_sheet,ri)
-                            st.success("✅ تم الإرجاع للموافقة | Returned to Approved")
-                            st.rerun()
-                with cb:
-                    if st.button("🗑️", key=f"del_un_{ri}"):
-                        safe_delete(unavailable_sheet,ri); st.rerun()
+            with c_del:
+                if st.button("🗑️", key=f"del_un_{ri}"):
+                    safe_delete(unavailable_sheet,ri); st.rerun()
             st.divider()
 
 # ══ TAB 4 — تم الطلب ══
@@ -925,7 +781,7 @@ with tab4:
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_ord", placeholder="اكتب SKU...")
         indexed_ord = [(i+2, r) for i, r in enumerate(rows_ord)]
         filtered = [(ri, r) for ri, r in indexed_ord if not srch or srch.strip().upper() in r[0].upper()]
-        df_ord = rows_to_df(rows_ord, data_ord[0])
+        df_ord = pd.DataFrame(rows_ord, columns=data_ord[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_ord,"ordered")
         with c2:
@@ -1057,7 +913,7 @@ with tab5:
                 asn_groups[asn] = {"date":r[3],"skus":[],"checked": asn.upper() in checked_asns}
             asn_groups[asn]["skus"].append(r)
 
-        df_sch = rows_to_df(rows_sch, data_sch[0])
+        df_sch = pd.DataFrame(rows_sch, columns=data_sch[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_sch,"scheduled")
         with c2:
@@ -1066,17 +922,12 @@ with tab5:
         confirm_clear("clear_sc", scheduled_sheet, "الجدولة | Schedule")
 
         srch_asn = st.text_input("🔍 بحث ASN | Search by ASN", key="srch_asn", placeholder="اكتب رقم ASN...")
-        srch_sku_sch = st.text_input("🔍 بحث SKU | Search by SKU", key="srch_sku_sch", placeholder="اكتب SKU...")
         today = datetime.now().date()
         st.write(f"**إجمالي ASN | Total ASNs: {len(asn_groups)}**")
 
         for asn, group in asn_groups.items():
             if srch_asn and srch_asn.strip().upper() not in asn.upper():
                 continue
-            if srch_sku_sch:
-                skus_upper_in_group = {r[1].strip().upper() for r in group["skus"]}
-                if not any(srch_sku_sch.strip().upper() in s for s in skus_upper_in_group):
-                    continue
             sdate   = group["date"]
             pd_date = parse_excel_date(sdate)
             is_exp  = pd_date and today > pd_date.date()
@@ -1248,7 +1099,7 @@ with tab_check:
             chk_groups[asn]["skus"].append(r)
             chk_groups[asn]["indices"].append(idx)
 
-        df_chk = rows_to_df(rows_chk, data_chk[0])
+        df_chk = pd.DataFrame(rows_chk, columns=data_chk[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_chk,"check")
         with c2:
@@ -1344,7 +1195,7 @@ with tab6:
         srch = st.text_input("🔍 بحث ASN | Search ASN", key="srch_can", placeholder="اكتب ASN...")
         indexed_can = [(i+2, r) for i, r in enumerate(rows_can)]
         filtered = [(ri, r) for ri, r in indexed_can if not srch or srch.strip().upper() in r[0].upper()]
-        df_can = rows_to_df(rows_can, data_can[0])
+        df_can = pd.DataFrame(rows_can, columns=data_can[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_can,"cancelled")
         with c2:
@@ -1386,7 +1237,7 @@ with tab7:
             asn_res_groups[asn]["skus"].append(r)
             asn_res_groups[asn]["indices"].append(idx)
 
-        df_res = rows_to_df(rows_res, data_res[0])
+        df_res = pd.DataFrame(rows_res, columns=data_res[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_res,"rescheduled")
         with c2:
@@ -1540,7 +1391,7 @@ with tab9:
             st.info(f"⚙️ مستثنى من الإجمالي | Excluded: **{', '.join(sorted(excluded_wh))}**")
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_inv", placeholder="اكتب SKU...")
         raw_inv = get_cached(inventory_sheet)
-        df_inv_dl = rows_to_df(raw_inv[1:], raw_inv[0])
+        df_inv_dl = pd.DataFrame(raw_inv[1:], columns=raw_inv[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_inv_dl,"inventory")
         with c2:
@@ -1570,14 +1421,6 @@ with tab9:
 with tab10:
     st.subheader("🔴 مخزون منخفض | Low Stock")
     st.caption("المخزون الإجمالي أقل من 50% من المبيع الشهري | Total stock < 50% of monthly sales")
-    st.caption(f"⏱️ فرضية تأخر تحديث المخزون على السيستم بعد وصول الجدولة: **{system_delay_days} يوم** — عدّلها من تاب الإعدادات | Assumed system stock-update delay after schedule arrival: **{system_delay_days} day(s)** — adjustable in Settings tab")
-
-    today = datetime.now().date()
-    sched_map  = build_sku_schedule_map()
-    check_map  = build_sku_check_map()
-    ordered_set = build_sku_ordered_set()
-    unavail_map = build_sku_unavailable_map()
-
     low_stock = []
     for sku_key,info in inv_map.items():
         total=info["total_stock"]; sales=info["sales"]
@@ -1585,142 +1428,27 @@ with tab10:
             pct=round(total/sales*100,1)
             low_stock.append((info["sku"],total,sales,pct,info["img"]))
     low_stock.sort(key=lambda x:x[3])
-
     if not inv_map:
         st.info("ارفع ملف المخزون أولاً | Upload Inventory first")
     elif not low_stock:
         st.success("✅ كل المخزون كافي | All stock levels sufficient (≥ 50% of sales)")
     else:
-        # ══ تجهيز بيانات كل SKU مع الحالة والتحليل ══
-        enriched = []
-        for sku,total,sales,pct,img in low_stock:
-            sku_up = sku.strip().upper()
-            daily_sales = (sales / 30.0) if sales > 0 else 0
-            coverage_days = (total / daily_sales) if daily_sales > 0 else None
-
-            # أقرب جدولة قادمة (من تاب الجدولة أو التشييك)
-            sched_entries = sched_map.get(sku_up, []) + check_map.get(sku_up, [])
-            sched_entries = [e for e in sched_entries if e["date_obj"]]
-            sched_entries.sort(key=lambda e: e["date_obj"])
-            next_sched = sched_entries[0] if sched_entries else None
-
-            is_ordered  = sku_up in ordered_set
-            unavail_info = unavail_map.get(sku_up)
-            unavail_date = unavail_info["date"] if unavail_info else None
-            unavail_count = unavail_info["count"] if unavail_info else None
-            is_unavail  = unavail_info is not None
-
-            # ══ تحديد الحالة الأساسية ══
-            gap_days = None
-            schedule_covers = None
-            if next_sched:
-                days_until_sched = (next_sched["date_obj"].date() - today).days
-                required_coverage_days = max(days_until_sched, 0) + system_delay_days
-                if coverage_days is not None:
-                    schedule_covers = coverage_days >= required_coverage_days
-                    gap_days = round(required_coverage_days - coverage_days, 1)
-                status = "scheduled_ok" if schedule_covers else "scheduled_gap"
-            elif is_unavail:
-                status = "unavailable"
-            elif is_ordered:
-                status = "ordered"
-            else:
-                status = "action_needed"
-
-            enriched.append({
-                "sku":sku,"total":total,"sales":sales,"pct":pct,"img":img,
-                "daily_sales":round(daily_sales,2),"coverage_days":coverage_days,
-                "next_sched":next_sched,"status":status,
-                "schedule_covers":schedule_covers,"gap_days":gap_days,
-                "is_ordered":is_ordered,"is_unavail":is_unavail,"unavail_date":unavail_date,"unavail_count":unavail_count,
-            })
-
-        STATUS_META = {
-            "action_needed": {"label":"🆘 محتاج إجراء",          "full":"🆘 محتاج إجراء | Needs Action",          "color":"#ef4444"},
-            "scheduled_gap": {"label":"⚠️ مجدول بفجوة",          "full":"⚠️ مجدول لكن الجدولة مش هتكفي | Scheduled but Gap","color":"#f97316"},
-            "scheduled_ok":  {"label":"📅 مجدول وكافي",          "full":"📅 مجدول وكافي | Scheduled & Covered",   "color":"#3b82f6"},
-            "ordered":       {"label":"🛒 تم الطلب",             "full":"🛒 تم الطلب | Ordered",                  "color":"#a855f7"},
-            "unavailable":   {"label":"❌ غير متوفر",            "full":"❌ غير متوفر | Unavailable",             "color":"#6b7280"},
-        }
-
-        # ══ تنزيل + ملخص عام ══
+        df_low = pd.DataFrame(low_stock, columns=["SKU","Total Stock","Monthly Sales","Stock %","Image URL"])
         c1,c2 = st.columns(2)
-        with c1:
-            df_low = pd.DataFrame([
-                {"SKU":e["sku"],"Total Stock":e["total"],"Monthly Sales":e["sales"],"Stock %":e["pct"],
-                 "Daily Sales":e["daily_sales"],"Coverage Days":e["coverage_days"],
-                 "Status":STATUS_META[e["status"]]["full"],
-                 "Next Schedule Date": e["next_sched"]["date"] if e["next_sched"] else "",
-                 "Gap Days": e["gap_days"] if e["gap_days"] is not None else "",
-                 "Unavailable Since": e["unavail_date"] or "",
-                 "Image URL":e["img"]}
-                for e in enriched
-            ])
-            dl_btn(df_low,"low_stock")
-        with c2:
-            st.error(f"🔴 SKUs منخفضة | Low Stock SKUs: {len(low_stock)}")
-
-        # ══ تجميع كل SKU تحت حالته ══
-        status_groups = {k: [] for k in STATUS_META}
-        for e in enriched:
-            status_groups[e["status"]].append(e)
-
-        def render_low_stock_card(e):
-            sku, total, sales, pct, img = e["sku"], e["total"], e["sales"], e["pct"], e["img"]
-            if pct<20:   sev_color="#ef4444"; sev_label="⛔ حرج جداً | Critical"
-            elif pct<35: sev_color="#f97316"; sev_label="🔴 منخفض جداً | Very Low"
-            else:        sev_color="#eab308"; sev_label="🟡 منخفض | Low"
-
+        with c1: dl_btn(df_low,"low_stock")
+        with c2: st.error(f"🔴 SKUs منخفضة | Low Stock SKUs: {len(low_stock)}")
+        for sku,total,sales,pct,img in low_stock:
+            if pct<20:   color="#ef4444"; label="⛔ حرج جداً | Critical"
+            elif pct<35: color="#f97316"; label="🔴 منخفض جداً | Very Low"
+            else:        color="#eab308"; label="🟡 منخفض | Low"
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(img,70)
             with c_info:
                 st.markdown(f"**SKU:** `{sku}`")
                 show_sku_inv(sku)
                 st.progress(min(pct/100,1.0))
-                st.markdown(f"{sev_label} — **{pct}%** &nbsp;|&nbsp; مخزون | Stock: **{total}** / مبيع شهري | Monthly Sales: **{sales}**")
-                if e["daily_sales"]:
-                    cov_txt = f"{e['coverage_days']:.1f} يوم | days" if e["coverage_days"] is not None else "—"
-                    st.caption(f"📈 مبيع يومي تقريبي | Approx Daily Sales: **{e['daily_sales']}** &nbsp;|&nbsp; ⏳ تغطية المخزون الحالي | Current Stock Covers: **{cov_txt}**")
-
-                if e["status"] == "scheduled_ok":
-                    ns = e["next_sched"]
-                    st.success(f"📅 أقرب جدولة | Next Schedule: **{ns['date']}** (ASN: `{ns['asn']}`, Qty: {ns['qty']}) — هتوصل وتتفعل قبل ما المخزون يخلص | Will arrive & activate before stock runs out ✅")
-                elif e["status"] == "scheduled_gap":
-                    ns = e["next_sched"]
-                    st.warning(
-                        f"📅 أقرب جدولة | Next Schedule: **{ns['date']}** (ASN: `{ns['asn']}`, Qty: {ns['qty']}) — "
-                        f"⚠️ فيه فجوة محتملة قبل ما المخزون الجديد يتفعل على السيستم بحوالي **{e['gap_days']} يوم** "
-                        f"(محسوبة باعتبار {system_delay_days} يوم تأخر تحديث) | "
-                        f"Possible stockout gap before new stock reflects on system: ~**{e['gap_days']} day(s)**")
-                elif e["status"] == "ordered":
-                    st.info("🛒 موجود في تاب «تم الطلب» — مفيش جدولة بتاريخ محدد لسه | Currently in 'Ordered' tab — no dated schedule yet")
-                elif e["status"] == "unavailable":
-                    repeat_txt = f" &nbsp;| 🔁 تكرر {e['unavail_count']} مرات | Repeated {e['unavail_count']}x" if e["unavail_count"] and e["unavail_count"] > 1 else ""
-                    st.error(f"❌ مسجل في تاب «غير متوفر» | Marked as 'Unavailable' — 📅 بتاريخ | Since: **{e['unavail_date'] or '—'}**{repeat_txt}")
-                else:
-                    st.error("🆘 مفيش جدولة ولا طلب ولا حتى مسجل غير متوفر — يحتاج متابعة فورية | No schedule, no order, not marked unavailable — needs immediate attention")
+                st.markdown(f"{label} — **{pct}%** &nbsp;|&nbsp; مخزون | Stock: **{total}** / مبيع | Sales: **{sales}**")
             st.divider()
-
-        # ══ تابات فرعية لكل حالة ══
-        sub_labels = [f'{STATUS_META[k]["label"]} ({len(status_groups[k])})' for k in STATUS_META]
-        sub_tabs = st.tabs(sub_labels)
-
-        for (status_key, meta), sub_tab in zip(STATUS_META.items(), sub_tabs):
-            with sub_tab:
-                group_items = status_groups[status_key]
-                if not group_items:
-                    st.success("✅ لا يوجد عناصر في هذه الحالة | No items in this status")
-                    continue
-                srch_key = f"srch_low_{status_key}"
-                srch_low = st.text_input("🔍 بحث SKU | Search SKU", key=srch_key, placeholder="اكتب SKU...")
-                st.caption(f"📦 العدد | Count: {len(group_items)}")
-                st.divider()
-                for e in group_items:
-                    if srch_low and srch_low.strip().upper() not in e["sku"].upper():
-                        continue
-                    render_low_stock_card(e)
-
-
 
 # ══ TAB 11 — منتهية الصلاحية ══
 with tab11:
@@ -1730,7 +1458,7 @@ with tab11:
         st.info("لا يوجد منتهي | No expired items.")
     else:
         rows_ex = data_ex[1:]
-        df_ex = rows_to_df(rows_ex, data_ex[0])
+        df_ex = pd.DataFrame(rows_ex, columns=data_ex[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_ex,"expired")
         with c2:
@@ -1775,14 +1503,6 @@ with tab12:
         save_setting("excluded_warehouses",",".join(selected_ex))
         st.success("✅ تم الحفظ | Saved — ستُطبَّق عند إعادة التحميل | Will apply on next reload")
         st.rerun()
-    st.divider()
-    st.markdown("### ⏱️ تأخر تحديث المخزون على السيستم | System Stock Update Delay")
-    st.caption("بعد ما الجدولة توصل، المخزون مش بينزل ع السيستم فورًا — حدد كام يوم بياخد عشان نحسب تغطية المخزون المنخفض بدقة | After a schedule arrives, stock doesn't reflect on the system instantly — set how many days it takes so Low Stock coverage is calculated accurately")
-    current_delay = system_delay_days
-    new_delay = st.number_input("عدد الأيام | Number of days", min_value=0, max_value=14, value=current_delay, step=1, key="delay_days_input")
-    if st.button("💾 حفظ مدة التأخير | Save Delay", type="primary", key="save_delay_btn"):
-        save_setting("system_update_delay_days", str(int(new_delay)))
-        st.success("✅ تم الحفظ | Saved"); st.rerun()
     st.divider()
     st.markdown("### 📋 الإعدادات الحالية | Current Settings")
     if excluded_wh:
