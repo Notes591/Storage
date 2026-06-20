@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import time
 import pandas as pd
 import io
+import re
 import gspread.exceptions
 
 st.set_page_config(page_title="📦 Stock Requests | طلبات المخزون", page_icon="📦", layout="wide")
@@ -251,6 +252,40 @@ def safe_update_row(sheet, row_idx, values, retries=4, delay=1):
 
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def merge_or_get_existing_row(sheet, sku):
+    """
+    يبحث عن SKU في العمود الأول لشيت معيّن.
+    بيرجع (row_index, row_values) لو لقاه، أو (None, None) لو مش موجود.
+    """
+    data = get_cached(sheet, force=True)
+    sku_up = sku.strip().upper()
+    if len(data) > 1:
+        for ri, row in enumerate(data[1:], start=2):
+            if row and row[0].strip().upper() == sku_up:
+                return ri, row
+    return None, None
+
+def parse_count_dates(cell_value):
+    """
+    يفك خلية بصيغة 'Nx | تاريخ1 | تاريخ2 | ...' ويرجع (العدد الحالي, باقي التواريخ كنص).
+    لو الخلية فاضية أو بصيغة قديمة (تاريخ واحد بس)، يتعامل معاها بأمان.
+    """
+    val = (cell_value or "").strip()
+    if not val:
+        return 0, ""
+    m = re.match(r"^(\d+)x\s*\|\s*(.*)$", val, re.DOTALL)
+    if m:
+        return int(m.group(1)), m.group(2).strip()
+    # صيغة قديمة (تاريخ واحد فقط بدون عداد) — اعتبرها أول مرة
+    return 1, val
+
+def append_count_date(rest_dates, new_count, new_date):
+    """يبني نص الخلية الجديد بصيغة 'Nx | تاريخ1 | تاريخ2 | ... | تاريخ جديد'."""
+    rest_dates = (rest_dates or "").strip()
+    if rest_dates:
+        return f"{new_count}x | {rest_dates} | {new_date}"
+    return f"{new_count}x | {new_date}"
 
 def file_timestamp():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -672,24 +707,30 @@ with tab1:
                             st.rerun()
                 with cb:
                     if st.button("❌ غير\nمتوفر\nUnavailable", key=f"unavail_{i}"):
-                        safe_append(unavailable_sheet,[sku,qty,img,date_added,now_str()])
+                        dn = now_str()
+                        un_ri, un_row = merge_or_get_existing_row(unavailable_sheet, sku)
+                        if un_ri:
+                            while len(un_row) < 5: un_row.append("")
+                            cur_count, rest_dates = parse_count_dates(un_row[4])
+                            new_count = cur_count + 1
+                            merged_dates = append_count_date(rest_dates, new_count, dn)
+                            safe_update_row(unavailable_sheet, un_ri, [un_row[0], qty, un_row[2] or img, un_row[3], merged_dates])
+                        else:
+                            safe_append(unavailable_sheet,[sku,qty,img,date_added,append_count_date("",1,dn)])
                         safe_delete(requests_sheet,i)
                         st.rerun()
                 with cc:
                     if st.button("🛒 طلب\nOrder", key=f"order_{i}"):
                         dn = now_str()
-                        prev = ordered_skus.get(sku.upper(),0)
-                        if prev > 0:
-                            o_rows = get_cached(ordered_sheet)
-                            for oi, or_ in enumerate(o_rows[1:], start=2):
-                                if or_[0].strip().upper() == sku.upper():
-                                    new_count = prev + 1
-                                    ordn = ordinal_map.get(prev, f"{prev+1}")
-                                    note = f"تم الطلب للمرة {ordn} | Ordered {ordn} time"
-                                    safe_update_row(ordered_sheet, oi, [or_[0],qty,or_[2],dn,str(new_count),note])
-                                    break
+                        ord_ri, ord_row = merge_or_get_existing_row(ordered_sheet, sku)
+                        if ord_ri:
+                            while len(ord_row) < 6: ord_row.append("")
+                            cur_count, rest_notes = parse_count_dates(ord_row[5])
+                            new_count = cur_count + 1
+                            merged_note = append_count_date(rest_notes, new_count, dn)
+                            safe_update_row(ordered_sheet, ord_ri, [ord_row[0],qty,ord_row[2] or img,dn,str(new_count),merged_note])
                         else:
-                            safe_append(ordered_sheet,[sku,qty,img,dn,"1",""])
+                            safe_append(ordered_sheet,[sku,qty,img,dn,"1",append_count_date("",1,dn)])
                         safe_delete(requests_sheet,i)
                         st.rerun()
                 with cd:
@@ -758,14 +799,25 @@ with tab3:
         for ri, row in filtered:
             while len(row)<5: row.append("")
             sku,qty,img,da,dm = row[0],row[1],row[2],row[3],row[4]
-            c_img,c_info,c_del = st.columns([1,5,1])
+            cnt_un, dates_un = parse_count_dates(dm)
+            c_img,c_info,c_act = st.columns([1,4,2])
             with c_img: show_img(img,70)
             with c_info:
                 st.markdown(f"**SKU:** `{sku}`")
                 show_sku_inv(sku)
                 st.markdown(f"**Qty طلب | Requested:** {qty}")
-                st.caption(f"📅 Requested | طُلب: {da} | ❌ Unavailable | غير متوفر: {dm}")
-            with c_del:
+                if cnt_un > 1:
+                    st.warning(f"🔁 تكرر {cnt_un} مرة | Marked unavailable {cnt_un}x")
+                st.caption(f"📅 Requested | طُلب: {da}")
+                if dates_un:
+                    st.caption(f"❌ غير متوفر بتاريخ | Unavailable on: {dates_un}")
+            with c_act:
+                with st.popover("↩️ رجّع للموافقة\nReturn to Approved"):
+                    nq_un = st.text_input("الكمية المعدّلة | Adjusted Qty", value=qty, key=f"un_ret_qty_{ri}")
+                    if st.button("✅ أرسل للموافقة | Send to Approved", key=f"un_ret_conf_{ri}"):
+                        safe_append(approved_sheet,[sku,qty,nq_un,img,da,now_str()])
+                        safe_delete(unavailable_sheet,ri)
+                        st.rerun()
                 if st.button("🗑️", key=f"del_un_{ri}"):
                     safe_delete(unavailable_sheet,ri); st.rerun()
             st.divider()
@@ -792,15 +844,18 @@ with tab4:
         for ri, row in filtered:
             while len(row)<6: row.append("")
             sku,qty,img,da,cnt,note = row[0],row[1],row[2],row[3],row[4],row[5]
+            cnt_ord, dates_ord = parse_count_dates(note)
             c_img,c_info,c_act = st.columns([1,4,2])
             with c_img: show_img(img,70)
             with c_info:
                 st.markdown(f"**SKU:** `{sku}`")
                 show_sku_inv(sku)
                 st.markdown(f"**Quantity | الكمية:** {qty}")
-                if note:
-                    st.warning(f"🔁 {note}")
-                st.caption(f"📅 Date | التاريخ: {da} | 🔢 Order Count | عدد الطلبات: {cnt}")
+                if cnt_ord > 1:
+                    st.warning(f"🔁 تكرر {cnt_ord} مرة | Ordered {cnt_ord}x")
+                if dates_ord:
+                    st.caption(f"🗓️ تواريخ الطلب | Order dates: {dates_ord}")
+                st.caption(f"📅 آخر تحديث | Last update: {da} | 🔢 عدد الطلبات | Order Count: {cnt}")
             with c_act:
                 ca,cb = st.columns(2)
                 with ca:
@@ -921,17 +976,23 @@ with tab5:
                 st.session_state["confirm_clear_sc"] = True
         confirm_clear("clear_sc", scheduled_sheet, "الجدولة | Schedule")
 
-        srch_asn = st.text_input("🔍 بحث ASN | Search by ASN", key="srch_asn", placeholder="اكتب رقم ASN...")
+        c_srch1, c_srch2 = st.columns(2)
+        with c_srch1:
+            srch_asn = st.text_input("🔍 بحث ASN | Search by ASN", key="srch_asn", placeholder="اكتب رقم ASN...")
+        with c_srch2:
+            srch_sku_sch = st.text_input("🔍 بحث SKU | Search by SKU", key="srch_sku_sch", placeholder="اكتب SKU...")
         today = datetime.now().date()
         st.write(f"**إجمالي ASN | Total ASNs: {len(asn_groups)}**")
 
         for asn, group in asn_groups.items():
             if srch_asn and srch_asn.strip().upper() not in asn.upper():
                 continue
+            skus_ = group["skus"]
+            if srch_sku_sch and not any(srch_sku_sch.strip().upper() in r[1].strip().upper() for r in skus_):
+                continue
             sdate   = group["date"]
             pd_date = parse_excel_date(sdate)
             is_exp  = pd_date and today > pd_date.date()
-            skus_   = group["skus"]
             has_alert = any(
                 inv_map.get(r[1].strip().upper(),{}).get("sales",0) > 0 and
                 _to_int(r[2]) > inv_map.get(r[1].strip().upper(),{}).get("sales",0)
