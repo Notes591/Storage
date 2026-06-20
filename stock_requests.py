@@ -67,6 +67,25 @@ sheets = {}
 for tab, headers in TABS_CONFIG.items():
     sheets[tab] = get_or_create_worksheet(tab, headers)
 
+def sync_header(sheet, expected_headers, retries=3, delay=1):
+    """لو الشيت قديم وناقصه أعمدة جديدة من TABS_CONFIG، يضيفها لصف الهيدر من غير ما يلمس البيانات"""
+    for attempt in range(retries):
+        try:
+            current = sheet.row_values(1)
+            if len(current) >= len(expected_headers):
+                return
+            missing = expected_headers[len(current):]
+            for offset, col_name in enumerate(missing):
+                sheet.update_cell(1, len(current) + offset + 1, col_name)
+            return
+        except gspread.exceptions.APIError:
+            time.sleep(delay * (2 ** attempt))
+        except Exception:
+            return
+
+for tab, headers in TABS_CONFIG.items():
+    sync_header(sheets[tab], headers)
+
 def get_or_create_links_ws(retries=5, delay=2):
     for attempt in range(retries):
         try:
@@ -279,6 +298,19 @@ def now_str():
 
 def file_timestamp():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def rows_to_df(rows, headers):
+    """يبني DataFrame من صفوف الشيت حتى لو أطوالها مش متطابقة مع الهيدر (صفوف قديمة قبل إضافة عمود جديد مثلاً)"""
+    n = len(headers)
+    fixed = []
+    for r in rows:
+        r = list(r)
+        if len(r) < n:
+            r = r + [""] * (n - len(r))
+        elif len(r) > n:
+            r = r[:n]
+        fixed.append(r)
+    return pd.DataFrame(fixed, columns=headers)
 
 def to_excel(df):
     buf = io.BytesIO()
@@ -804,7 +836,7 @@ with tab2:
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_ap", placeholder="اكتب SKU...")
         indexed_ap = [(i+2, r) for i, r in enumerate(rows_ap)]
         filtered = [(ri, r) for ri, r in indexed_ap if not srch or srch.strip().upper() in r[0].upper()]
-        df_ap = pd.DataFrame(rows_ap, columns=data_ap[0])
+        df_ap = rows_to_df(rows_ap, data_ap[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_ap,"approved")
         with c2:
@@ -841,7 +873,7 @@ with tab3:
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_un", placeholder="اكتب SKU...")
         indexed_un = [(i+2, r) for i, r in enumerate(rows_un)]
         filtered = [(ri, r) for ri, r in indexed_un if not srch or srch.strip().upper() in r[0].upper()]
-        df_un = pd.DataFrame(rows_un, columns=data_un[0])
+        df_un = rows_to_df(rows_un, data_un[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_un,"unavailable")
         with c2:
@@ -893,7 +925,7 @@ with tab4:
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_ord", placeholder="اكتب SKU...")
         indexed_ord = [(i+2, r) for i, r in enumerate(rows_ord)]
         filtered = [(ri, r) for ri, r in indexed_ord if not srch or srch.strip().upper() in r[0].upper()]
-        df_ord = pd.DataFrame(rows_ord, columns=data_ord[0])
+        df_ord = rows_to_df(rows_ord, data_ord[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_ord,"ordered")
         with c2:
@@ -1025,7 +1057,7 @@ with tab5:
                 asn_groups[asn] = {"date":r[3],"skus":[],"checked": asn.upper() in checked_asns}
             asn_groups[asn]["skus"].append(r)
 
-        df_sch = pd.DataFrame(rows_sch, columns=data_sch[0])
+        df_sch = rows_to_df(rows_sch, data_sch[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_sch,"scheduled")
         with c2:
@@ -1216,7 +1248,7 @@ with tab_check:
             chk_groups[asn]["skus"].append(r)
             chk_groups[asn]["indices"].append(idx)
 
-        df_chk = pd.DataFrame(rows_chk, columns=data_chk[0])
+        df_chk = rows_to_df(rows_chk, data_chk[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_chk,"check")
         with c2:
@@ -1312,7 +1344,7 @@ with tab6:
         srch = st.text_input("🔍 بحث ASN | Search ASN", key="srch_can", placeholder="اكتب ASN...")
         indexed_can = [(i+2, r) for i, r in enumerate(rows_can)]
         filtered = [(ri, r) for ri, r in indexed_can if not srch or srch.strip().upper() in r[0].upper()]
-        df_can = pd.DataFrame(rows_can, columns=data_can[0])
+        df_can = rows_to_df(rows_can, data_can[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_can,"cancelled")
         with c2:
@@ -1354,7 +1386,7 @@ with tab7:
             asn_res_groups[asn]["skus"].append(r)
             asn_res_groups[asn]["indices"].append(idx)
 
-        df_res = pd.DataFrame(rows_res, columns=data_res[0])
+        df_res = rows_to_df(rows_res, data_res[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_res,"rescheduled")
         with c2:
@@ -1508,7 +1540,7 @@ with tab9:
             st.info(f"⚙️ مستثنى من الإجمالي | Excluded: **{', '.join(sorted(excluded_wh))}**")
         srch = st.text_input("🔍 بحث SKU | Search SKU", key="srch_inv", placeholder="اكتب SKU...")
         raw_inv = get_cached(inventory_sheet)
-        df_inv_dl = pd.DataFrame(raw_inv[1:], columns=raw_inv[0])
+        df_inv_dl = rows_to_df(raw_inv[1:], raw_inv[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_inv_dl,"inventory")
         with c2:
@@ -1698,7 +1730,7 @@ with tab11:
         st.info("لا يوجد منتهي | No expired items.")
     else:
         rows_ex = data_ex[1:]
-        df_ex = pd.DataFrame(rows_ex, columns=data_ex[0])
+        df_ex = rows_to_df(rows_ex, data_ex[0])
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_ex,"expired")
         with c2:
