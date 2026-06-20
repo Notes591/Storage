@@ -1560,20 +1560,20 @@ with tab10:
             })
 
         STATUS_META = {
-            "action_needed": {"label":"🆘 محتاج إجراء | Needs Action",          "color":"#ef4444"},
-            "scheduled_gap": {"label":"⚠️ مجدول لكن الجدولة مش هتكفي | Scheduled but Gap","color":"#f97316"},
-            "scheduled_ok":  {"label":"📅 مجدول وكافي | Scheduled & Covered",   "color":"#3b82f6"},
-            "ordered":       {"label":"🛒 تم الطلب | Ordered",                  "color":"#a855f7"},
-            "unavailable":   {"label":"❌ غير متوفر | Unavailable",             "color":"#6b7280"},
+            "action_needed": {"label":"🆘 محتاج إجراء",          "full":"🆘 محتاج إجراء | Needs Action",          "color":"#ef4444"},
+            "scheduled_gap": {"label":"⚠️ مجدول بفجوة",          "full":"⚠️ مجدول لكن الجدولة مش هتكفي | Scheduled but Gap","color":"#f97316"},
+            "scheduled_ok":  {"label":"📅 مجدول وكافي",          "full":"📅 مجدول وكافي | Scheduled & Covered",   "color":"#3b82f6"},
+            "ordered":       {"label":"🛒 تم الطلب",             "full":"🛒 تم الطلب | Ordered",                  "color":"#a855f7"},
+            "unavailable":   {"label":"❌ غير متوفر",            "full":"❌ غير متوفر | Unavailable",             "color":"#6b7280"},
         }
 
-        # ══ فلتر الحالة ══
+        # ══ تنزيل + ملخص عام ══
         c1,c2 = st.columns(2)
         with c1:
             df_low = pd.DataFrame([
                 {"SKU":e["sku"],"Total Stock":e["total"],"Monthly Sales":e["sales"],"Stock %":e["pct"],
                  "Daily Sales":e["daily_sales"],"Coverage Days":e["coverage_days"],
-                 "Status":STATUS_META[e["status"]]["label"],
+                 "Status":STATUS_META[e["status"]]["full"],
                  "Next Schedule Date": e["next_sched"]["date"] if e["next_sched"] else "",
                  "Gap Days": e["gap_days"] if e["gap_days"] is not None else "",
                  "Image URL":e["img"]}
@@ -1583,47 +1583,20 @@ with tab10:
         with c2:
             st.error(f"🔴 SKUs منخفضة | Low Stock SKUs: {len(low_stock)}")
 
-        status_options = ["الكل | All"] + [v["label"] for v in STATUS_META.values()]
-        chosen_status = st.selectbox("🔎 فلترة بالحالة | Filter by Status", status_options, key="low_stock_status_filter")
-        srch_low = st.text_input("🔍 بحث SKU | Search SKU", key="srch_low_stock", placeholder="اكتب SKU...")
-
-        # ملخص سريع للحالات
-        summary_cols = st.columns(len(STATUS_META))
-        status_counts = {k:0 for k in STATUS_META}
+        # ══ تجميع كل SKU تحت حالته ══
+        status_groups = {k: [] for k in STATUS_META}
         for e in enriched:
-            status_counts[e["status"]] += 1
-        for i,(k,meta) in enumerate(STATUS_META.items()):
-            with summary_cols[i]:
-                st.markdown(
-                    f'<div style="background:{meta["color"]}22;border:1px solid {meta["color"]};border-radius:8px;'
-                    f'padding:6px 8px;text-align:center;">'
-                    f'<div style="font-size:11px;color:white;">{meta["label"]}</div>'
-                    f'<div style="font-size:18px;font-weight:bold;color:white;">{status_counts[k]}</div></div>',
-                    unsafe_allow_html=True)
+            status_groups[e["status"]].append(e)
 
-        st.divider()
-
-        for e in enriched:
-            if srch_low and srch_low.strip().upper() not in e["sku"].upper():
-                continue
-            if chosen_status != "الكل | All" and STATUS_META[e["status"]]["label"] != chosen_status:
-                continue
-
+        def render_low_stock_card(e):
             sku, total, sales, pct, img = e["sku"], e["total"], e["sales"], e["pct"], e["img"]
             if pct<20:   sev_color="#ef4444"; sev_label="⛔ حرج جداً | Critical"
             elif pct<35: sev_color="#f97316"; sev_label="🔴 منخفض جداً | Very Low"
             else:        sev_color="#eab308"; sev_label="🟡 منخفض | Low"
 
-            meta = STATUS_META[e["status"]]
-            border = meta["color"]
-            bg = border + "1a"
-
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(img,70)
             with c_info:
-                st.markdown(
-                    f'<div style="border-left:4px solid {border};background:{bg};border-radius:8px;padding:6px 12px;margin-bottom:6px;">'
-                    f'<b>{meta["label"]}</b></div>', unsafe_allow_html=True)
                 st.markdown(f"**SKU:** `{sku}`")
                 show_sku_inv(sku)
                 st.progress(min(pct/100,1.0))
@@ -1649,6 +1622,26 @@ with tab10:
                 else:
                     st.error("🆘 مفيش جدولة ولا طلب ولا حتى مسجل غير متوفر — يحتاج متابعة فورية | No schedule, no order, not marked unavailable — needs immediate attention")
             st.divider()
+
+        # ══ تابات فرعية لكل حالة ══
+        sub_labels = [f'{STATUS_META[k]["label"]} ({len(status_groups[k])})' for k in STATUS_META]
+        sub_tabs = st.tabs(sub_labels)
+
+        for (status_key, meta), sub_tab in zip(STATUS_META.items(), sub_tabs):
+            with sub_tab:
+                group_items = status_groups[status_key]
+                if not group_items:
+                    st.success("✅ لا يوجد عناصر في هذه الحالة | No items in this status")
+                    continue
+                srch_key = f"srch_low_{status_key}"
+                srch_low = st.text_input("🔍 بحث SKU | Search SKU", key=srch_key, placeholder="اكتب SKU...")
+                st.caption(f"📦 العدد | Count: {len(group_items)}")
+                st.divider()
+                for e in group_items:
+                    if srch_low and srch_low.strip().upper() not in e["sku"].upper():
+                        continue
+                    render_low_stock_card(e)
+
 
 
 # ══ TAB 11 — منتهية الصلاحية ══
