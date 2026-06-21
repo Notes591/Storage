@@ -39,6 +39,7 @@ TABS_CONFIG = {
     "Rescheduled":       ["ASN","SKU","Quantity","Old Schedule Date","Image URL","Date Added","Reschedule Reason","Date Moved"],
     "Expired":           ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Date Expired"],
     "Inventory":         ["SKU","Warehouse","Stock","Monthly Sales","Image URL","Date Uploaded"],
+    "DailyOrders":       ["SKU","Order Timestamp","Status","Date Uploaded"],
     "Settings":          ["Key","Value"],
     "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelNotifications": ["ASN","SKUs","Schedule Date","Reason","Timestamp"],
@@ -99,6 +100,7 @@ cancelled_sheet   = sheets["CancelledSchedule"]
 reschedule_sheet  = sheets["Rescheduled"]
 expired_sheet     = sheets["Expired"]
 inventory_sheet      = sheets["Inventory"]
+daily_orders_sheet   = sheets["DailyOrders"]
 settings_sheet       = sheets["Settings"]
 cancel_notif_sheet   = sheets["CancelNotifications"]
 
@@ -546,7 +548,110 @@ def confirm_clear(key, sheet, label=""):
             st.session_state[f"confirm_{key}"] = False
             st.rerun()
 
+# ══════════════════════════════════════════════
+# ══ مراجعة المخزون / مراجعة المبيعات — نفس منطق استعلامي Access ══
+# ══════════════════════════════════════════════
+def build_daily_orders_map(target_date):
+    """يرجع dict: sku_upper -> عدد صفوف الأوردرز لليوم المحدد (= Sum(QTY) بافتراض كل صف = قطعة واحدة)."""
+    data = get_cached(daily_orders_sheet)
+    counts = {}
+    if len(data) <= 1:
+        return counts
+    for row in data[1:]:
+        while len(row) < 2: row.append("")
+        sku, ts = row[0].strip(), row[1].strip()
+        if not sku or not ts:
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() == target_date:
+            sku_up = sku.upper()
+            counts[sku_up] = counts.get(sku_up, 0) + 1
+    return counts
+
+def compute_stock_sales_rows(target_date):
+    """يحسب لكل SKU ظهر في أوردرز اليوم المحدد نفس مخرجات استعلامي مراجعة مخزون / مراجعة مبيعات."""
+    daily_qty = build_daily_orders_map(target_date)
+    rows = []
+    for sku_up, qty in daily_qty.items():
+        info        = inv_map.get(sku_up, {})
+        stock       = info.get("total_stock", 0)
+        sales_month = info.get("sales", 0)
+        sku_disp    = info.get("sku", sku_up)
+        img         = info.get("img", "")
+        threshold_10d = sales_month/30*10
+        stock_alert = (stock - threshold_10d) < 0
+        sales_alert = sales_month > 0 and abs(qty)*30 > sales_month
+        suggested_qty = round(sales_month/30*18) if stock_alert else 0
+        days_to_stockout       = round(stock/(sales_month/30)) if sales_month > 0 else 0
+        days_to_stockout_today = round(stock/abs(qty)) if abs(qty) > 0 else 0
+        rows.append({
+            "sku": sku_disp, "sku_up": sku_up, "qty": qty, "stock": stock, "sales_month": sales_month,
+            "img": img, "stock_alert": stock_alert, "sales_alert": sales_alert,
+            "suggested_qty": suggested_qty, "days_to_stockout": days_to_stockout,
+            "days_to_stockout_today": days_to_stockout_today,
+        })
+    return rows
+
+def get_latest_schedule_info(sku):
+    """يدوّر على SKU في الجدولة والتشييك ويرجع أقرب جدولة (تاريخ) أو None."""
+    sku_up = sku.strip().upper()
+    candidates = []
+    for sheet_key in ("Scheduled","Check"):
+        data = get_cached(sheets[sheet_key])
+        if len(data) <= 1:
+            continue
+        for row in data[1:]:
+            while len(row) < 4: row.append("")
+            if row[1].strip().upper() == sku_up:
+                d = parse_excel_date(row[3])
+                candidates.append({"asn": row[0], "date": row[3], "qty": row[2], "parsed": d, "source": sheet_key})
+    if not candidates:
+        return None
+    dated = [c for c in candidates if c["parsed"]]
+    if dated:
+        dated.sort(key=lambda c: c["parsed"])
+        return dated[0]
+    return candidates[0]
+
+def get_unavailable_ordered_note(sku):
+    """لو الـ SKU سبق اتسجل غير متوفر أو تم طلبه، يرجع ملاحظات بالتواريخ."""
+    sku_up = sku.strip().upper()
+    notes = []
+    data_un = get_cached(unavailable_sheet)
+    if len(data_un) > 1:
+        for row in data_un[1:]:
+            if row and row[0].strip().upper() == sku_up:
+                while len(row) < 5: row.append("")
+                cnt, dates = parse_count_dates(row[4])
+                notes.append(f"❌ غير متوفر سابقاً | Was unavailable ({cnt}x) — {dates}")
+                break
+    data_ord = get_cached(ordered_sheet)
+    if len(data_ord) > 1:
+        for row in data_ord[1:]:
+            if row and row[0].strip().upper() == sku_up:
+                while len(row) < 6: row.append("")
+                cnt, dates = parse_count_dates(row[5])
+                notes.append(f"🛒 تم طلبه سابقاً | Was ordered ({cnt}x) — {dates}")
+                break
+    return notes
+
+def schedule_coverage_badge(sku, days_to_stockout, delay_days):
+    """يرجع (نص الحالة, لون, معلومات الجدولة) حسب هل الجدولة هتوصل قبل نفاد المخزون أو لأ."""
+    sched = get_latest_schedule_info(sku)
+    if not sched:
+        return ("🔴 محتاج جدولة الآن | Needs scheduling now", "#ef4444", None)
+    if not sched["parsed"]:
+        return (f"⚠️ مجدول (ASN {sched['asn']}) بدون تاريخ واضح | Scheduled, unclear date", "#f59e0b", sched)
+    arrival = sched["parsed"] + timedelta(days=delay_days)
+    stockout_date = datetime.now() + timedelta(days=days_to_stockout) if days_to_stockout > 0 else datetime.now()
+    src_label = "تشييك | Check" if sched["source"]=="Check" else "الجدولة | Scheduled"
+    if arrival.date() <= stockout_date.date():
+        return (f"✅ مجدول (ASN {sched['asn']}) بتاريخ {sched['date']} [{src_label}] — هيوصل قبل النفاد | Will arrive before stockout", "#22c55e", sched)
+    else:
+        return (f"🔴 مجدول (ASN {sched['asn']}) بتاريخ {sched['date']} [{src_label}] — لكن متأخر عن موعد النفاد | But too late before stockout", "#ef4444", sched)
+
 ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الرابعة|Fourth",4:"الخامسة|Fifth"}
+
 
 # ══════════════════════════════════════════════
 st.title("📦 Stock Requests | طلبات المخزون")
@@ -562,11 +667,12 @@ tabs = st.tabs([
     "🔄 تعديل موعد | Rescheduled",
     "⚠️ تنبيهات | Alerts",
     "📊 المخزون | Inventory",
-    "🔴 مخزون منخفض | Low Stock",
+    "🔴 مراجعة المخزون | Stock Review",
     "🗂️ منتهية | Expired",
     "⚙️ الإعدادات | Settings",
+    "📈 مراجعة المبيعات | Sales Review",
 ])
-(tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12) = tabs
+(tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13) = tabs
 
 # ══ TAB 1 — الطلبات ══
 with tab1:
@@ -1478,37 +1584,86 @@ with tab9:
                 st.caption(f"📅 {info['date']}")
             st.divider()
 
-# ══ TAB 10 — مخزون منخفض ══
+# ══ TAB 10 — مراجعة المخزون ══
 with tab10:
-    st.subheader("🔴 مخزون منخفض | Low Stock")
-    st.caption("المخزون الإجمالي أقل من 50% من المبيع الشهري | Total stock < 50% of monthly sales")
-    low_stock = []
-    for sku_key,info in inv_map.items():
-        total=info["total_stock"]; sales=info["sales"]
-        if sales>0 and total<sales*0.5:
-            pct=round(total/sales*100,1)
-            low_stock.append((info["sku"],total,sales,pct,info["img"]))
-    low_stock.sort(key=lambda x:x[3])
+    st.subheader("🔴 مراجعة المخزون | Stock Review")
+    st.caption("نفس منطق استعلام Access \"مراجعة مخزون\" — المخزون أقل من تغطية 10 أيام بيع | Same logic as the Access \"مراجعة مخزون\" query — stock below 10-day sales coverage")
+
+    with st.expander("📤 رفع بيانات الأوردرز اليومية | Upload Daily Orders", expanded=False):
+        st.caption("ارفع ملف الأوردرز (لازم يحتوي على عمودي sku و order_timestamp) — هيتم استبدال البيانات بالكامل في كل رفعة | Upload orders file (needs sku & order_timestamp columns) — fully replaces existing data each time")
+        upl_do = st.file_uploader("ملف الأوردرز | Orders file", type=["xlsx","xls","csv"], key="daily_orders_upload")
+        if upl_do:
+            try:
+                df_do = pd.read_csv(upl_do,dtype=str).fillna("") if upl_do.name.endswith(".csv") else pd.read_excel(upl_do,dtype=str).fillna("")
+                sku_col_do = ts_col_do = status_col_do = None
+                for c in df_do.columns:
+                    cl = c.strip().lower()
+                    if cl == "sku": sku_col_do = c
+                    if cl == "order_timestamp" or cl == "order timestamp": ts_col_do = c
+                    if cl == "status": status_col_do = c
+                if not sku_col_do:
+                    for c in df_do.columns:
+                        if "sku" in c.strip().lower(): sku_col_do = c; break
+                if not ts_col_do:
+                    for c in df_do.columns:
+                        cl = c.strip().lower()
+                        if "timestamp" in cl or "date" in cl: ts_col_do = c; break
+                st.info(f"📊 {len(df_do)} صف | SKU:`{sku_col_do}` Timestamp:`{ts_col_do}`")
+                st.dataframe(df_do.head(10), use_container_width=True, height=150)
+                if sku_col_do and ts_col_do:
+                    if st.button("🔄 رفع واستبدال | Upload & Replace", type="primary", key="btn_upload_daily_orders"):
+                        dn = now_str()
+                        to_add = []
+                        for _,row in df_do.iterrows():
+                            sku_v = str(row[sku_col_do]).strip()
+                            ts_v  = str(row[ts_col_do]).strip()
+                            st_v  = str(row[status_col_do]).strip() if status_col_do else ""
+                            if sku_v and sku_v.lower()!="nan":
+                                to_add.append([sku_v, ts_v, st_v, dn])
+                        safe_delete_all(daily_orders_sheet)
+                        safe_batch_append(daily_orders_sheet, to_add)
+                        clear_cache(daily_orders_sheet)
+                        st.success(f"✅ تم رفع {len(to_add)} صف واستبدال البيانات | Uploaded & replaced {len(to_add)} rows")
+                        st.rerun()
+                else:
+                    st.error("❌ مش لاقي أعمدة SKU أو order_timestamp | Couldn't detect SKU or order_timestamp columns")
+            except Exception as e:
+                st.error(f"❌ {e}")
+
+    target_date = datetime.now().date() - timedelta(days=1)
+    st.caption(f"📅 بيانات يوم | Data for: **{target_date.strftime('%Y-%m-%d')}** (أمس | yesterday)")
+
+    delay_days = int(load_settings().get("schedule_delay_days","3") or 3)
+    all_review_rows = compute_stock_sales_rows(target_date)
+    stock_review_rows = [r for r in all_review_rows if r["stock_alert"]]
+    stock_review_rows.sort(key=lambda r: (-r["qty"], -r["sales_month"]))
+
     if not inv_map:
-        st.info("ارفع ملف المخزون أولاً | Upload Inventory first")
-    elif not low_stock:
-        st.success("✅ كل المخزون كافي | All stock levels sufficient (≥ 50% of sales)")
+        st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
+    elif not stock_review_rows:
+        st.success("✅ لا توجد SKUs محتاجة مراجعة مخزون | No SKUs need stock review")
     else:
-        df_low = pd.DataFrame(low_stock, columns=["SKU","Total Stock","Monthly Sales","Stock %","Image URL"])
+        df_sr = pd.DataFrame([{
+            "SKU": r["sku"], "Qty Sold (Yesterday)": r["qty"], "Stock": r["stock"], "Monthly Sales": r["sales_month"],
+            "Suggested Qty": r["suggested_qty"], "Days to Stockout": r["days_to_stockout"]
+        } for r in stock_review_rows])
         c1,c2 = st.columns(2)
-        with c1: dl_btn(df_low,"low_stock")
-        with c2: st.error(f"🔴 SKUs منخفضة | Low Stock SKUs: {len(low_stock)}")
-        for sku,total,sales,pct,img in low_stock:
-            if pct<20:   color="#ef4444"; label="⛔ حرج جداً | Critical"
-            elif pct<35: color="#f97316"; label="🔴 منخفض جداً | Very Low"
-            else:        color="#eab308"; label="🟡 منخفض | Low"
+        with c1: dl_btn(df_sr,"stock_review")
+        with c2: st.error(f"🔴 SKUs محتاجة مراجعة | Needs Review: {len(stock_review_rows)}")
+
+        for r in stock_review_rows:
             c_img,c_info = st.columns([1,6])
-            with c_img: show_img(img,70)
+            with c_img: show_img(r["img"],70)
             with c_info:
-                st.markdown(f"**SKU:** `{sku}`")
-                show_sku_inv(sku)
-                st.progress(min(pct/100,1.0))
-                st.markdown(f"{label} — **{pct}%** &nbsp;|&nbsp; مخزون | Stock: **{total}** / مبيع | Sales: **{sales}**")
+                st.markdown(f"**SKU:** `{r['sku']}`")
+                st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']} &nbsp;|&nbsp; 🛒 **بيع أمس | Yesterday Qty:** {r['qty']}")
+                st.markdown(f"💡 **اقتراح الكمية | Suggested Qty:** **{r['suggested_qty']}** &nbsp;|&nbsp; ⏳ **نفاد خلال | Days to stockout:** {r['days_to_stockout']} يوم")
+                if r["sales_alert"]:
+                    st.warning("📈 مبيعات أعلى من المعتاد كمان | Also selling faster than usual")
+                badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days)
+                st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                for note in get_unavailable_ordered_note(r["sku"]):
+                    st.caption(note)
             st.divider()
 
 # ══ TAB 11 — منتهية الصلاحية ══
@@ -1581,3 +1736,57 @@ with tab12:
              for wh,stk in sorted(wh_totals.items())],
             columns=["Warehouse | المستودع","Total Stock | إجمالي المخزون","Status | الحالة"])
         st.dataframe(wh_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### ⏳ مدة وصول المخزون بعد الجدولة | Stock Arrival Delay After Scheduling")
+    st.caption("عدد الأيام اللي ياخدها المخزون عشان يوصل بعد تاريخ الجدولة (مثال: لو جدولت يوم 16، يوصل بعدها بـ 2-3 أيام) — تُستخدم في تابي مراجعة المخزون ومراجعة المبيعات | Days for stock to arrive after the schedule date — used in Stock Review & Sales Review tabs")
+    current_delay = int(current_settings.get("schedule_delay_days","3") or 3)
+    new_delay = st.number_input("عدد الأيام | Delay Days", min_value=0, max_value=30, value=current_delay, step=1, key="delay_days_input")
+    if st.button("💾 حفظ مدة الوصول | Save Delay", key="save_delay_days"):
+        save_setting("schedule_delay_days", str(new_delay))
+        st.success("✅ تم الحفظ | Saved")
+        st.rerun()
+
+# ══ TAB 13 — مراجعة المبيعات ══
+with tab13:
+    st.subheader("📈 مراجعة المبيعات | Sales Review")
+    st.caption("نفس منطق استعلام Access \"مراجعة مبيعات\" — مبيعات أمس أعلى من المعتاد لكن المخزون لسه كافي | Same logic as the Access \"مراجعة مبيعات\" query — yesterday's sales unusually high but stock still sufficient")
+
+    target_date2 = datetime.now().date() - timedelta(days=1)
+    st.caption(f"📅 بيانات يوم | Data for: **{target_date2.strftime('%Y-%m-%d')}** (أمس | yesterday)")
+
+    delay_days2 = int(load_settings().get("schedule_delay_days","3") or 3)
+    all_review_rows2 = compute_stock_sales_rows(target_date2)
+    valid_days_set = {1,2,3,4,5,6,7,8,10}
+    sales_review_rows = [r for r in all_review_rows2
+        if r["days_to_stockout_today"] in valid_days_set
+        and r["sales_month"] > 0
+        and r["sales_alert"]
+        and not r["stock_alert"]]
+    sales_review_rows.sort(key=lambda r: (-r["qty"], -r["sales_month"]))
+
+    if not inv_map:
+        st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
+    elif not sales_review_rows:
+        st.success("✅ لا توجد SKUs محتاجة مراجعة مبيعات | No SKUs need sales review")
+    else:
+        df_sales = pd.DataFrame([{
+            "SKU": r["sku"], "Qty Sold (Yesterday)": r["qty"], "Stock": r["stock"], "Monthly Sales": r["sales_month"],
+            "Days to Stockout (Today's Rate)": r["days_to_stockout_today"]
+        } for r in sales_review_rows])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_sales,"sales_review")
+        with c2: st.warning(f"📈 SKUs محتاجة مراجعة | Needs Review: {len(sales_review_rows)}")
+
+        for r in sales_review_rows:
+            c_img,c_info = st.columns([1,6])
+            with c_img: show_img(r["img"],70)
+            with c_info:
+                st.markdown(f"**SKU:** `{r['sku']}`")
+                st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']} &nbsp;|&nbsp; 🛒 **بيع أمس | Yesterday Qty:** {r['qty']}")
+                st.markdown(f"⚡ **نفاد خلال بيع اليوم | Days to stockout (today's rate):** {r['days_to_stockout_today']} يوم")
+                badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days2)
+                st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                for note in get_unavailable_ordered_note(r["sku"]):
+                    st.caption(note)
+            st.divider()
