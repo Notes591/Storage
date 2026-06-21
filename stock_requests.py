@@ -568,9 +568,32 @@ def build_daily_orders_map(target_date):
             counts[sku_up] = counts.get(sku_up, 0) + 1
     return counts
 
-def compute_stock_sales_rows(target_date):
-    """يحسب لكل SKU ظهر في أوردرز اليوم المحدد نفس مخرجات استعلامي مراجعة مخزون / مراجعة مبيعات."""
+def build_daily_orders_counts(dates):
+    """يرجع dict: sku_upper -> {date: عدد} لقائمة تواريخ محددة (مرور واحد على الشيت بدل تكرار لكل تاريخ)."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    counts = {}
+    if len(data) <= 1:
+        return counts
+    for row in data[1:]:
+        while len(row) < 2: row.append("")
+        sku, ts = row[0].strip(), row[1].strip()
+        if not sku or not ts:
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() in dates_set:
+            sku_up = sku.upper()
+            if sku_up not in counts:
+                counts[sku_up] = {dd: 0 for dd in dates}
+            counts[sku_up][d.date()] += 1
+    return counts
+
+def compute_stock_sales_rows(target_date, display_dates=None):
+    """يحسب لكل SKU ظهر في أوردرز اليوم المحدد نفس مخرجات استعلامي مراجعة مخزون / مراجعة مبيعات.
+    display_dates (اختياري): قائمة تواريخ إضافية تتعرض جنب كل SKU (مثلاً أمس/أول أمس/أول أول أمس)."""
     daily_qty = build_daily_orders_map(target_date)
+    display_dates = display_dates or [target_date]
+    multi_counts = build_daily_orders_counts(display_dates)
     rows = []
     for sku_up, qty in daily_qty.items():
         info        = inv_map.get(sku_up, {})
@@ -584,13 +607,41 @@ def compute_stock_sales_rows(target_date):
         suggested_qty = round(sales_month/30*18) if stock_alert else 0
         days_to_stockout       = round(stock/(sales_month/30)) if sales_month > 0 else 0
         days_to_stockout_today = round(stock/abs(qty)) if abs(qty) > 0 else 0
+        day_counts = multi_counts.get(sku_up, {dd:0 for dd in display_dates})
         rows.append({
             "sku": sku_disp, "sku_up": sku_up, "qty": qty, "stock": stock, "sales_month": sales_month,
             "img": img, "stock_alert": stock_alert, "sales_alert": sales_alert,
             "suggested_qty": suggested_qty, "days_to_stockout": days_to_stockout,
             "days_to_stockout_today": days_to_stockout_today,
+            "day_counts": day_counts,
         })
     return rows
+
+def compute_missing_inventory_rows(display_dates):
+    """SKUs ظهرت في الأوردرز خلال آخر كذا يوم (أمس/أول أمس/أول أول أمس) لكن مالهاش سجل في شيت Inventory
+    — يعني مخزونها انتهى بالكامل وخرجت من ملف المخزون. تظهر بنفس تفاصيل تابي المراجعة."""
+    multi_counts = build_daily_orders_counts(display_dates)
+    links_map_local = get_links_map()
+    rows = []
+    for sku_up, day_counts in multi_counts.items():
+        if sku_up in inv_map:
+            continue
+        total_recent = sum(day_counts.values())
+        if total_recent <= 0:
+            continue
+        rows.append({
+            "sku": sku_up, "sku_up": sku_up,
+            "img": links_map_local.get(sku_up, ""),
+            "day_counts": day_counts,
+            "total_recent": total_recent,
+        })
+    rows.sort(key=lambda r: -r["total_recent"])
+    return rows
+
+def render_day_counts_md(day_counts, dates, labels):
+    """يبني سطر Markdown بمبيعات كل يوم من التواريخ المعطاة بجانب بعض."""
+    parts = [f"**{lbl}:** {day_counts.get(d,0)}" for d, lbl in zip(dates, labels)]
+    return " &nbsp;|&nbsp; ".join(parts)
 
 def get_latest_schedule_info(sku):
     """يدوّر على SKU في الجدولة والتشييك ويرجع أقرب جدولة (تاريخ) أو None."""
@@ -1630,11 +1681,16 @@ with tab10:
             except Exception as e:
                 st.error(f"❌ {e}")
 
-    target_date = datetime.now().date() - timedelta(days=1)
-    st.caption(f"📅 بيانات يوم | Data for: **{target_date.strftime('%Y-%m-%d')}** (أمس | yesterday)")
+    today_d = datetime.now().date()
+    d1, d2, d3 = today_d - timedelta(days=1), today_d - timedelta(days=2), today_d - timedelta(days=3)
+    day_dates  = [d1, d2, d3]
+    day_labels = [f"أمس | Yesterday ({d1.strftime('%m-%d')})",
+                  f"أول أمس | Day before ({d2.strftime('%m-%d')})",
+                  f"أول أول أمس | 3 days ago ({d3.strftime('%m-%d')})"]
+    st.caption(f"📅 بيانات يوم | Data for: **{d1.strftime('%Y-%m-%d')}** (أمس | yesterday) — التنبيه نفسه مبني على أمس فقط، والأيام التانية للعرض فقط | Alert itself is based on yesterday only; the other days are for display")
 
     delay_days = int(load_settings().get("schedule_delay_days","3") or 3)
-    all_review_rows = compute_stock_sales_rows(target_date)
+    all_review_rows = compute_stock_sales_rows(d1, day_dates)
     stock_review_rows = [r for r in all_review_rows if r["stock_alert"]]
     stock_review_rows.sort(key=lambda r: (-r["qty"], -r["sales_month"]))
 
@@ -1644,7 +1700,8 @@ with tab10:
         st.success("✅ لا توجد SKUs محتاجة مراجعة مخزون | No SKUs need stock review")
     else:
         df_sr = pd.DataFrame([{
-            "SKU": r["sku"], "Qty Sold (Yesterday)": r["qty"], "Stock": r["stock"], "Monthly Sales": r["sales_month"],
+            "SKU": r["sku"], "Yesterday": r["day_counts"].get(d1,0), "Day Before": r["day_counts"].get(d2,0),
+            "3 Days Ago": r["day_counts"].get(d3,0), "Stock": r["stock"], "Monthly Sales": r["sales_month"],
             "Suggested Qty": r["suggested_qty"], "Days to Stockout": r["days_to_stockout"]
         } for r in stock_review_rows])
         c1,c2 = st.columns(2)
@@ -1656,11 +1713,39 @@ with tab10:
             with c_img: show_img(r["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
-                st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']} &nbsp;|&nbsp; 🛒 **بيع أمس | Yesterday Qty:** {r['qty']}")
+                st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
+                st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
                 st.markdown(f"💡 **اقتراح الكمية | Suggested Qty:** **{r['suggested_qty']}** &nbsp;|&nbsp; ⏳ **نفاد خلال | Days to stockout:** {r['days_to_stockout']} يوم")
                 if r["sales_alert"]:
                     st.warning("📈 مبيعات أعلى من المعتاد كمان | Also selling faster than usual")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days)
+                st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                for note in get_unavailable_ordered_note(r["sku"]):
+                    st.caption(note)
+            st.divider()
+
+    st.divider()
+    st.subheader("⛔ مخزون منتهي بالكامل | Completely Out of Stock")
+    st.caption("SKUs باعت في آخر 3 أيام لكن مالهاش سجل في ملف المخزون أصلاً — يبقى مخزونها انتهى وخرجت من الملف | SKUs with sales in the last 3 days but no record in the Inventory file at all — stock fully ran out")
+    missing_rows_t10 = compute_missing_inventory_rows(day_dates)
+    if not missing_rows_t10:
+        st.success("✅ لا يوجد SKUs خارجة عن المخزون | No SKUs missing from inventory")
+    else:
+        df_miss10 = pd.DataFrame([{
+            "SKU": r["sku"], "Yesterday": r["day_counts"].get(d1,0), "Day Before": r["day_counts"].get(d2,0),
+            "3 Days Ago": r["day_counts"].get(d3,0)
+        } for r in missing_rows_t10])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_miss10,"out_of_stock")
+        with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t10)}")
+        for r in missing_rows_t10:
+            c_img,c_info = st.columns([1,6])
+            with c_img: show_img(r["img"],70)
+            with c_info:
+                st.markdown(f"**SKU:** `{r['sku']}`")
+                st.error("⛔ مخزونه انتهى — مش موجود في ملف المخزون | Stock ran out — not found in inventory file")
+                st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
+                badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days)
                 st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
@@ -1752,11 +1837,16 @@ with tab13:
     st.subheader("📈 مراجعة المبيعات | Sales Review")
     st.caption("نفس منطق استعلام Access \"مراجعة مبيعات\" — مبيعات أمس أعلى من المعتاد لكن المخزون لسه كافي | Same logic as the Access \"مراجعة مبيعات\" query — yesterday's sales unusually high but stock still sufficient")
 
-    target_date2 = datetime.now().date() - timedelta(days=1)
-    st.caption(f"📅 بيانات يوم | Data for: **{target_date2.strftime('%Y-%m-%d')}** (أمس | yesterday)")
+    today_d2 = datetime.now().date()
+    e1, e2, e3 = today_d2 - timedelta(days=1), today_d2 - timedelta(days=2), today_d2 - timedelta(days=3)
+    day_dates2  = [e1, e2, e3]
+    day_labels2 = [f"أمس | Yesterday ({e1.strftime('%m-%d')})",
+                   f"أول أمس | Day before ({e2.strftime('%m-%d')})",
+                   f"أول أول أمس | 3 days ago ({e3.strftime('%m-%d')})"]
+    st.caption(f"📅 بيانات يوم | Data for: **{e1.strftime('%Y-%m-%d')}** (أمس | yesterday) — التنبيه نفسه مبني على أمس فقط، والأيام التانية للعرض فقط | Alert itself is based on yesterday only; the other days are for display")
 
     delay_days2 = int(load_settings().get("schedule_delay_days","3") or 3)
-    all_review_rows2 = compute_stock_sales_rows(target_date2)
+    all_review_rows2 = compute_stock_sales_rows(e1, day_dates2)
     valid_days_set = {1,2,3,4,5,6,7,8,10}
     sales_review_rows = [r for r in all_review_rows2
         if r["days_to_stockout_today"] in valid_days_set
@@ -1771,7 +1861,8 @@ with tab13:
         st.success("✅ لا توجد SKUs محتاجة مراجعة مبيعات | No SKUs need sales review")
     else:
         df_sales = pd.DataFrame([{
-            "SKU": r["sku"], "Qty Sold (Yesterday)": r["qty"], "Stock": r["stock"], "Monthly Sales": r["sales_month"],
+            "SKU": r["sku"], "Yesterday": r["day_counts"].get(e1,0), "Day Before": r["day_counts"].get(e2,0),
+            "3 Days Ago": r["day_counts"].get(e3,0), "Stock": r["stock"], "Monthly Sales": r["sales_month"],
             "Days to Stockout (Today's Rate)": r["days_to_stockout_today"]
         } for r in sales_review_rows])
         c1,c2 = st.columns(2)
@@ -1783,9 +1874,37 @@ with tab13:
             with c_img: show_img(r["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
-                st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']} &nbsp;|&nbsp; 🛒 **بيع أمس | Yesterday Qty:** {r['qty']}")
+                st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
+                st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 st.markdown(f"⚡ **نفاد خلال بيع اليوم | Days to stockout (today's rate):** {r['days_to_stockout_today']} يوم")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days2)
+                st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                for note in get_unavailable_ordered_note(r["sku"]):
+                    st.caption(note)
+            st.divider()
+
+    st.divider()
+    st.subheader("⛔ مخزون منتهي بالكامل | Completely Out of Stock")
+    st.caption("SKUs باعت في آخر 3 أيام لكن مالهاش سجل في ملف المخزون أصلاً — يبقى مخزونها انتهى وخرجت من الملف | SKUs with sales in the last 3 days but no record in the Inventory file at all — stock fully ran out")
+    missing_rows_t13 = compute_missing_inventory_rows(day_dates2)
+    if not missing_rows_t13:
+        st.success("✅ لا يوجد SKUs خارجة عن المخزون | No SKUs missing from inventory")
+    else:
+        df_miss13 = pd.DataFrame([{
+            "SKU": r["sku"], "Yesterday": r["day_counts"].get(e1,0), "Day Before": r["day_counts"].get(e2,0),
+            "3 Days Ago": r["day_counts"].get(e3,0)
+        } for r in missing_rows_t13])
+        c1,c2 = st.columns(2)
+        with c1: dl_btn(df_miss13,"out_of_stock")
+        with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t13)}")
+        for r in missing_rows_t13:
+            c_img,c_info = st.columns([1,6])
+            with c_img: show_img(r["img"],70)
+            with c_info:
+                st.markdown(f"**SKU:** `{r['sku']}`")
+                st.error("⛔ مخزونه انتهى — مش موجود في ملف المخزون | Stock ran out — not found in inventory file")
+                st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
+                badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days2)
                 st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
