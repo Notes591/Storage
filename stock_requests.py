@@ -643,6 +643,38 @@ def render_day_counts_md(day_counts, dates, labels):
     parts = [f"**{lbl}:** {day_counts.get(d,0)}" for d, lbl in zip(dates, labels)]
     return " &nbsp;|&nbsp; ".join(parts)
 
+def get_recent_expired_info(sku, days_back=4):
+    """يدوّر على SKU في شيت Expired (الجدولة منتهية الصلاحية) خلال آخر days_back يوم — حسب تاريخ الانتهاء.
+    يرجع أحدث سجل لو لقى، أو None لو مفيش جدولة منتهية مؤخراً لهذا الـ SKU."""
+    sku_up = sku.strip().upper()
+    data = get_cached(expired_sheet)
+    if len(data) <= 1:
+        return None
+    cutoff = datetime.now().date() - timedelta(days=days_back)
+    candidates = []
+    for row in data[1:]:
+        while len(row) < 7: row.append("")
+        if row[1].strip().upper() != sku_up:
+            continue
+        d_exp = parse_excel_date(row[6])
+        if d_exp and d_exp.date() >= cutoff:
+            candidates.append({"asn": row[0], "schedule_date": row[3], "date_expired": row[6], "parsed_expired": d_exp})
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c["parsed_expired"], reverse=True)
+    return candidates[0]
+
+def render_recent_expired_note(sku, days_back=4):
+    """يعرض ملاحظة لو الـ SKU كانت ليه جدولة انتهت خلال آخر days_back يوم."""
+    info = get_recent_expired_info(sku, days_back)
+    if not info:
+        return
+    st.markdown(
+        f'<span style="background:#7c2d12;color:#fed7aa;border-radius:6px;padding:3px 10px;font-size:12px;">'
+        f'📋 كانت مجدولة (ASN {info["asn"]}) بتاريخ {info["schedule_date"]} وانتهت الجدولة بتاريخ {info["date_expired"]} | '
+        f'Was scheduled but expired</span>',
+        unsafe_allow_html=True)
+
 def get_latest_schedule_info(sku):
     """يدوّر على SKU في الجدولة والتشييك ويرجع أقرب جدولة (تاريخ) أو None."""
     sku_up = sku.strip().upper()
@@ -1720,6 +1752,7 @@ with tab10:
                     st.warning("📈 مبيعات أعلى من المعتاد كمان | Also selling faster than usual")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days)
                 st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
             st.divider()
@@ -1747,6 +1780,7 @@ with tab10:
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days)
                 st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
             st.divider()
@@ -1879,6 +1913,7 @@ with tab13:
                 st.markdown(f"⚡ **نفاد خلال بيع اليوم | Days to stockout (today's rate):** {r['days_to_stockout_today']} يوم")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days2)
                 st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
             st.divider()
@@ -1906,6 +1941,7 @@ with tab13:
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days2)
                 st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
             st.divider()
