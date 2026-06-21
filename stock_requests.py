@@ -324,11 +324,12 @@ def parse_excel_date(val):
     except:
         return None
 
-def dl_btn(df, prefix, label="⬇️ Excel | Download"):
+def dl_btn(df, prefix, label="⬇️ Excel | Download", key=None):
     st.download_button(label, data=to_excel(df),
         file_name=f"{prefix}_{file_timestamp()}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True)
+        use_container_width=True,
+        key=key or f"dlbtn_{prefix}")
 
 # ══ CancelNotifications — حفظ/تحميل/تنظيف ══
 def load_cancel_notifications():
@@ -629,11 +630,15 @@ def compute_missing_inventory_rows(display_dates):
         total_recent = sum(day_counts.values())
         if total_recent <= 0:
             continue
+        # مفيش "مبيع شهري" رسمي ليها لأنها مش موجودة في ملف المخزون أصلاً —
+        # بنحسب تقدير تقريبي بناءً على متوسط آخر الأيام المعروضة × 30
+        est_monthly_sales = round((total_recent / len(display_dates)) * 30)
         rows.append({
             "sku": sku_up, "sku_up": sku_up,
             "img": links_map_local.get(sku_up, ""),
             "day_counts": day_counts,
             "total_recent": total_recent,
+            "est_monthly_sales": est_monthly_sales,
         })
     rows.sort(key=lambda r: -r["total_recent"])
     return rows
@@ -1766,10 +1771,10 @@ with tab10:
     else:
         df_miss10 = pd.DataFrame([{
             "SKU": r["sku"], "Yesterday": r["day_counts"].get(d1,0), "Day Before": r["day_counts"].get(d2,0),
-            "3 Days Ago": r["day_counts"].get(d3,0)
+            "3 Days Ago": r["day_counts"].get(d3,0), "Estimated Monthly Sales": r["est_monthly_sales"]
         } for r in missing_rows_t10])
         c1,c2 = st.columns(2)
-        with c1: dl_btn(df_miss10,"out_of_stock")
+        with c1: dl_btn(df_miss10,"out_of_stock", key="dlbtn_oos_t10")
         with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t10)}")
         for r in missing_rows_t10:
             c_img,c_info = st.columns([1,6])
@@ -1778,6 +1783,7 @@ with tab10:
                 st.markdown(f"**SKU:** `{r['sku']}`")
                 st.error("⛔ مخزونه انتهى — مش موجود في ملف المخزون | Stock ran out — not found in inventory file")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
+                st.markdown(f"📈 **مبيع شهري تقديري (بناءً على آخر 3 أيام) | Estimated Monthly Sales (based on last 3 days):** **{r['est_monthly_sales']}**")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days)
                 st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
@@ -1927,10 +1933,10 @@ with tab13:
     else:
         df_miss13 = pd.DataFrame([{
             "SKU": r["sku"], "Yesterday": r["day_counts"].get(e1,0), "Day Before": r["day_counts"].get(e2,0),
-            "3 Days Ago": r["day_counts"].get(e3,0)
+            "3 Days Ago": r["day_counts"].get(e3,0), "Estimated Monthly Sales": r["est_monthly_sales"]
         } for r in missing_rows_t13])
         c1,c2 = st.columns(2)
-        with c1: dl_btn(df_miss13,"out_of_stock")
+        with c1: dl_btn(df_miss13,"out_of_stock", key="dlbtn_oos_t13")
         with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t13)}")
         for r in missing_rows_t13:
             c_img,c_info = st.columns([1,6])
@@ -1939,6 +1945,7 @@ with tab13:
                 st.markdown(f"**SKU:** `{r['sku']}`")
                 st.error("⛔ مخزونه انتهى — مش موجود في ملف المخزون | Stock ran out — not found in inventory file")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
+                st.markdown(f"📈 **مبيع شهري تقديري (بناءً على آخر 3 أيام) | Estimated Monthly Sales (based on last 3 days):** **{r['est_monthly_sales']}**")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days2)
                 st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
