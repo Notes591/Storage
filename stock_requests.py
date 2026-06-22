@@ -39,7 +39,7 @@ TABS_CONFIG = {
     "Rescheduled":       ["ASN","SKU","Quantity","Old Schedule Date","Image URL","Date Added","Reschedule Reason","Date Moved"],
     "Expired":           ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Date Expired"],
     "Inventory":         ["SKU","Warehouse","Stock","Monthly Sales","Image URL","Date Uploaded"],
-    "DailyOrders":       ["SKU","Order Timestamp","Status","Price","Date Uploaded"],
+    "DailyOrders":       ["SKU","Order Timestamp","Status","Price","Quantity","Date Uploaded"],
     "Settings":          ["Key","Value"],
     "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelNotifications": ["ASN","SKUs","Schedule Date","Reason","Timestamp"],
@@ -48,7 +48,17 @@ TABS_CONFIG = {
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
     for attempt in range(retries):
         try:
-            return ss.worksheet(tab)
+            ws = ss.worksheet(tab)
+            # sync header: أضيف الأعمدة الجديدة لو ناقصة
+            try:
+                existing_hdr = ws.row_values(1)
+                missing = [h for h in headers if h not in existing_hdr]
+                if missing:
+                    for h in missing:
+                        ws.append_cols([[h]], value_input_option="RAW")
+            except Exception:
+                pass
+            return ws
         except gspread.exceptions.WorksheetNotFound:
             try:
                 ws = ss.add_worksheet(title=tab, rows="3000", cols="12")
@@ -601,6 +611,10 @@ def build_daily_orders_prices(dates):
     for ci, h in enumerate(hdr):
         if str(h).strip().lower() in ("price","سعر","السعر","price_egp","unit_price"):
             price_col_idx = ci; break
+    qty_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("quantity","qty","كمية","الكمية","count"):
+            qty_col_idx = ci; break
     for row in data[1:]:
         while len(row) < 2: row.append("")
         sku, ts = row[0].strip(), row[1].strip()
@@ -613,9 +627,17 @@ def build_daily_orders_prices(dates):
             if price_col_idx is not None and len(row) > price_col_idx:
                 raw = str(row[price_col_idx]).strip()
                 price_val = raw if raw and raw.lower() not in ("nan","none","") else ""
+            qty_val = 1
+            if qty_col_idx is not None and len(row) > qty_col_idx:
+                try:
+                    qty_val = int(float(str(row[qty_col_idx]).strip()))
+                except Exception:
+                    qty_val = 1
+            if qty_val < 1:
+                qty_val = 1
             if sku_up not in prices:
                 prices[sku_up] = {dd: [] for dd in dates}
-            prices[sku_up][d.date()].append(price_val)
+            prices[sku_up][d.date()].append((price_val, qty_val))
     return prices
 
 def compute_stock_sales_rows(target_date, display_dates=None):
@@ -1712,7 +1734,7 @@ with tab10:
     with st.expander("📤 رفع بيانات الأوردرز اليومية | Upload Daily Orders", expanded=False):
         st.caption("ارفع ملف الأوردرز (لازم يحتوي على عمودي sku و order_timestamp) — هيتم استبدال البيانات بالكامل في كل رفعة | Upload orders file (needs sku & order_timestamp columns) — fully replaces existing data each time")
         st.download_button("⬇️ Template فارغ | Empty Template",
-            data=make_empty_template(["sku","order_timestamp","status","price"]),
+            data=make_empty_template(["sku","order_timestamp","status","price","quantity"]),
             file_name=f"daily_orders_template_{file_timestamp()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True, key="dlbtn_do_template")
@@ -1742,13 +1764,17 @@ with tab10:
                         price_col_do = None
                         for c in df_do.columns:
                             if c.strip().lower() in ("price","سعر","السعر","price_egp","unit_price"): price_col_do = c; break
+                        qty_col_do = None
+                        for c in df_do.columns:
+                            if c.strip().lower() in ("quantity","qty","كمية","الكمية","count"): qty_col_do = c; break
                         for _,row in df_do.iterrows():
                             sku_v   = str(row[sku_col_do]).strip()
                             ts_v    = str(row[ts_col_do]).strip()
                             st_v    = str(row[status_col_do]).strip() if status_col_do else ""
                             price_v = str(row[price_col_do]).strip() if price_col_do else ""
+                            qty_v   = str(row[qty_col_do]).strip() if qty_col_do else "1"
                             if sku_v and sku_v.lower()!="nan":
-                                to_add.append([sku_v, ts_v, st_v, price_v, dn])
+                                to_add.append([sku_v, ts_v, st_v, price_v, qty_v, dn])
                         safe_delete_all(daily_orders_sheet)
                         safe_batch_append(daily_orders_sheet, to_add)
                         clear_cache(daily_orders_sheet)
@@ -1770,6 +1796,26 @@ with tab10:
     delay_days = int(load_settings().get("schedule_delay_days","3") or 3)
     all_review_rows = compute_stock_sales_rows(d1, day_dates)
     stock_review_rows = [r for r in all_review_rows if r["stock_alert"]]
+
+    # إضافة المرحلين من تاب المبيعات (محتاج جدولة فقط)
+    transferred_from_sales = st.session_state.get("transferred_skus_t14", [])
+    existing_skus_in_review = {r["sku_up"] for r in stock_review_rows}
+    for tr in transferred_from_sales:
+        if tr["sku_up"] not in existing_skus_in_review:
+            avg_tr = tr.get("effective_avg", 0)
+            suggested_tr = round(avg_tr * 18) if avg_tr > 0 else 0
+            stock_review_rows.append({
+                "sku": tr["sku"], "sku_up": tr["sku_up"],
+                "stock": tr["stock"], "sales_month": tr["sales_month"],
+                "img": tr["img"], "stock_alert": True, "sales_alert": False,
+                "suggested_qty": suggested_tr,
+                "days_to_stockout": tr.get("days_to_stockout", 0),
+                "days_to_stockout_today": tr.get("days_to_stockout", 0),
+                "qty": tr["day_counts"].get(d1, 0) if tr.get("day_counts") else 0,
+                "day_counts": tr.get("day_counts", {d: 0 for d in day_dates}),
+                "_transferred_from_sales": True,
+            })
+
     stock_review_rows.sort(key=lambda r: (-r["qty"], -r["sales_month"]))
 
     if not inv_map:
@@ -1791,6 +1837,8 @@ with tab10:
             with c_img: show_img(r["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
+                if r.get("_transferred_from_sales"):
+                    st.markdown('<span style="background:#7c3aed;color:white;border-radius:6px;padding:2px 10px;font-size:11px;">📌 مرحّل من تاب المبيعات — محتاج جدولة | Transferred from Sales tab — needs scheduling</span>', unsafe_allow_html=True)
                 st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
                 st.markdown(f"💡 **اقتراح الكمية | Suggested Qty:** **{r['suggested_qty']}** &nbsp;|&nbsp; ⏳ **نفاد خلال | Days to stockout:** {r['days_to_stockout']} يوم")
@@ -2107,7 +2155,7 @@ with tab14:
             with c2: st.info(f"📦 SKUs: {len(sales_tab_rows)} | 📅 {sales_display_days} يوم")
 
         # ══ قائمة SKUs المرحلة من المبيعات (محتاج جدولة فقط) ══
-        transferred_skus_t14 = []
+        st.session_state["transferred_skus_t14"] = []
 
         st.divider()
         for r in sales_tab_rows:
@@ -2123,26 +2171,55 @@ with tab14:
                 yesterday_prices = r["day_prices"].get(yesterday_t14, []) if yesterday_t14 else []
 
                 def fmt_prices(prices_list):
-                    """يجمع الأسعار ويرتبها من الأعلى للأقل، ويتجاهل الفاضي."""
-                    pc = {}
-                    for p in prices_list:
-                        if p and p.strip() and p.strip().lower() not in ("nan","none",""):
-                            try:
-                                key = float(p.replace(",","").strip())
-                            except Exception:
-                                key = 0.0
-                            pc[p.strip()] = (pc.get(p.strip(), (0, key))[0] + 1, key)
+                    """يجمع الأسعار ويرتبها من الأعلى للأقل، ويتجاهل الفاضي.
+                    prices_list: قائمة من (price_str, qty) أو strings."""
+                    pc = {}  # price_str -> (total_qty, float_val)
+                    for item in prices_list:
+                        if isinstance(item, tuple):
+                            p, qty = item
+                        else:
+                            p, qty = item, 1
+                        if not p or str(p).strip().lower() in ("","nan","none"):
+                            # لو مفيش سعر، نعد الكمية بس بدون سعر
+                            pc["__no_price__"] = (pc.get("__no_price__",(0,0))[0] + qty, -1)
+                            continue
+                        p_str = str(p).strip()
+                        try:
+                            key = float(p_str.replace(",",""))
+                        except Exception:
+                            key = 0.0
+                        prev_qty, _ = pc.get(p_str, (0, key))
+                        pc[p_str] = (prev_qty + qty, key)
                     if not pc:
                         return ""
                     # ترتيب من السعر الأعلى للأقل
                     sorted_prices = sorted(pc.items(), key=lambda x: -x[1][1])
-                    parts = [f"{cnt_key[0]} × {price_str}" for price_str, cnt_key in sorted_prices]
+                    parts = []
+                    for price_str, (total_qty, _) in sorted_prices:
+                        if price_str == "__no_price__":
+                            parts.append(f"{total_qty}")
+                        else:
+                            parts.append(f"{total_qty} × {price_str}")
                     return " | ".join(parts)
+
+                def get_min_max_price(prices_list):
+                    """يرجع (أقل سعر, أعلى سعر) كـ float من قائمة (price_str, qty)."""
+                    vals = []
+                    for item in prices_list:
+                        p = item[0] if isinstance(item, tuple) else item
+                        if p and str(p).strip().lower() not in ("","nan","none"):
+                            try:
+                                vals.append(float(str(p).replace(",","")))
+                            except Exception:
+                                pass
+                    if not vals:
+                        return None, None
+                    return min(vals), max(vals)
 
                 if yesterday_t14:
                     if yesterday_cnt > 0:
                         prices_str_y = fmt_prices(yesterday_prices)
-                        # عرض كل سعر في سطر منفصل لو أكتر من سعر
+                        min_p_y, max_p_y = get_min_max_price(yesterday_prices)
                         price_lines_y = prices_str_y.split(" | ") if prices_str_y else []
                         price_html_y = ""
                         if price_lines_y:
@@ -2150,9 +2227,17 @@ with tab14:
                                 f'<span style="color:#bbf7d0;font-size:12px;">↳ {line}</span>'
                                 for line in price_lines_y
                             )
+                        minmax_html_y = ""
+                        if min_p_y is not None and max_p_y is not None and min_p_y != max_p_y:
+                            minmax_html_y = (
+                                f'<br><span style="color:#fde68a;font-size:11px;">📉 أقل: {min_p_y:g} &nbsp;|&nbsp; 📈 أعلى: {max_p_y:g}</span>'
+                            )
+                        elif min_p_y is not None:
+                            minmax_html_y = f'<br><span style="color:#fde68a;font-size:11px;">💰 سعر: {min_p_y:g}</span>'
                         yesterday_html = (
                             f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
                             f'<span style="color:#86efac;font-size:15px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
+                            minmax_html_y +
                             price_html_y +
                             '</div>'
                         )
@@ -2164,7 +2249,7 @@ with tab14:
                         )
                     st.markdown(yesterday_html, unsafe_allow_html=True)
 
-                # باقي الأيام — كل يوم في سطر مع الأسعار تنازلياً
+                # باقي الأيام — كل يوم في سطر مع الأسعار تنازلياً + أعلى/أقل
                 day_parts = []
                 for i, d in enumerate(sales_dates):
                     if i == 0:
@@ -2174,6 +2259,12 @@ with tab14:
                     color = "#60a5fa" if cnt > 0 else "#475569"
                     lbl_short = sales_labels[i].split("(")[0].strip()
                     prices_str_d = fmt_prices(day_prices_list)
+                    min_p_d, max_p_d = get_min_max_price(day_prices_list)
+                    minmax_d = ""
+                    if min_p_d is not None and max_p_d is not None and min_p_d != max_p_d:
+                        minmax_d = f' <span style="color:#fde68a;font-size:10px;">(📉{min_p_d:g}–📈{max_p_d:g})</span>'
+                    elif min_p_d is not None:
+                        minmax_d = f' <span style="color:#fde68a;font-size:10px;">({min_p_d:g})</span>'
                     if prices_str_d:
                         price_lines_d = prices_str_d.split(" | ")
                         price_detail = " &nbsp; ".join(
@@ -2181,11 +2272,11 @@ with tab14:
                             for line in price_lines_d
                         )
                         day_parts.append(
-                            f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b></span>' +
+                            f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>' +
                             f'<br><span style="padding-right:8px;">{price_detail}</span>'
                         )
                     else:
-                        day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b></span>')
+                        day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>')
                 if day_parts:
                     st.markdown("<br>".join(day_parts), unsafe_allow_html=True)
 
@@ -2227,7 +2318,7 @@ with tab14:
                     and not un_notes
                 )
                 if is_needs_sched_only:
-                    transferred_skus_t14.append({
+                    st.session_state["transferred_skus_t14"].append({
                         "sku": r["sku"], "sku_up": r["sku_up"], "stock": r["stock"],
                         "sales_month": r["sales_month"], "img": r["img"],
                         "effective_avg": r["effective_avg"], "days_to_stockout": r["days_to_stockout"],
@@ -2529,7 +2620,7 @@ with tab16:
             return sum(dc.get(d, 0) for d in dates_list) > 0
 
         # SKUs المرحلة من تاب المبيعات
-        transferred_t16 = transferred_skus_t14 if "transferred_skus_t14" in dir() else []
+        transferred_t16 = st.session_state.get("transferred_skus_t14", [])
 
         # بناء القوائم الثلاث
         no_sale_1d, no_sale_3d, no_sale_7d = [], [], []
