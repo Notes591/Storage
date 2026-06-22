@@ -759,8 +759,10 @@ tabs = st.tabs([
     "🗂️ منتهية | Expired",
     "⚙️ الإعدادات | Settings",
     "📈 مراجعة المبيعات | Sales Review",
+    "🛒 المبيعات | Sales",
+    "🗓️ تحليل الجدولة | Schedule Analysis",
 ])
-(tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13) = tabs
+(tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab14,tab15) = tabs
 
 # ══ TAB 1 — الطلبات ══
 with tab1:
@@ -1872,6 +1874,16 @@ with tab12:
         st.success("✅ تم الحفظ | Saved")
         st.rerun()
 
+    st.divider()
+    st.markdown("### 📅 عدد أيام المبيعات المعروضة في تاب المبيعات | Sales Display Days")
+    st.caption("عدد الأيام اللي بتتعرض في تاب المبيعات من اليوم للوراء — مثلاً 7 يعني أمس وأول أمس و... إلخ | Number of past days shown in the Sales tab (e.g. 7 = yesterday + 6 days before)")
+    current_sales_days = int(current_settings.get("sales_display_days","7") or 7)
+    new_sales_days = st.number_input("عدد الأيام | Display Days", min_value=1, max_value=30, value=current_sales_days, step=1, key="sales_days_input")
+    if st.button("💾 حفظ عدد الأيام | Save Sales Days", key="save_sales_days"):
+        save_setting("sales_display_days", str(new_sales_days))
+        st.success("✅ تم الحفظ | Saved")
+        st.rerun()
+
 # ══ TAB 13 — مراجعة المبيعات ══
 with tab13:
     st.subheader("📈 مراجعة المبيعات | Sales Review")
@@ -1952,3 +1964,318 @@ with tab13:
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
             st.divider()
+
+# ══ TAB 14 — المبيعات ══
+with tab14:
+    st.subheader("🛒 المبيعات اليومية | Daily Sales")
+    st.caption("كل SKU عنده مخزون — مبيعاته اليومية من أمس للوراء بجانب مخزونه ومبيعاته الشهرية وأقرب جدولة | All SKUs with inventory — daily sales history, stock, monthly sales, and nearest schedule")
+
+    sales_display_days = int(load_settings().get("sales_display_days","7") or 7)
+    today_t14 = datetime.now().date()
+    sales_dates = [today_t14 - timedelta(days=i) for i in range(1, sales_display_days + 1)]
+    sales_labels = []
+    for i, d in enumerate(sales_dates):
+        if i == 0:
+            sales_labels.append(f"أمس ({d.strftime('%m-%d')})")
+        elif i == 1:
+            sales_labels.append(f"أول أمس ({d.strftime('%m-%d')})")
+        else:
+            sales_labels.append(f"قبل {i+1} أيام ({d.strftime('%m-%d')})")
+
+    delay_days_t14 = int(load_settings().get("schedule_delay_days","3") or 3)
+
+    if not inv_map:
+        st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
+    else:
+        # مرور واحد على الأوردرز لجميع التواريخ
+        multi_counts_t14 = build_daily_orders_counts(sales_dates)
+
+        # بناء صفوف — كل SKU موجود في المخزون
+        sales_tab_rows = []
+        for sku_up, info in inv_map.items():
+            stock       = info.get("total_stock", 0)
+            sales_month = info.get("sales", 0)
+            img         = info.get("img", "")
+            sku_disp    = info.get("sku", sku_up)
+            day_counts  = multi_counts_t14.get(sku_up, {d: 0 for d in sales_dates})
+            total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
+            sales_tab_rows.append({
+                "sku": sku_disp, "sku_up": sku_up,
+                "stock": stock, "sales_month": sales_month, "img": img,
+                "day_counts": day_counts, "total_recent": total_recent,
+            })
+
+        # ترتيب: الأكتر مبيعاً أمس أولاً
+        sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
+
+        srch_t14 = st.text_input("🔍 بحث SKU | Search SKU", key="srch_t14", placeholder="اكتب SKU...")
+        if srch_t14.strip():
+            sales_tab_rows = [r for r in sales_tab_rows if srch_t14.strip().upper() in r["sku_up"]]
+
+        # جدول تحميل
+        if sales_tab_rows:
+            df_t14 = pd.DataFrame([
+                {"SKU": r["sku"], **{sales_labels[i]: r["day_counts"].get(d, 0) for i, d in enumerate(sales_dates)},
+                 "مخزون | Stock": r["stock"], "مبيع شهري | Monthly Sales": r["sales_month"]}
+                for r in sales_tab_rows
+            ])
+            c1, c2 = st.columns(2)
+            with c1: dl_btn(df_t14, "sales_daily", key="dlbtn_t14")
+            with c2: st.info(f"📦 SKUs: {len(sales_tab_rows)} | 📅 {sales_display_days} يوم")
+
+        st.divider()
+        for r in sales_tab_rows:
+            c_img, c_info = st.columns([1, 7])
+            with c_img:
+                show_img(r["img"], 70)
+            with c_info:
+                st.markdown(f"**SKU:** `{r['sku']}`")
+                # مبيعات كل يوم في سطر واحد
+                day_parts = []
+                for i, d in enumerate(sales_dates):
+                    cnt = r["day_counts"].get(d, 0)
+                    color = "#22c55e" if cnt > 0 else "#64748b"
+                    day_parts.append(f'<span style="color:{color};font-size:12px;">{sales_labels[i].split("(")[0].strip()}: <b>{cnt}</b></span>')
+                st.markdown(" &nbsp;|&nbsp; ".join(day_parts), unsafe_allow_html=True)
+                # مخزون + مبيع شهري + أيام الجدولة
+                sched = get_latest_schedule_info(r["sku"])
+                sched_text = "—"
+                sched_color = "#64748b"
+                if sched and sched.get("parsed"):
+                    days_left = (sched["parsed"].date() - today_t14).days
+                    if days_left >= 0:
+                        sched_text = f"ASN {sched['asn']} بتاريخ {sched['date']} (بعد {days_left} يوم)"
+                        sched_color = "#22c55e" if days_left <= 14 else "#f59e0b"
+                    else:
+                        sched_text = f"ASN {sched['asn']} بتاريخ {sched['date']} (منتهية)"
+                        sched_color = "#ef4444"
+                elif sched:
+                    sched_text = f"ASN {sched['asn']} — {sched['date']}"
+                    sched_color = "#f59e0b"
+                st.markdown(
+                    f"📦 **{r['stock']}** &nbsp;|&nbsp; "
+                    f"📈 شهري: **{r['sales_month']}** &nbsp;|&nbsp; "
+                    f'📅 <span style="color:{sched_color};font-size:12px;">{sched_text}</span>',
+                    unsafe_allow_html=True)
+            st.divider()
+
+# ══ TAB 15 — تحليل الجدولة ══
+with tab15:
+    st.subheader("🗓️ تحليل الجدولة المقترحة | Schedule Analysis")
+    st.caption("ارفع أو الصق SKUs وهيجيلك تحليل جدولات مستقبلية مقترحة بناءً على المخزون والمبيعات والجدولات الحالية | Upload or paste SKUs to get suggested future schedules based on stock, sales and existing schedules")
+
+    if not inv_map:
+        st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
+    else:
+        method_t15 = st.radio("طريقة الإدخال | Input Method:", ["📂 رفع ملف | Upload", "✏️ لصق | Paste"], horizontal=True, key="method_t15")
+        analysis_skus = []
+
+        if "Upload" in method_t15:
+            upl_t15 = st.file_uploader("ارفع Excel أو CSV (عمود SKU) | Upload Excel or CSV with SKU column", type=["xlsx","xls","csv"], key="upl_t15")
+            if upl_t15:
+                try:
+                    df_t15_up = pd.read_csv(upl_t15, dtype=str).fillna("") if upl_t15.name.endswith(".csv") else pd.read_excel(upl_t15, dtype=str).fillna("")
+                    sku_col_t15 = None
+                    for c in df_t15_up.columns:
+                        if "sku" in c.strip().lower() or "item" in c.strip().lower():
+                            sku_col_t15 = c; break
+                    if not sku_col_t15:
+                        sku_col_t15 = df_t15_up.columns[0]
+                    analysis_skus = [str(r[sku_col_t15]).strip() for _, r in df_t15_up.iterrows()
+                                     if str(r[sku_col_t15]).strip() and str(r[sku_col_t15]).strip().lower() != "nan"]
+                    st.success(f"✅ {len(analysis_skus)} SKU جاهز | SKUs loaded")
+                except Exception as e:
+                    st.error(f"❌ {e}")
+        else:
+            pasted_t15 = st.text_area("الصق SKUs هنا (كل واحد في سطر) | Paste SKUs (one per line):", height=120, key="paste_t15", placeholder="SKU001\nSKU002\nSKU003")
+            if pasted_t15.strip():
+                analysis_skus = [line.strip() for line in pasted_t15.strip().splitlines() if line.strip()]
+                st.success(f"✅ {len(analysis_skus)} SKU | SKUs ready")
+
+        if analysis_skus:
+            st.divider()
+            today_t15 = datetime.now().date()
+            delay_days_t15 = int(load_settings().get("schedule_delay_days","3") or 3)
+            sales_days_t15 = int(load_settings().get("sales_display_days","7") or 7)
+            recent_dates_t15 = [today_t15 - timedelta(days=i) for i in range(1, sales_days_t15 + 1)]
+            multi_counts_t15 = build_daily_orders_counts(recent_dates_t15)
+
+            st.write(f"**تحليل {len(analysis_skus)} SKU | Analyzing {len(analysis_skus)} SKUs**")
+
+            for sku_raw in analysis_skus:
+                sku_up = sku_raw.strip().upper()
+                info = inv_map.get(sku_up)
+
+                st.markdown(f"### 📦 SKU: `{sku_raw}`")
+
+                if not info:
+                    st.error("⛔ هذا الـ SKU مش موجود في المخزون — مخزونه انتهى أو لم يُرفع | Not found in inventory — may be out of stock or not uploaded")
+                    # لو في مبيعات مؤخراً رغم غيابه من المخزون
+                    day_counts_miss = multi_counts_t15.get(sku_up, {})
+                    total_miss = sum(day_counts_miss.values())
+                    if total_miss > 0:
+                        avg_miss = total_miss / sales_days_t15
+                        est_monthly = round(avg_miss * 30)
+                        st.warning(f"📈 باع {total_miss} قطعة في آخر {sales_days_t15} يوم — مبيع شهري تقديري: **{est_monthly}** | Sold {total_miss} units in last {sales_days_t15} days — est. monthly: **{est_monthly}**")
+                        # اقتراح جدولة عاجلة
+                        suggested_urgent = round(est_monthly * 1.5)
+                        st.markdown(
+                            f'<div style="background:#1a0000;border:1px solid #ef4444;border-left:5px solid #ef4444;border-radius:8px;padding:10px 14px;color:white;margin:6px 0;">'
+                            f'🗓️ <b>جدولة مقترحة عاجلة | Urgent suggested schedule:</b><br>'
+                            f'📅 التاريخ المقترح: <b style="color:#fca5a5;">{(today_t15 + timedelta(days=3)).strftime("%Y-%m-%d")}</b> &nbsp;|&nbsp; '
+                            f'📦 الكمية المقترحة: <b style="color:#fca5a5;">{suggested_urgent}</b><br>'
+                            f'<span style="color:#f87171;font-size:12px;">⚠️ ملاحظة: المنتج خارج المخزون، يُنصح بالجدولة فوراً | Product is out of stock, immediate scheduling recommended</span>'
+                            f'</div>', unsafe_allow_html=True)
+                    st.divider()
+                    continue
+
+                stock       = info.get("total_stock", 0)
+                sales_month = info.get("sales", 0)
+                img         = info.get("img", "")
+                avg_daily   = sales_month / 30 if sales_month > 0 else 0
+                day_counts_t15 = multi_counts_t15.get(sku_up, {d: 0 for d in recent_dates_t15})
+                recent_total = sum(day_counts_t15.values())
+                avg_daily_recent = recent_total / sales_days_t15 if sales_days_t15 > 0 else avg_daily
+
+                # يوم النفاد المتوقع
+                effective_avg = avg_daily_recent if avg_daily_recent > 0 else avg_daily
+                if effective_avg > 0:
+                    days_to_stockout_t15 = round(stock / effective_avg)
+                    stockout_date_t15 = today_t15 + timedelta(days=days_to_stockout_t15)
+                else:
+                    days_to_stockout_t15 = 0
+                    stockout_date_t15 = today_t15
+
+                c_img_t15, c_info_t15 = st.columns([1, 6])
+                with c_img_t15:
+                    show_img(img, 65)
+                with c_info_t15:
+                    st.markdown(
+                        f"📦 **مخزون | Stock:** **{stock}** &nbsp;|&nbsp; "
+                        f"📈 **مبيع شهري | Monthly:** **{sales_month}** &nbsp;|&nbsp; "
+                        f"📊 **متوسط يومي أخير | Recent daily avg:** **{avg_daily_recent:.1f}**"
+                    )
+                    if effective_avg > 0:
+                        st.markdown(
+                            f"⏳ **متوقع النفاد | Estimated stockout:** "
+                            f"**{days_to_stockout_t15} يوم** ({stockout_date_t15.strftime('%Y-%m-%d')})"
+                        )
+                    else:
+                        st.caption("⚠️ لا توجد مبيعات مسجلة — لا يمكن تقدير يوم النفاد | No sales data — cannot estimate stockout")
+
+                # الجدولات الحالية
+                sched_current = get_latest_schedule_info(sku_raw)
+                existing_schedules = []
+                for sheet_key in ("Scheduled", "Check"):
+                    sdata = get_cached(sheets[sheet_key])
+                    if len(sdata) <= 1:
+                        continue
+                    for row in sdata[1:]:
+                        while len(row) < 4: row.append("")
+                        if row[1].strip().upper() == sku_up:
+                            d_parsed = parse_excel_date(row[3])
+                            existing_schedules.append({
+                                "asn": row[0], "qty": row[2], "date": row[3],
+                                "parsed": d_parsed, "source": sheet_key
+                            })
+                existing_schedules.sort(key=lambda s: s["parsed"] or datetime.max)
+
+                if existing_schedules:
+                    st.markdown("**📋 الجدولات الحالية | Existing Schedules:**")
+                    for es in existing_schedules:
+                        days_to_es = (es["parsed"].date() - today_t15).days if es["parsed"] else None
+                        arrival_es = (es["parsed"] + timedelta(days=delay_days_t15)).date() if es["parsed"] else None
+                        color_es = "#22c55e" if days_to_es is not None and days_to_es >= 0 else "#ef4444"
+                        src_label = "تشييك" if es["source"] == "Check" else "مجدول"
+                        st.markdown(
+                            f'<span style="background:#1e3a5f;color:#93c5fd;border-radius:6px;padding:3px 10px;font-size:12px;margin:2px;">'
+                            f'ASN {es["asn"]} | {es["qty"]} قطعة | {es["date"]} | {src_label}'
+                            f'{f" | وصول متوقع: {arrival_es}" if arrival_es else ""}'
+                            f'</span>',
+                            unsafe_allow_html=True)
+
+                st.markdown("---")
+                # ══ توليد الجدولات المقترحة ══
+                st.markdown("**🗓️ الجدولات المقترحة | Suggested Schedules:**")
+
+                # تاريخ الوصول الفعلي لآخر جدولة موجودة
+                last_covered_date = today_t15
+                if existing_schedules:
+                    for es in existing_schedules:
+                        if es["parsed"]:
+                            arr = (es["parsed"] + timedelta(days=delay_days_t15)).date()
+                            if arr > last_covered_date:
+                                last_covered_date = arr
+
+                # نفاد المخزون بعد إضافة الجدولات الموجودة
+                total_incoming = sum(_to_int(es["qty"]) for es in existing_schedules)
+                adjusted_stock = stock + total_incoming
+                if effective_avg > 0:
+                    adjusted_days = round(adjusted_stock / effective_avg)
+                    adjusted_stockout = today_t15 + timedelta(days=adjusted_days)
+                else:
+                    adjusted_days = 999
+                    adjusted_stockout = today_t15 + timedelta(days=999)
+
+                if existing_schedules:
+                    st.caption(
+                        f"📦 بعد الجدولات الحالية | After existing schedules: مخزون فعلي = {adjusted_stock} "
+                        f"→ نفاد متوقع بعد {adjusted_days} يوم ({adjusted_stockout.strftime('%Y-%m-%d')})"
+                    )
+
+                # توليد 3 جدولات مستقبلية
+                BUFFER_DAYS = 5  # هامش أمان قبل يوم النفاد
+                MIN_SCHEDULE_DAYS = 14  # أقل فترة بين جدولة وأخرى
+                suggested_list = []
+                running_stock = adjusted_stock
+                running_date = last_covered_date
+
+                for sg_i in range(3):
+                    if effective_avg <= 0:
+                        break
+                    # متى هيخلص المخزون الحالي؟
+                    days_until_out = round(running_stock / effective_avg)
+                    target_schedule_date = running_date + timedelta(days=max(days_until_out - BUFFER_DAYS - delay_days_t15, MIN_SCHEDULE_DAYS))
+                    # كمية تغطي شهرين
+                    coverage_months = 2
+                    suggested_qty = round(effective_avg * 30 * coverage_months)
+                    suggested_qty = max(suggested_qty, round(sales_month * 1.2)) if sales_month > 0 else suggested_qty
+                    arrival_date = target_schedule_date + timedelta(days=delay_days_t15)
+
+                    note = ""
+                    if sg_i == 0 and existing_schedules:
+                        note = "⚠️ يوجد جدولة حالية — هذا اقتراح الجدولة التالية بعدها | Existing schedule found — this is the next suggested schedule"
+                    elif sg_i == 0 and days_to_stockout_t15 <= 15:
+                        note = "🔴 المخزون قريب على الخلاص — يُنصح بالجدولة العاجلة | Stock nearly out — urgent scheduling recommended"
+
+                    suggested_list.append({
+                        "num": sg_i + 1,
+                        "schedule_date": target_schedule_date,
+                        "arrival_date": arrival_date,
+                        "qty": suggested_qty,
+                        "note": note,
+                        "stock_at_arrival": max(round(running_stock - effective_avg * (target_schedule_date - running_date).days), 0)
+                    })
+
+                    running_stock = max(round(running_stock - effective_avg * (arrival_date - running_date).days), 0) + suggested_qty
+                    running_date = arrival_date
+
+                colors_sg = ["#14532d", "#1e3a5f", "#3b0764"]
+                border_sg = ["#22c55e", "#3b82f6", "#a855f7"]
+                for sg in suggested_list:
+                    st.markdown(
+                        f'<div style="background:{colors_sg[sg["num"]-1]};border:1px solid {border_sg[sg["num"]-1]};'
+                        f'border-left:5px solid {border_sg[sg["num"]-1]};border-radius:8px;padding:10px 14px;color:white;margin:6px 0;">'
+                        f'🗓️ <b>الجدولة {sg["num"]} | Schedule #{sg["num"]}:</b><br>'
+                        f'📅 تاريخ الجدولة المقترح: <b style="color:#86efac;">{sg["schedule_date"].strftime("%Y-%m-%d")}</b>'
+                        f' &nbsp;→&nbsp; وصول متوقع: <b style="color:#93c5fd;">{sg["arrival_date"].strftime("%Y-%m-%d")}</b><br>'
+                        f'📦 كمية مقترحة: <b style="color:#c4b5fd;">{sg["qty"]}</b>'
+                        f' &nbsp;|&nbsp; مخزون متوقع عند الوصول: <b>{sg["stock_at_arrival"]}</b><br>'
+                        + (f'<span style="color:#fcd34d;font-size:12px;">📝 {sg["note"]}</span>' if sg["note"] else "")
+                        + '</div>',
+                        unsafe_allow_html=True)
+
+                render_recent_expired_note(sku_raw)
+                for note in get_unavailable_ordered_note(sku_raw):
+                    st.caption(note)
+                st.divider()
