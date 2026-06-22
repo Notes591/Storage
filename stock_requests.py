@@ -2122,32 +2122,49 @@ with tab14:
                 yesterday_cnt = r["day_counts"].get(yesterday_t14, 0) if yesterday_t14 else 0
                 yesterday_prices = r["day_prices"].get(yesterday_t14, []) if yesterday_t14 else []
 
+                def fmt_prices(prices_list):
+                    """يجمع الأسعار ويرتبها من الأعلى للأقل، ويتجاهل الفاضي."""
+                    pc = {}
+                    for p in prices_list:
+                        if p and p.strip() and p.strip().lower() not in ("nan","none",""):
+                            try:
+                                key = float(p.replace(",","").strip())
+                            except Exception:
+                                key = 0.0
+                            pc[p.strip()] = (pc.get(p.strip(), (0, key))[0] + 1, key)
+                    if not pc:
+                        return ""
+                    # ترتيب من السعر الأعلى للأقل
+                    sorted_prices = sorted(pc.items(), key=lambda x: -x[1][1])
+                    parts = [f"{cnt_key[0]} × {price_str}" for price_str, cnt_key in sorted_prices]
+                    return " | ".join(parts)
+
                 if yesterday_t14:
                     if yesterday_cnt > 0:
-                        # أسعار أمس مفصلة
-                        price_counts_y = {}
-                        for p in yesterday_prices:
-                            price_counts_y[p] = price_counts_y.get(p, 0) + 1
-                        price_parts_y = []
-                        for p, cnt_p in sorted(price_counts_y.items(), key=lambda x: -x[1]):
-                            label_p = f"{cnt_p} × {p}" if p else f"{cnt_p}"
-                            price_parts_y.append(label_p)
-                        prices_str_y = " | ".join(price_parts_y) if price_parts_y else ""
+                        prices_str_y = fmt_prices(yesterday_prices)
+                        # عرض كل سعر في سطر منفصل لو أكتر من سعر
+                        price_lines_y = prices_str_y.split(" | ") if prices_str_y else []
+                        price_html_y = ""
+                        if price_lines_y:
+                            price_html_y = "<br>" + "<br>".join(
+                                f'<span style="color:#bbf7d0;font-size:12px;">↳ {line}</span>'
+                                for line in price_lines_y
+                            )
                         yesterday_html = (
-                            f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:6px 12px;margin:4px 0;display:inline-block;">' +
-                            f'<span style="color:#86efac;font-size:14px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
-                            (f'<span style="color:#bbf7d0;font-size:12px;"> — {prices_str_y}</span>' if prices_str_y else "") +
+                            f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                            f'<span style="color:#86efac;font-size:15px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
+                            price_html_y +
                             '</div>'
                         )
                     else:
                         yesterday_html = (
-                            '<div style="background:#7f1d1d;border:2px solid #ef4444;border-radius:8px;padding:6px 12px;margin:4px 0;display:inline-block;">' +
-                            '<span style="color:#fca5a5;font-size:14px;font-weight:bold;">🔴 أمس: 0</span>' +
+                            '<div style="background:#7f1d1d;border:2px solid #ef4444;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                            '<span style="color:#fca5a5;font-size:15px;font-weight:bold;">🔴 أمس: 0</span>' +
                             '</div>'
                         )
                     st.markdown(yesterday_html, unsafe_allow_html=True)
 
-                # باقي الأيام
+                # باقي الأيام — كل يوم في سطر مع الأسعار تنازلياً
                 day_parts = []
                 for i, d in enumerate(sales_dates):
                     if i == 0:
@@ -2156,17 +2173,21 @@ with tab14:
                     day_prices_list = r["day_prices"].get(d, [])
                     color = "#60a5fa" if cnt > 0 else "#475569"
                     lbl_short = sales_labels[i].split("(")[0].strip()
-                    # أسعار اليوم ده
-                    price_counts_d = {}
-                    for p in day_prices_list:
-                        price_counts_d[p] = price_counts_d.get(p, 0) + 1
-                    price_str_d = ""
-                    if price_counts_d:
-                        parts_d = [f"{c}×{p}" if p else str(c) for p,c in sorted(price_counts_d.items(), key=lambda x:-x[1])]
-                        price_str_d = f" ({', '.join(parts_d)})"
-                    day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{price_str_d}</span>')
+                    prices_str_d = fmt_prices(day_prices_list)
+                    if prices_str_d:
+                        price_lines_d = prices_str_d.split(" | ")
+                        price_detail = " &nbsp; ".join(
+                            f'<span style="color:#93c5fd;font-size:10px;">↳ {line}</span>'
+                            for line in price_lines_d
+                        )
+                        day_parts.append(
+                            f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b></span>' +
+                            f'<br><span style="padding-right:8px;">{price_detail}</span>'
+                        )
+                    else:
+                        day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b></span>')
                 if day_parts:
-                    st.markdown(" &nbsp;|&nbsp; ".join(day_parts), unsafe_allow_html=True)
+                    st.markdown("<br>".join(day_parts), unsafe_allow_html=True)
 
                 # مخزون + مبيع شهري
                 st.markdown(
@@ -2524,6 +2545,10 @@ with tab16:
                 no_sale_3d.append(row_t16)
             if not sku_sold_in(sku_up, dates_7d):
                 no_sale_7d.append(row_t16)
+        # ترتيب من الأعلى مخزوناً للأقل
+        no_sale_1d.sort(key=lambda x: -x["stock"])
+        no_sale_3d.sort(key=lambda x: -x["stock"])
+        no_sale_7d.sort(key=lambda x: -x["stock"])
 
         # إضافة المرحلين من تاب المبيعات لو مش موجودين
         transferred_skus_up = {r["sku_up"] for r in transferred_t16}
