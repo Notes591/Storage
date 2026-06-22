@@ -1884,6 +1884,16 @@ with tab12:
         st.success("✅ تم الحفظ | Saved")
         st.rerun()
 
+    st.divider()
+    st.markdown("### 📦 أيام تغطية الجدولة المقترحة | Suggested Schedule Coverage Days")
+    st.caption("عدد الأيام اللي الكمية المقترحة في تحليل الجدولة هتغطيها — مثلاً 15 يعني الكمية = متوسط اليومي × 15 فقط (تجنب رسوم تخزين الكميات الكبيرة) | Days the suggested qty should cover — e.g. 15 means qty = daily_avg × 15 (avoids storage fees for large quantities)")
+    current_cov_days = int(current_settings.get("schedule_coverage_days","15") or 15)
+    new_cov_days = st.number_input("أيام التغطية | Coverage Days", min_value=5, max_value=90, value=current_cov_days, step=1, key="cov_days_input")
+    if st.button("💾 حفظ أيام التغطية | Save Coverage Days", key="save_cov_days"):
+        save_setting("schedule_coverage_days", str(new_cov_days))
+        st.success("✅ تم الحفظ | Saved")
+        st.rerun()
+
 # ══ TAB 13 — مراجعة المبيعات ══
 with tab13:
     st.subheader("📈 مراجعة المبيعات | Sales Review")
@@ -2097,10 +2107,14 @@ with tab15:
             today_t15 = datetime.now().date()
             delay_days_t15 = int(load_settings().get("schedule_delay_days","3") or 3)
             sales_days_t15 = int(load_settings().get("sales_display_days","7") or 7)
+            coverage_days_t15 = int(load_settings().get("schedule_coverage_days","15") or 15)
             recent_dates_t15 = [today_t15 - timedelta(days=i) for i in range(1, sales_days_t15 + 1)]
             multi_counts_t15 = build_daily_orders_counts(recent_dates_t15)
 
-            st.write(f"**تحليل {len(analysis_skus)} SKU | Analyzing {len(analysis_skus)} SKUs**")
+            st.write(f"**تحليل {len(analysis_skus)} SKU | Analyzing {len(analysis_skus)} SKUs** — أيام التغطية المقترحة: **{coverage_days_t15} يوم**")
+
+            # ══ جمع كل البيانات للإكسيل ══
+            excel_rows_t15 = []
 
             for sku_raw in analysis_skus:
                 sku_up = sku_raw.strip().upper()
@@ -2110,22 +2124,40 @@ with tab15:
 
                 if not info:
                     st.error("⛔ هذا الـ SKU مش موجود في المخزون — مخزونه انتهى أو لم يُرفع | Not found in inventory — may be out of stock or not uploaded")
-                    # لو في مبيعات مؤخراً رغم غيابه من المخزون
                     day_counts_miss = multi_counts_t15.get(sku_up, {})
                     total_miss = sum(day_counts_miss.values())
                     if total_miss > 0:
                         avg_miss = total_miss / sales_days_t15
                         est_monthly = round(avg_miss * 30)
+                        suggested_urgent = round(avg_miss * coverage_days_t15)
+                        suggested_urgent = max(suggested_urgent, 1)
                         st.warning(f"📈 باع {total_miss} قطعة في آخر {sales_days_t15} يوم — مبيع شهري تقديري: **{est_monthly}** | Sold {total_miss} units in last {sales_days_t15} days — est. monthly: **{est_monthly}**")
-                        # اقتراح جدولة عاجلة
-                        suggested_urgent = round(est_monthly * 1.5)
+                        urgent_date = today_t15 + timedelta(days=3)
                         st.markdown(
                             f'<div style="background:#1a0000;border:1px solid #ef4444;border-left:5px solid #ef4444;border-radius:8px;padding:10px 14px;color:white;margin:6px 0;">'
                             f'🗓️ <b>جدولة مقترحة عاجلة | Urgent suggested schedule:</b><br>'
-                            f'📅 التاريخ المقترح: <b style="color:#fca5a5;">{(today_t15 + timedelta(days=3)).strftime("%Y-%m-%d")}</b> &nbsp;|&nbsp; '
-                            f'📦 الكمية المقترحة: <b style="color:#fca5a5;">{suggested_urgent}</b><br>'
+                            f'📅 التاريخ المقترح: <b style="color:#fca5a5;">{urgent_date.strftime("%Y-%m-%d")}</b> &nbsp;|&nbsp; '
+                            f'📦 الكمية المقترحة ({coverage_days_t15} يوم): <b style="color:#fca5a5;">{suggested_urgent}</b><br>'
                             f'<span style="color:#f87171;font-size:12px;">⚠️ ملاحظة: المنتج خارج المخزون، يُنصح بالجدولة فوراً | Product is out of stock, immediate scheduling recommended</span>'
                             f'</div>', unsafe_allow_html=True)
+                        excel_rows_t15.append({
+                            "SKU": sku_raw, "المخزون | Stock": 0, "مبيع شهري | Monthly Sales": est_monthly,
+                            "متوسط يومي | Daily Avg": round(avg_miss, 2),
+                            "نفاد خلال | Days to Stockout": "خلص | Out",
+                            "تاريخ الجدولة #1": urgent_date.strftime("%Y-%m-%d"),
+                            "وصول #1": (urgent_date + timedelta(days=delay_days_t15)).strftime("%Y-%m-%d"),
+                            "كمية #1": suggested_urgent, "ملاحظة #1": "عاجل — مخزون منتهي",
+                            "تاريخ الجدولة #2": "", "وصول #2": "", "كمية #2": "", "ملاحظة #2": "",
+                            "تاريخ الجدولة #3": "", "وصول #3": "", "كمية #3": "", "ملاحظة #3": "",
+                        })
+                    else:
+                        excel_rows_t15.append({
+                            "SKU": sku_raw, "المخزون | Stock": 0, "مبيع شهري | Monthly Sales": 0,
+                            "متوسط يومي | Daily Avg": 0, "نفاد خلال | Days to Stockout": "خلص | Out",
+                            "تاريخ الجدولة #1": "", "وصول #1": "", "كمية #1": "", "ملاحظة #1": "مخزون منتهي ولا مبيعات",
+                            "تاريخ الجدولة #2": "", "وصول #2": "", "كمية #2": "", "ملاحظة #2": "",
+                            "تاريخ الجدولة #3": "", "وصول #3": "", "كمية #3": "", "ملاحظة #3": "",
+                        })
                     st.divider()
                     continue
 
@@ -2137,7 +2169,6 @@ with tab15:
                 recent_total = sum(day_counts_t15.values())
                 avg_daily_recent = recent_total / sales_days_t15 if sales_days_t15 > 0 else avg_daily
 
-                # يوم النفاد المتوقع
                 effective_avg = avg_daily_recent if avg_daily_recent > 0 else avg_daily
                 if effective_avg > 0:
                     days_to_stockout_t15 = round(stock / effective_avg)
@@ -2164,7 +2195,6 @@ with tab15:
                         st.caption("⚠️ لا توجد مبيعات مسجلة — لا يمكن تقدير يوم النفاد | No sales data — cannot estimate stockout")
 
                 # الجدولات الحالية
-                sched_current = get_latest_schedule_info(sku_raw)
                 existing_schedules = []
                 for sheet_key in ("Scheduled", "Check"):
                     sdata = get_cached(sheets[sheet_key])
@@ -2183,9 +2213,7 @@ with tab15:
                 if existing_schedules:
                     st.markdown("**📋 الجدولات الحالية | Existing Schedules:**")
                     for es in existing_schedules:
-                        days_to_es = (es["parsed"].date() - today_t15).days if es["parsed"] else None
                         arrival_es = (es["parsed"] + timedelta(days=delay_days_t15)).date() if es["parsed"] else None
-                        color_es = "#22c55e" if days_to_es is not None and days_to_es >= 0 else "#ef4444"
                         src_label = "تشييك" if es["source"] == "Check" else "مجدول"
                         st.markdown(
                             f'<span style="background:#1e3a5f;color:#93c5fd;border-radius:6px;padding:3px 10px;font-size:12px;margin:2px;">'
@@ -2195,8 +2223,7 @@ with tab15:
                             unsafe_allow_html=True)
 
                 st.markdown("---")
-                # ══ توليد الجدولات المقترحة ══
-                st.markdown("**🗓️ الجدولات المقترحة | Suggested Schedules:**")
+                st.markdown(f"**🗓️ الجدولات المقترحة | Suggested Schedules** — كل جدولة تغطي **{coverage_days_t15} يوم** فقط:")
 
                 # تاريخ الوصول الفعلي لآخر جدولة موجودة
                 last_covered_date = today_t15
@@ -2207,7 +2234,7 @@ with tab15:
                             if arr > last_covered_date:
                                 last_covered_date = arr
 
-                # نفاد المخزون بعد إضافة الجدولات الموجودة
+                # مخزون + جدولات موجودة
                 total_incoming = sum(_to_int(es["qty"]) for es in existing_schedules)
                 adjusted_stock = stock + total_incoming
                 if effective_avg > 0:
@@ -2223,9 +2250,8 @@ with tab15:
                         f"→ نفاد متوقع بعد {adjusted_days} يوم ({adjusted_stockout.strftime('%Y-%m-%d')})"
                     )
 
-                # توليد 3 جدولات مستقبلية
-                BUFFER_DAYS = 5  # هامش أمان قبل يوم النفاد
-                MIN_SCHEDULE_DAYS = 14  # أقل فترة بين جدولة وأخرى
+                # ══ توليد الجدولات المقترحة بكميات تغطي coverage_days_t15 فقط ══
+                BUFFER_DAYS = 3   # هامش أمان — يبدأ الجدولة قبل النفاد بـ 3 أيام + الـ delay
                 suggested_list = []
                 running_stock = adjusted_stock
                 running_date = last_covered_date
@@ -2233,19 +2259,21 @@ with tab15:
                 for sg_i in range(3):
                     if effective_avg <= 0:
                         break
-                    # متى هيخلص المخزون الحالي؟
-                    days_until_out = round(running_stock / effective_avg)
-                    target_schedule_date = running_date + timedelta(days=max(days_until_out - BUFFER_DAYS - delay_days_t15, MIN_SCHEDULE_DAYS))
-                    # كمية تغطي شهرين
-                    coverage_months = 2
-                    suggested_qty = round(effective_avg * 30 * coverage_months)
-                    suggested_qty = max(suggested_qty, round(sales_month * 1.2)) if sales_month > 0 else suggested_qty
+                    # الكمية = متوسط يومي × أيام التغطية فقط
+                    suggested_qty = max(round(effective_avg * coverage_days_t15), 1)
+                    # متى هيخلص الـ running_stock؟
+                    days_until_running_out = round(running_stock / effective_avg) if effective_avg > 0 else 999
+                    # موعد الجدولة: قبل النفاد بـ (delay + buffer) يوم على الأقل
+                    days_before_arrival_needed = delay_days_t15 + BUFFER_DAYS
+                    days_to_next_schedule = max(days_until_running_out - days_before_arrival_needed, 1)
+                    target_schedule_date = running_date + timedelta(days=days_to_next_schedule)
                     arrival_date = target_schedule_date + timedelta(days=delay_days_t15)
+                    stock_at_arrival = max(round(running_stock - effective_avg * (arrival_date - running_date).days), 0)
 
                     note = ""
                     if sg_i == 0 and existing_schedules:
-                        note = "⚠️ يوجد جدولة حالية — هذا اقتراح الجدولة التالية بعدها | Existing schedule found — this is the next suggested schedule"
-                    elif sg_i == 0 and days_to_stockout_t15 <= 15:
+                        note = "⚠️ يوجد جدولة حالية — هذا اقتراح الجدولة التالية بعدها | Existing schedule found — this is the NEXT suggested schedule"
+                    elif sg_i == 0 and days_to_stockout_t15 <= coverage_days_t15:
                         note = "🔴 المخزون قريب على الخلاص — يُنصح بالجدولة العاجلة | Stock nearly out — urgent scheduling recommended"
 
                     suggested_list.append({
@@ -2254,10 +2282,11 @@ with tab15:
                         "arrival_date": arrival_date,
                         "qty": suggested_qty,
                         "note": note,
-                        "stock_at_arrival": max(round(running_stock - effective_avg * (target_schedule_date - running_date).days), 0)
+                        "stock_at_arrival": stock_at_arrival,
                     })
 
-                    running_stock = max(round(running_stock - effective_avg * (arrival_date - running_date).days), 0) + suggested_qty
+                    # المخزون بعد وصول هذه الجدولة
+                    running_stock = stock_at_arrival + suggested_qty
                     running_date = arrival_date
 
                 colors_sg = ["#14532d", "#1e3a5f", "#3b0764"]
@@ -2269,7 +2298,7 @@ with tab15:
                         f'🗓️ <b>الجدولة {sg["num"]} | Schedule #{sg["num"]}:</b><br>'
                         f'📅 تاريخ الجدولة المقترح: <b style="color:#86efac;">{sg["schedule_date"].strftime("%Y-%m-%d")}</b>'
                         f' &nbsp;→&nbsp; وصول متوقع: <b style="color:#93c5fd;">{sg["arrival_date"].strftime("%Y-%m-%d")}</b><br>'
-                        f'📦 كمية مقترحة: <b style="color:#c4b5fd;">{sg["qty"]}</b>'
+                        f'📦 كمية مقترحة ({coverage_days_t15} يوم): <b style="color:#c4b5fd;">{sg["qty"]}</b>'
                         f' &nbsp;|&nbsp; مخزون متوقع عند الوصول: <b>{sg["stock_at_arrival"]}</b><br>'
                         + (f'<span style="color:#fcd34d;font-size:12px;">📝 {sg["note"]}</span>' if sg["note"] else "")
                         + '</div>',
@@ -2278,4 +2307,28 @@ with tab15:
                 render_recent_expired_note(sku_raw)
                 for note in get_unavailable_ordered_note(sku_raw):
                     st.caption(note)
+
+                # تجميع صف الإكسيل
+                excel_row_t15 = {
+                    "SKU": sku_raw,
+                    "المخزون | Stock": stock,
+                    "مبيع شهري | Monthly Sales": sales_month,
+                    "متوسط يومي | Daily Avg": round(effective_avg, 2),
+                    f"نفاد خلال | Days to Stockout": days_to_stockout_t15 if effective_avg > 0 else "—",
+                }
+                for sg in suggested_list:
+                    n = sg["num"]
+                    excel_row_t15[f"تاريخ الجدولة #{n}"] = sg["schedule_date"].strftime("%Y-%m-%d")
+                    excel_row_t15[f"وصول #{n}"] = sg["arrival_date"].strftime("%Y-%m-%d")
+                    excel_row_t15[f"كمية #{n}"] = sg["qty"]
+                    excel_row_t15[f"مخزون عند الوصول #{n}"] = sg["stock_at_arrival"]
+                    excel_row_t15[f"ملاحظة #{n}"] = sg["note"]
+                excel_rows_t15.append(excel_row_t15)
+
                 st.divider()
+
+            # ══ زر تحميل الإكسيل ══
+            if excel_rows_t15:
+                st.divider()
+                df_excel_t15 = pd.DataFrame(excel_rows_t15)
+                dl_btn(df_excel_t15, "schedule_analysis", label="⬇️ تحميل تحليل الجدولة Excel | Download Schedule Analysis", key="dlbtn_t15_excel")
