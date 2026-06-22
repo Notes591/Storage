@@ -1824,11 +1824,11 @@ with tab10:
 
                         correct_header = ["SKU","Order Timestamp","Status","Price","Quantity","Date Uploaded"]
                         daily_orders_sheet.update("A1", [correct_header])
-
+ 
                         if to_add:
                             safe_batch_append(daily_orders_sheet, to_add)
 
-                       clear_cache(daily_orders_sheet)
+                        clear_cache(daily_orders_sheet)
                         st.success(f"✅ تم رفع {len(to_add)} صف واستبدال البيانات | Uploaded & replaced {len(to_add)} rows")
                         st.rerun()
                 else:
