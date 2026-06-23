@@ -449,9 +449,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ══ Init ══
-if "expired_checked" not in st.session_state:
+# نشغّل فحص المنتهيات كل يوم (مش بس أول تشغيل) — لو بقينا في يوم جديد نعيد الفحص
+_today_key = f"expired_checked_{datetime.now().date()}"
+if _today_key not in st.session_state:
+    # امسح مفاتيح الأيام القديمة
+    for _old_key in [k for k in st.session_state if k.startswith("expired_checked_") and k != _today_key]:
+        del st.session_state[_old_key]
     check_expired_scheduled()
-    st.session_state["expired_checked"] = True
+    st.session_state[_today_key] = True
 
 # تحميل الإشعارات من Sheets عند كل تشغيل (تدوم بعد الإغلاق)
 if "cancel_notifs_loaded" not in st.session_state:
@@ -2673,9 +2678,6 @@ with tab16:
             dc = counts_t16.get(sku_up, {})
             return sum(dc.get(d, 0) for d in dates_list) > 0
 
-        # SKUs المرحلة من تاب المبيعات
-        transferred_t16 = st.session_state.get("transferred_skus_t14", [])
-
         # بناء القوائم الثلاث
         no_sale_1d, no_sale_3d, no_sale_7d = [], [], []
         for sku_up, info in inv_map.items():
@@ -2695,15 +2697,6 @@ with tab16:
         no_sale_3d.sort(key=lambda x: -x["stock"])
         no_sale_7d.sort(key=lambda x: -x["stock"])
 
-        # إضافة المرحلين من تاب المبيعات لو مش موجودين
-        transferred_skus_up = {r["sku_up"] for r in transferred_t16}
-        for tr in transferred_t16:
-            tr_row = {"sku": tr["sku"], "sku_up": tr["sku_up"], "stock": tr["stock"],
-                      "sales_month": tr["sales_month"], "img": tr["img"], "_transferred": True}
-            for lst in [no_sale_1d, no_sale_3d, no_sale_7d]:
-                if tr["sku_up"] not in {r["sku_up"] for r in lst}:
-                    lst.append(tr_row)
-
         def render_no_sale_list(rows, period_label, dl_key):
             if not rows:
                 st.success(f"✅ لا يوجد SKUs بدون مبيعات في {period_label} | No SKUs without sales in {period_label}")
@@ -2711,7 +2704,6 @@ with tab16:
             df_ns = pd.DataFrame([{
                 "SKU": r["sku"], "مخزون | Stock": r["stock"],
                 "مبيع شهري | Monthly Sales": r["sales_month"],
-                "ملاحظة": "مرحل من المبيعات" if r.get("_transferred") else ""
             } for r in rows])
             c1, c2 = st.columns(2)
             with c1: dl_btn(df_ns, dl_key, key=f"dlbtn_{dl_key}")
@@ -2721,13 +2713,7 @@ with tab16:
                 with c_img:
                     show_img(r["img"], 60)
                 with c_info:
-                    transferred_note = ""
-                    if r.get("_transferred"):
-                        transferred_note = ' <span style="background:#7c3aed;color:white;border-radius:4px;padding:1px 7px;font-size:11px;">📌 مرحّل من المبيعات</span>'
-                    st.markdown(
-                        f"**SKU:** `{r['sku']}`" +
-                        (f'<br>{transferred_note}' if transferred_note else ""),
-                        unsafe_allow_html=True)
+                    st.markdown(f"**SKU:** `{r['sku']}`", unsafe_allow_html=True)
                     st.markdown(
                         f"📦 **مخزون:** {r['stock']} &nbsp;|&nbsp; 📈 **شهري:** {r['sales_month']}",
                     )
