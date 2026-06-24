@@ -399,24 +399,21 @@ def check_expired_scheduled():
     if len(data) <= 1:
         return
     today = datetime.now().date()
-    expired_rows, keep = [], []
+    expired_rows = []
+    del_idx = []
     for i, row in enumerate(data[1:], start=2):
-        while len(row) < 6: row.append("")
+        while len(row) < 8: row.append("")
         d = parse_excel_date(row[3])
-        if d and today > d.date():
-            expired_rows.append(row[:6] + [now_str()])
-        else:
-            keep.append(i)
+        # منتهي = تاريخ الجدولة < اليوم (مش <= عشان نفس اليوم ما يتشالش)
+        if d and d.date() < today:
+            expired_rows.append(row[:7] + [now_str()])
+            del_idx.append(i)
     if expired_rows:
         safe_batch_append(expired_sheet, expired_rows)
-        del_idx = sorted([x for x in range(2,len(data[1:])+2) if x not in keep], reverse=True)
-        if del_idx:
-            try:
-                scheduled_sheet.delete_rows(del_idx[-1], del_idx[0] - del_idx[-1] + 1)
-                clear_cache(scheduled_sheet)
-            except Exception:
-                for idx in del_idx:
-                    safe_delete(scheduled_sheet, idx)
+        # نحذف من الأسفل للأعلى عشان الـ index ما يتغيرش
+        for idx in sorted(del_idx, reverse=True):
+            safe_delete(scheduled_sheet, idx)
+        clear_cache(scheduled_sheet)
 
 # ══ CSS ══
 st.markdown("""
