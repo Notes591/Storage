@@ -75,9 +75,15 @@ def get_or_create_worksheet(tab, headers, retries=5, delay=2):
             else:
                 raise e
 
-sheets = {}
-for tab, headers in TABS_CONFIG.items():
-    sheets[tab] = get_or_create_worksheet(tab, headers)
+# ══ تهيئة الشيتات مرة واحدة بس لكل جلسة — مش كل rerun ══
+# (قبل كده كان بيتعمل ss.worksheet() + row_values() لكل الـ 13 تاب في كل ضغطة زرار،
+#  وده اللي كان بيستهلك الـ quota بسرعة جداً ويسبب الخطأ المتكرر)
+if "sheets_initialized" not in st.session_state:
+    _sheets = {}
+    for tab, headers in TABS_CONFIG.items():
+        _sheets[tab] = get_or_create_worksheet(tab, headers)
+    st.session_state["sheets_initialized"] = _sheets
+sheets = st.session_state["sheets_initialized"]
 
 def get_or_create_links_ws(retries=5, delay=2):
     for attempt in range(retries):
@@ -115,10 +121,35 @@ settings_sheet       = sheets["Settings"]
 cancel_notif_sheet   = sheets["CancelNotifications"]
 
 # ══ كاش ══
+def safe_get_all_values(sheet, retries=6, delay=1):
+    """زي safe_append بالظبط بس للقراءة — كان ده الناقص اللي بيسبب الكراش."""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return sheet.get_all_values()
+        except gspread.exceptions.APIError as e:
+            last_err = e
+            wait = delay * (2 ** attempt)
+            if "429" in str(e) or "quota" in str(e).lower() or "RESOURCE_EXHAUSTED" in str(e):
+                st.toast(f"⏳ Google Sheets API limit — جاري إعادة المحاولة ({attempt+1}/{retries})...", icon="⏳")
+                time.sleep(wait)
+            else:
+                time.sleep(delay)
+        except Exception as e:
+            last_err = e
+            time.sleep(delay)
+    # خلصت كل المحاولات — ارجع آخر قيمة كانت متخزنة في الكاش لو موجودة بدل ما الابب يقع كله
+    key = f"cache_{sheet.title}"
+    if key in st.session_state:
+        st.warning(f"⚠️ تعذر تحديث '{sheet.title}' من Google Sheets الآن — بيتم عرض آخر نسخة محفوظة | Showing last cached version")
+        return st.session_state[key]
+    st.error(f"❌ تعذر تحميل '{sheet.title}' من Google Sheets — حاول تاني بعد شوية | Could not load this sheet right now, please retry shortly.")
+    st.stop()
+
 def get_cached(sheet, force=False):
     key = f"cache_{sheet.title}"
     if force or key not in st.session_state:
-        st.session_state[key] = sheet.get_all_values()
+        st.session_state[key] = safe_get_all_values(sheet)
     return st.session_state[key]
 
 def clear_cache(sheet):
@@ -154,7 +185,7 @@ def get_excluded_warehouses():
 # ══ links map ══
 @st.cache_data(ttl=300)
 def get_links_map():
-    data = links_ws.get_all_values()
+    data = safe_get_all_values(links_ws)
     m = {}
     for row in data[1:]:
         if len(row) >= 2 and row[0].strip():
@@ -977,6 +1008,94 @@ with tab1:
                 ordered_skus[sk] = _to_int(r[4]) if r[4] else 1
 
         st.write(f"**الإجمالي | Total: {len(rows)}**")
+
+        # ══ تحديد عدة منتجات مع بعض وعمل إجراء واحد عليهم | Select multiple SKUs and bulk-action them ══
+        sku_options = {f"{r[0]} (qty {r[1] if len(r)>1 else ''}) — row {i}": i
+                       for i, r in enumerate(rows, start=2)}
+        selected_labels = st.multiselect(
+            "🔢 اختر منتجات متعددة لتنفيذ إجراء عليهم مع بعض | Select multiple SKUs to act on together",
+            options=list(sku_options.keys()),
+            key="bulk_req_select"
+        )
+        selected_idx = sorted(sku_options[lbl] for lbl in selected_labels)  # row indices, descending later for delete
+
+        if selected_idx:
+            st.info(f"✅ تم تحديد {len(selected_idx)} منتج | {len(selected_idx)} SKUs selected")
+            bc1, bc2, bc3, bc4 = st.columns(4)
+            with bc1:
+                bulk_approve = st.button("✅ موافقة على المحدد | Approve Selected", use_container_width=True, key="bulk_approve_btn")
+            with bc2:
+                bulk_unavail = st.button("❌ غير متوفر للمحدد | Mark Unavailable", use_container_width=True, key="bulk_unavail_btn")
+            with bc3:
+                bulk_check = st.button("🔍 تشيك للمحدد | Move to Check", use_container_width=True, key="bulk_check_btn")
+            with bc4:
+                bulk_order = st.button("🛒 طلب للمحدد | Order Selected", use_container_width=True, key="bulk_order_btn")
+
+            row_by_idx = {i: row for i, row in enumerate(rows, start=2)}
+
+            if bulk_approve:
+                dn = now_str()
+                ok_rows = []
+                for ri in selected_idx:
+                    r = row_by_idx[ri]
+                    while len(r) < 5: r.append("")
+                    ok_rows.append([r[0], r[1], r[1], r[2], r[3], dn])
+                if safe_batch_append(approved_sheet, ok_rows):
+                    for ri in sorted(selected_idx, reverse=True):
+                        safe_delete(requests_sheet, ri)
+                    st.success(f"✅ تمت الموافقة على {len(selected_idx)} منتج | Approved")
+                    st.rerun()
+
+            if bulk_unavail:
+                dn = now_str()
+                for ri in sorted(selected_idx, reverse=True):
+                    r = row_by_idx[ri]
+                    while len(r) < 5: r.append("")
+                    sku_b, qty_b, img_b, da_b = r[0], r[1], r[2], r[3]
+                    un_ri, un_row = merge_or_get_existing_row(unavailable_sheet, sku_b)
+                    if un_ri:
+                        while len(un_row) < 5: un_row.append("")
+                        cur_count, rest_dates = parse_count_dates(un_row[4])
+                        merged_dates = append_count_date(rest_dates, cur_count + 1, dn)
+                        safe_update_row(unavailable_sheet, un_ri, [un_row[0], qty_b, un_row[2] or img_b, un_row[3], merged_dates])
+                    else:
+                        safe_append(unavailable_sheet, [sku_b, qty_b, img_b, da_b, append_count_date("", 1, dn)])
+                    safe_delete(requests_sheet, ri)
+                st.success(f"❌ تم تحويل {len(selected_idx)} منتج لغير متوفر | Marked unavailable")
+                st.rerun()
+
+            if bulk_check:
+                dn = now_str()
+                check_rows = []
+                for ri in selected_idx:
+                    r = row_by_idx[ri]
+                    while len(r) < 5: r.append("")
+                    check_rows.append(["", r[0], r[1], "", r[2], dn, "", ""])
+                if safe_batch_append(sheets["Check"], check_rows):
+                    for ri in sorted(selected_idx, reverse=True):
+                        safe_delete(requests_sheet, ri)
+                    st.success(f"🔍 تم نقل {len(selected_idx)} منتج للتشيك | Moved to Check")
+                    st.rerun()
+
+            if bulk_order:
+                dn = now_str()
+                for ri in sorted(selected_idx, reverse=True):
+                    r = row_by_idx[ri]
+                    while len(r) < 5: r.append("")
+                    sku_b, qty_b, img_b = r[0], r[1], r[2]
+                    ord_ri, ord_row = merge_or_get_existing_row(ordered_sheet, sku_b)
+                    if ord_ri:
+                        while len(ord_row) < 6: ord_row.append("")
+                        cur_count, rest_notes = parse_count_dates(ord_row[5])
+                        merged_note = append_count_date(rest_notes, cur_count + 1, dn)
+                        safe_update_row(ordered_sheet, ord_ri, [ord_row[0], qty_b, ord_row[2] or img_b, dn, str(cur_count + 1), merged_note])
+                    else:
+                        safe_append(ordered_sheet, [sku_b, qty_b, img_b, dn, "1", append_count_date("", 1, dn)])
+                    safe_delete(requests_sheet, ri)
+                st.success(f"🛒 تم طلب {len(selected_idx)} منتج | Ordered")
+                st.rerun()
+
+        st.divider()
         for i, row in enumerate(rows, start=2):
             while len(row) < 5: row.append("")
             sku,qty,img,date_added,fname = row[0],row[1],row[2],row[3],row[4]
