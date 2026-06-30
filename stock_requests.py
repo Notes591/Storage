@@ -2451,7 +2451,7 @@ with tab14:
                         continue  # أمس اتعرض فوق
                     cnt = r["day_counts"].get(d, 0)
                     day_prices_list = r["day_prices"].get(d, [])
-                    color = "#60a5fa" if cnt > 0 else "#475569"
+                    color = "#000000" if cnt > 0 else "#475569"
                     lbl_short = sales_labels[i].split("(")[0].strip()
                     prices_str_d = fmt_prices(day_prices_list)
                     min_p_d, max_p_d = get_min_max_price(day_prices_list)
@@ -2467,7 +2467,7 @@ with tab14:
                             for line in price_lines_d
                         )
                         day_parts.append(
-                            f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>' +
+                            f'<span style="color:{color};font-size:15px;font-weight:bold;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>' +
                             f'<br><span style="padding-right:8px;">{price_detail}</span>'
                         )
                     else:
