@@ -1012,6 +1012,11 @@ with tab1:
         # ══ تحديد بالعلامة (✓) جمب كل منتج زي المثال | Checkbox next to each item ══
         row_indices = [i for i in range(2, len(rows) + 2)]
 
+        # لو فيه طلب تصفير من إجراء سابق، نفّذه هنا قبل ما أي checkbox يتعمل له render في الـ run ده
+        if st.session_state.pop("_req_clear_pending", False):
+            for k in [k for k in list(st.session_state.keys()) if k.startswith("chk_req_")]:
+                del st.session_state[k]
+
         # تحديد الكل
         sel_all_col, _ = st.columns([1, 5])
         with sel_all_col:
@@ -1040,10 +1045,9 @@ with tab1:
                 bulk_order = st.button("🛒 طلب للمحدد | Order Selected", use_container_width=True, key="bulk_order_btn")
 
             def _clear_selection(idx_list):
-                for ri in idx_list:
-                    st.session_state.pop(f"chk_req_{ri}", None)
-                st.session_state["chk_req_select_all"] = False
-                st.session_state["chk_req_select_all_prev"] = False
+                # ما نقدرش نعدّل قيمة checkbox اتعمله render في نفس الـ run ده (Streamlit بيرفضها).
+                # بدل كده نسجل "طلب تصفير" يتنفذ في أول حاجة في الـ run الجاي قبل ما الـ checkboxes تترسم.
+                st.session_state["_req_clear_pending"] = True
 
             if bulk_approve:
                 dn = now_str()
