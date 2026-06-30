@@ -1009,15 +1009,23 @@ with tab1:
 
         st.write(f"**الإجمالي | Total: {len(rows)}**")
 
-        # ══ تحديد عدة منتجات مع بعض وعمل إجراء واحد عليهم | Select multiple SKUs and bulk-action them ══
-        sku_options = {f"{r[0]} (qty {r[1] if len(r)>1 else ''}) — row {i}": i
-                       for i, r in enumerate(rows, start=2)}
-        selected_labels = st.multiselect(
-            "🔢 اختر منتجات متعددة لتنفيذ إجراء عليهم مع بعض | Select multiple SKUs to act on together",
-            options=list(sku_options.keys()),
-            key="bulk_req_select"
-        )
-        selected_idx = sorted(sku_options[lbl] for lbl in selected_labels)  # row indices, descending later for delete
+        # ══ تحديد بالعلامة (✓) جمب كل منتج زي المثال | Checkbox next to each item ══
+        row_indices = [i for i in range(2, len(rows) + 2)]
+
+        # تحديد الكل
+        sel_all_col, _ = st.columns([1, 5])
+        with sel_all_col:
+            select_all = st.checkbox("تحديد الكل | Select All", key="chk_req_select_all")
+        if select_all:
+            for i in row_indices:
+                st.session_state[f"chk_req_{i}"] = True
+        elif st.session_state.get("chk_req_select_all_prev") and not select_all:
+            for i in row_indices:
+                st.session_state[f"chk_req_{i}"] = False
+        st.session_state["chk_req_select_all_prev"] = select_all
+
+        selected_idx = [i for i in row_indices if st.session_state.get(f"chk_req_{i}", False)]
+        row_by_idx = {i: row for i, row in enumerate(rows, start=2)}
 
         if selected_idx:
             st.info(f"✅ تم تحديد {len(selected_idx)} منتج | {len(selected_idx)} SKUs selected")
@@ -1031,7 +1039,11 @@ with tab1:
             with bc4:
                 bulk_order = st.button("🛒 طلب للمحدد | Order Selected", use_container_width=True, key="bulk_order_btn")
 
-            row_by_idx = {i: row for i, row in enumerate(rows, start=2)}
+            def _clear_selection(idx_list):
+                for ri in idx_list:
+                    st.session_state.pop(f"chk_req_{ri}", None)
+                st.session_state["chk_req_select_all"] = False
+                st.session_state["chk_req_select_all_prev"] = False
 
             if bulk_approve:
                 dn = now_str()
@@ -1043,6 +1055,7 @@ with tab1:
                 if safe_batch_append(approved_sheet, ok_rows):
                     for ri in sorted(selected_idx, reverse=True):
                         safe_delete(requests_sheet, ri)
+                    _clear_selection(selected_idx)
                     st.success(f"✅ تمت الموافقة على {len(selected_idx)} منتج | Approved")
                     st.rerun()
 
@@ -1061,6 +1074,7 @@ with tab1:
                     else:
                         safe_append(unavailable_sheet, [sku_b, qty_b, img_b, da_b, append_count_date("", 1, dn)])
                     safe_delete(requests_sheet, ri)
+                _clear_selection(selected_idx)
                 st.success(f"❌ تم تحويل {len(selected_idx)} منتج لغير متوفر | Marked unavailable")
                 st.rerun()
 
@@ -1074,6 +1088,7 @@ with tab1:
                 if safe_batch_append(sheets["Check"], check_rows):
                     for ri in sorted(selected_idx, reverse=True):
                         safe_delete(requests_sheet, ri)
+                    _clear_selection(selected_idx)
                     st.success(f"🔍 تم نقل {len(selected_idx)} منتج للتشيك | Moved to Check")
                     st.rerun()
 
@@ -1092,6 +1107,7 @@ with tab1:
                     else:
                         safe_append(ordered_sheet, [sku_b, qty_b, img_b, dn, "1", append_count_date("", 1, dn)])
                     safe_delete(requests_sheet, ri)
+                _clear_selection(selected_idx)
                 st.success(f"🛒 تم طلب {len(selected_idx)} منتج | Ordered")
                 st.rerun()
 
@@ -1099,7 +1115,9 @@ with tab1:
         for i, row in enumerate(rows, start=2):
             while len(row) < 5: row.append("")
             sku,qty,img,date_added,fname = row[0],row[1],row[2],row[3],row[4]
-            c_img,c_info,c_act = st.columns([1,4,3])
+            c_chk,c_img,c_info,c_act = st.columns([0.5,1,4,3])
+            with c_chk:
+                st.checkbox("", key=f"chk_req_{i}", label_visibility="collapsed")
             with c_img: show_img(img,75)
             with c_info:
                 st.markdown(f"**SKU:** `{sku}`")
