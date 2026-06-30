@@ -2419,16 +2419,16 @@ with tab14:
                         price_html_y = ""
                         if price_lines_y:
                             price_html_y = "<br>" + "<br>".join(
-                                f'<span style="color:#15803d;font-size:13px;font-weight:bold;">↳ {line}</span>'
+                                f'<span style="color:#bbf7d0;font-size:14px;font-weight:bold;">↳ {line}</span>'
                                 for line in price_lines_y
                             )
                         minmax_html_y = ""
                         if min_p_y is not None and max_p_y is not None and min_p_y != max_p_y:
                             minmax_html_y = (
-                                f'<br><span style="color:#b45309;font-size:12px;font-weight:bold;">📉 أقل: {min_p_y:g} &nbsp;|&nbsp; 📈 أعلى: {max_p_y:g}</span>'
+                                f'<br><span style="color:#fbbf24;font-size:14px;font-weight:bold;">📉 أقل: {min_p_y:g} &nbsp;|&nbsp; 📈 أعلى: {max_p_y:g}</span>'
                             )
                         elif min_p_y is not None:
-                            minmax_html_y = f'<br><span style="color:#b45309;font-size:12px;font-weight:bold;">💰 سعر: {min_p_y:g}</span>'
+                            minmax_html_y = f'<br><span style="color:#fbbf24;font-size:14px;font-weight:bold;">💰 سعر: {min_p_y:g}</span>'
                         yesterday_html = (
                             f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
                             f'<span style="color:#86efac;font-size:15px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
