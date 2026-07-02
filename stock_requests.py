@@ -764,6 +764,107 @@ def render_recent_expired_note(sku, days_back=4):
         f'Was scheduled but expired</span>',
         unsafe_allow_html=True)
 
+def get_recent_schedule_rows(days_back=4):
+    """يرجع dict: sku_upper -> أحدث سجل جدولة (من Scheduled/Check/Expired) وقع تاريخ جدولته
+    خلال آخر days_back يوم (يعني: أمس/أول أمس/أول أول أمس/قبل 4 أيام).
+    الهدف: الـ SKU ده لسه في فترة انتظار وصول المخزون بعد الجدولة — حتى لو الجدولة
+    خلاص اتنقلت لتاب Expired — فلازم يفضل ظاهر في تابات المراجعة عشان محدش يطلبه تاني بالغلط."""
+    cutoff = datetime.now().date() - timedelta(days=days_back)
+    today_ = datetime.now().date()
+    src_label_map = {"Scheduled": "الجدولة | Scheduled", "Check": "تشييك | Check", "Expired": "منتهية | Expired"}
+    by_sku = {}
+    for sheet_key in ("Scheduled", "Check", "Expired"):
+        data = get_cached(sheets[sheet_key])
+        if len(data) <= 1:
+            continue
+        for row in data[1:]:
+            while len(row) < 4:
+                row.append("")
+            sku_up = row[1].strip().upper()
+            if not sku_up:
+                continue
+            d = parse_excel_date(row[3])  # عمود "Schedule Date" في الثلاث شيتات
+            if not d:
+                continue
+            dd = d.date()
+            if not (cutoff <= dd <= today_):
+                continue
+            entry = {
+                "sku_up": sku_up, "asn": row[0], "date": row[3], "parsed": dd,
+                "source": sheet_key, "source_label": src_label_map.get(sheet_key, sheet_key),
+            }
+            prev = by_sku.get(sku_up)
+            if not prev or dd > prev["parsed"]:
+                by_sku[sku_up] = entry
+    return by_sku
+
+def recent_schedule_badge_html(entry):
+    """شارة توضيحية لسكو اتجدول (أو انتهت جدولته) خلال آخر 4 أيام — تمنع إعادة الطلب بالغلط."""
+    color = "#7c3aed" if entry["source"] != "Expired" else "#b45309"
+    return (
+        f'<span style="background:{color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">'
+        f'📅 مجدول بتاريخ {entry["date"]} (ASN {entry["asn"]}) [{entry["source_label"]}] — '
+        f'خلال آخر 4 أيام، لسه في فترة الوصول — لا تطلبه تاني | '
+        f'Scheduled within the last 4 days — still within arrival window, don\'t re-order</span>'
+    )
+
+def compute_recent_scheduled_rows(exclude_skus, day_dates, days_back=4):
+    """يبني صفوف SKUs اتجدولت أو انتهت جدولتها خلال آخر days_back يوم ومش ظاهرة أصلاً
+    في قائمة المراجعة الرئيسية (exclude_skus) — عشان تتعرض في سكشن منفصل يفكّر المستخدم
+    إنها كانت مجدولة مؤخراً ولسه بتستنى توصل."""
+    recent_map = get_recent_schedule_rows(days_back=days_back)
+    if not recent_map:
+        return []
+    day_counts_map = build_daily_orders_counts(day_dates)
+    rows = []
+    for sku_up, sched_entry in recent_map.items():
+        if sku_up in exclude_skus:
+            continue
+        info        = inv_map.get(sku_up, {})
+        stock       = info.get("total_stock", 0)
+        sales_month = info.get("sales", 0)
+        img         = info.get("img", "")
+        sku_disp    = info.get("sku", sku_up)
+        day_counts  = day_counts_map.get(sku_up, {d: 0 for d in day_dates})
+        rows.append({
+            "sku": sku_disp, "sku_up": sku_up, "stock": stock, "sales_month": sales_month,
+            "img": img, "day_counts": day_counts, "sched": sched_entry,
+        })
+    rows.sort(key=lambda r: -r["sched"]["parsed"].toordinal())
+    return rows
+
+def render_recent_scheduled_section(rows, day_dates, day_labels, dl_key):
+    """يعرض سكشن 'مجدولة خلال آخر 4 أيام' في تابات المراجعة — تنبيه لمنع إعادة الطلب بالغلط."""
+    st.divider()
+    st.subheader("📅 مجدولة خلال آخر 4 أيام | Recently Scheduled (Last 4 Days)")
+    st.caption(
+        "SKUs اتجدولت أو انتهت جدولتها خلال آخر 4 أيام ولسه في فترة انتظار وصول المخزون — "
+        "بتظهر هنا حتى لو مش محتاجة مراجعة دلوقتي، عشان محدش يطلبها تاني بالغلط | "
+        "SKUs scheduled (or whose schedule expired) in the last 4 days and still within the "
+        "arrival window — shown here even if not currently flagged, so no one re-requests them by mistake"
+    )
+    if not rows:
+        st.info("لا يوجد SKUs مجدولة مؤخراً غير ظاهرة أعلاه | No recently scheduled SKUs outside the list above")
+        return
+    df_rs = pd.DataFrame([{
+        "SKU": r["sku"], "Stock": r["stock"], "Monthly Sales": r["sales_month"],
+        "Schedule Date": r["sched"]["date"], "Source": r["sched"]["source"], "ASN": r["sched"]["asn"],
+    } for r in rows])
+    c1, c2 = st.columns(2)
+    with c1: dl_btn(df_rs, dl_key, key=f"dlbtn_{dl_key}")
+    with c2: st.info(f"📅 SKUs مجدولة مؤخراً | Recently scheduled: {len(rows)}")
+    for r in rows:
+        c_img, c_info = st.columns([1, 6])
+        with c_img: show_img(r["img"], 70)
+        with c_info:
+            st.markdown(f"**SKU:** `{r['sku']}`")
+            st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
+            st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
+            st.markdown(recent_schedule_badge_html(r["sched"]), unsafe_allow_html=True)
+            for note in get_unavailable_ordered_note(r["sku"]):
+                st.caption(note)
+        st.divider()
+
 def get_latest_schedule_info(sku):
     """يدوّر على SKU في الجدولة والتشييك ويرجع أقرب جدولة (تاريخ) أو None."""
     sku_up = sku.strip().upper()
@@ -2039,11 +2140,21 @@ with tab10:
                 if r["sales_alert"]:
                     st.warning("📈 مبيعات أعلى من المعتاد كمان | Also selling faster than usual")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days)
-                st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                recent_sched_r = get_recent_schedule_rows(days_back=4).get(r["sku_up"])
+                show_normal_badge = not (recent_sched_r and "محتاج جدولة" in badge_text)
+                if show_normal_badge:
+                    st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                if recent_sched_r:
+                    st.markdown(recent_schedule_badge_html(recent_sched_r), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
             st.divider()
+
+    # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمة اللي فوق ══
+    exclude_skus_t10 = {r["sku_up"] for r in stock_review_rows}
+    recent_scheduled_rows_t10 = compute_recent_scheduled_rows(exclude_skus_t10, day_dates, days_back=4)
+    render_recent_scheduled_section(recent_scheduled_rows_t10, day_dates, day_labels, "recent_scheduled_t10")
 
     st.divider()
     st.subheader("⛔ مخزون منتهي بالكامل | Completely Out of Stock")
@@ -2221,11 +2332,21 @@ with tab13:
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 st.markdown(f"⚡ **نفاد خلال بيع اليوم | Days to stockout (today's rate):** {r['days_to_stockout_today']} يوم")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days2)
-                st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                recent_sched_r2 = get_recent_schedule_rows(days_back=4).get(r["sku_up"])
+                show_normal_badge2 = not (recent_sched_r2 and "محتاج جدولة" in badge_text)
+                if show_normal_badge2:
+                    st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                if recent_sched_r2:
+                    st.markdown(recent_schedule_badge_html(recent_sched_r2), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
             st.divider()
+
+    # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمة اللي فوق ══
+    exclude_skus_t13 = {r["sku_up"] for r in sales_review_rows}
+    recent_scheduled_rows_t13 = compute_recent_scheduled_rows(exclude_skus_t13, day_dates2, days_back=4)
+    render_recent_scheduled_section(recent_scheduled_rows_t13, day_dates2, day_labels2, "recent_scheduled_t13")
 
     st.divider()
     st.subheader("⛔ مخزون منتهي بالكامل | Completely Out of Stock")
