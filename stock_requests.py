@@ -2185,15 +2185,17 @@ with tab10:
                     st.caption(note)
             st.divider()
 
-    # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمة اللي فوق ══
-    exclude_skus_t10 = {r["sku_up"] for r in stock_review_rows}
+    # ══ نحسب الأول قايمة "منتهي بالكامل" عشان نستبعدها من سكشن "مجدولة مؤخراً" ══
+    missing_rows_t10 = compute_missing_inventory_rows(day_dates)
+
+    # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمتين اللي فوق وتحت ══
+    exclude_skus_t10 = {r["sku_up"] for r in stock_review_rows} | {r["sku_up"] for r in missing_rows_t10}
     recent_scheduled_rows_t10 = compute_recent_scheduled_rows(exclude_skus_t10, day_dates, days_back=4)
     render_recent_scheduled_section(recent_scheduled_rows_t10, day_dates, day_labels, "recent_scheduled_t10")
 
     st.divider()
     st.subheader("⛔ مخزون منتهي بالكامل | Completely Out of Stock")
     st.caption("SKUs باعت في آخر 3 أيام لكن مالهاش سجل في ملف المخزون أصلاً — يبقى مخزونها انتهى وخرجت من الملف | SKUs with sales in the last 3 days but no record in the Inventory file at all — stock fully ran out")
-    missing_rows_t10 = compute_missing_inventory_rows(day_dates)
     if not missing_rows_t10:
         st.success("✅ لا يوجد SKUs خارجة عن المخزون | No SKUs missing from inventory")
     else:
@@ -2204,6 +2206,7 @@ with tab10:
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_miss10,"out_of_stock", key="dlbtn_oos_t10")
         with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t10)}")
+        recent_sched_map_t10 = get_recent_schedule_rows(days_back=4)
         for r in missing_rows_t10:
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(r["img"],70)
@@ -2213,7 +2216,12 @@ with tab10:
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
                 st.markdown(f"📈 **مبيع شهري تقديري (بناءً على آخر 3 أيام) | Estimated Monthly Sales (based on last 3 days):** **{r['est_monthly_sales']}**")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days)
-                st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                recent_sched_miss = recent_sched_map_t10.get(r["sku_up"])
+                show_normal_badge_miss = not (recent_sched_miss and "محتاج جدولة" in badge_text)
+                if show_normal_badge_miss:
+                    st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                if recent_sched_miss:
+                    st.markdown(recent_schedule_badge_html(recent_sched_miss), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
@@ -2377,15 +2385,17 @@ with tab13:
                     st.caption(note)
             st.divider()
 
-    # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمة اللي فوق ══
-    exclude_skus_t13 = {r["sku_up"] for r in sales_review_rows}
+    # ══ نحسب الأول قايمة "منتهي بالكامل" عشان نستبعدها من سكشن "مجدولة مؤخراً" ══
+    missing_rows_t13 = compute_missing_inventory_rows(day_dates2)
+
+    # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمتين اللي فوق وتحت ══
+    exclude_skus_t13 = {r["sku_up"] for r in sales_review_rows} | {r["sku_up"] for r in missing_rows_t13}
     recent_scheduled_rows_t13 = compute_recent_scheduled_rows(exclude_skus_t13, day_dates2, days_back=4)
     render_recent_scheduled_section(recent_scheduled_rows_t13, day_dates2, day_labels2, "recent_scheduled_t13")
 
     st.divider()
     st.subheader("⛔ مخزون منتهي بالكامل | Completely Out of Stock")
     st.caption("SKUs باعت في آخر 3 أيام لكن مالهاش سجل في ملف المخزون أصلاً — يبقى مخزونها انتهى وخرجت من الملف | SKUs with sales in the last 3 days but no record in the Inventory file at all — stock fully ran out")
-    missing_rows_t13 = compute_missing_inventory_rows(day_dates2)
     if not missing_rows_t13:
         st.success("✅ لا يوجد SKUs خارجة عن المخزون | No SKUs missing from inventory")
     else:
@@ -2396,6 +2406,7 @@ with tab13:
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_miss13,"out_of_stock", key="dlbtn_oos_t13")
         with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t13)}")
+        recent_sched_map_t13 = get_recent_schedule_rows(days_back=4)
         for r in missing_rows_t13:
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(r["img"],70)
@@ -2405,7 +2416,12 @@ with tab13:
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 st.markdown(f"📈 **مبيع شهري تقديري (بناءً على آخر 3 أيام) | Estimated Monthly Sales (based on last 3 days):** **{r['est_monthly_sales']}**")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days2)
-                st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                recent_sched_miss2 = recent_sched_map_t13.get(r["sku_up"])
+                show_normal_badge_miss2 = not (recent_sched_miss2 and "محتاج جدولة" in badge_text)
+                if show_normal_badge_miss2:
+                    st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                if recent_sched_miss2:
+                    st.markdown(recent_schedule_badge_html(recent_sched_miss2), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.caption(note)
