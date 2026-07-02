@@ -688,11 +688,25 @@ def compute_stock_sales_rows(target_date, display_dates=None):
         img         = info.get("img", "")
         threshold_10d = sales_month/30*10
         stock_alert = (stock - threshold_10d) < 0
-        sales_alert = sales_month > 0 and abs(qty)*30 > sales_month
+        day_counts = multi_counts.get(sku_up, {dd:0 for dd in display_dates})
+
+        # ══ مبيعات أعلى من المعتاد — بمتوسط آخر 3 أيام (مش يوم واحد بس) عشان نقلل
+        #    الـ noise من طلبية كبيرة عشوائية في يوم واحد، وبشرط إن الارتفاع
+        #    يكون مستمر يومين على الأقل من آخر 3 أيام (مش مجرد يوم شاذ) ══
+        recent_days      = display_dates[:3] if len(display_dates) >= 3 else display_dates
+        recent_vals      = [day_counts.get(dd, 0) for dd in recent_days]
+        recent_avg       = (sum(recent_vals) / len(recent_vals)) if recent_vals else 0
+        daily_avg_normal = (sales_month / 30) if sales_month > 0 else 0
+        elevated_days    = sum(1 for v in recent_vals if daily_avg_normal > 0 and v > daily_avg_normal)
+        sales_alert = (
+            sales_month > 0
+            and recent_avg * 30 > sales_month
+            and elevated_days >= 2
+        )
+
         suggested_qty = round(sales_month/30*18) if stock_alert else 0
         days_to_stockout       = round(stock/(sales_month/30)) if sales_month > 0 else 0
         days_to_stockout_today = round(stock/abs(qty)) if abs(qty) > 0 else 0
-        day_counts = multi_counts.get(sku_up, {dd:0 for dd in display_dates})
         rows.append({
             "sku": sku_disp, "sku_up": sku_up, "qty": qty, "stock": stock, "sales_month": sales_month,
             "img": img, "stock_alert": stock_alert, "sales_alert": sales_alert,
@@ -2309,7 +2323,7 @@ with tab12:
 # ══ TAB 13 — مراجعة المبيعات ══
 with tab13:
     st.subheader("📈 مراجعة المبيعات | Sales Review")
-    st.caption("نفس منطق استعلام Access \"مراجعة مبيعات\" — مبيعات أمس أعلى من المعتاد لكن المخزون لسه كافي | Same logic as the Access \"مراجعة مبيعات\" query — yesterday's sales unusually high but stock still sufficient")
+    st.caption("متوسط مبيعات آخر 3 أيام أعلى من المعتاد بشكل مستمر (يومين على الأقل) لكن المخزون لسه كافي — بديل أقل حساسية للـ noise من مجرد يوم واحد شاذ | Average of the last 3 days consistently above normal (at least 2 elevated days) but stock still sufficient — less sensitive to a single noisy day")
 
     today_d2 = datetime.now().date()
     e1, e2, e3 = today_d2 - timedelta(days=1), today_d2 - timedelta(days=2), today_d2 - timedelta(days=3)
