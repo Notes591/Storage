@@ -886,6 +886,19 @@ def get_latest_schedule_info(sku):
         return dated[0]
     return candidates[0]
 
+def clear_unavailable_ordered_for_sku(sku):
+    """يمسح أي سجل قديم لهذا الـ SKU من شيتات Unavailable و Ordered —
+    بيتنفذ وقت الموافقة على طلب جديد لنفس الـ SKU، عشان ملاحظات
+    'غير متوفر سابقاً' / 'تم الطلب سابقاً' متفضلش ظاهرة غلط في التابات
+    (مراجعة المخزون، مراجعة المبيعات، الموافقة، ...) بعد ما بقى متاح فعلاً
+    أو وصل طلبه."""
+    if not sku or not str(sku).strip():
+        return
+    for sh in (unavailable_sheet, ordered_sheet):
+        ri, _ = merge_or_get_existing_row(sh, sku)
+        if ri:
+            safe_delete(sh, ri)
+
 def get_unavailable_ordered_note(sku):
     """لو الـ SKU سبق اتسجل غير متوفر أو تم طلبه، يرجع ملاحظات بالتواريخ."""
     sku_up = sku.strip().upper()
@@ -1078,6 +1091,8 @@ with tab1:
             if cy.button("✅ نعم | Yes", key="yes_app_all"):
                 dn = now_str()
                 safe_batch_append(approved_sheet, [[r[0],r[1],r[1],r[2] if len(r)>2 else "",r[3] if len(r)>3 else "",dn] for r in rows])
+                for r in rows:
+                    clear_unavailable_ordered_for_sku(r[0])
                 safe_delete_all(requests_sheet)
                 st.session_state["confirm_approve_all"] = False
                 st.rerun()
@@ -1160,6 +1175,8 @@ with tab1:
                 if safe_batch_append(approved_sheet, ok_rows):
                     for ri in sorted(selected_idx, reverse=True):
                         safe_delete(requests_sheet, ri)
+                    for ok_r in ok_rows:
+                        clear_unavailable_ordered_for_sku(ok_r[0])
                     _clear_selection(selected_idx)
                     st.success(f"✅ تمت الموافقة على {len(selected_idx)} منتج | Approved")
                     st.rerun()
@@ -1241,6 +1258,7 @@ with tab1:
                         if st.button("✅ تأكيد | Confirm", key=f"aconf_{i}"):
                             safe_append(approved_sheet, [sku,qty,nq,img,date_added,now_str()])
                             safe_delete(requests_sheet,i)
+                            clear_unavailable_ordered_for_sku(sku)
                             st.rerun()
                 with cb:
                     if st.button("❌ غير\nمتوفر\nUnavailable", key=f"unavail_{i}"):
@@ -1354,6 +1372,7 @@ with tab3:
                     if st.button("✅ أرسل للموافقة | Send to Approved", key=f"un_ret_conf_{ri}"):
                         safe_append(approved_sheet,[sku,qty,nq_un,img,da,now_str()])
                         safe_delete(unavailable_sheet,ri)
+                        clear_unavailable_ordered_for_sku(sku)
                         st.rerun()
                 if st.button("🗑️", key=f"del_un_{ri}"):
                     safe_delete(unavailable_sheet,ri); st.rerun()
@@ -1401,6 +1420,7 @@ with tab4:
                         if st.button("✅ أرسل للموافقة | Send to Approved", key=f"ret_conf_{ri}"):
                             safe_append(approved_sheet,[sku,qty,nq,img,da,now_str()])
                             safe_delete(ordered_sheet,ri)
+                            clear_unavailable_ordered_for_sku(sku)
                             st.rerun()
                 with cb:
                     if st.button("🗑️", key=f"del_ord_{ri}"):
