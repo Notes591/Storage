@@ -673,6 +673,19 @@ def build_daily_orders_prices(dates):
             prices[sku_up][d.date()].append((price_val, qty_val))
     return prices
 
+def is_sku_only_in_excluded_warehouses(sku_up, excluded_wh):
+    """يتحقق هل كل مستودعات هذا الـ SKU (في ملف المخزون) هي مستودعات مستثناة فقط —
+    لو كذلك، يبقى مينفعش يظهر في تابي مراجعة المخزون / مراجعة المبيعات."""
+    if not excluded_wh:
+        return False
+    info = inv_map.get(sku_up)
+    if not info:
+        return False
+    whs = info.get("warehouses", {})
+    if not whs:
+        return False
+    return all(w.strip().upper() in excluded_wh for w in whs.keys())
+
 def compute_stock_sales_rows(target_date, display_dates=None):
     """يحسب لكل SKU ظهر في أوردرز اليوم المحدد نفس مخرجات استعلامي مراجعة مخزون / مراجعة مبيعات.
     display_dates (اختياري): قائمة تواريخ إضافية تتعرض جنب كل SKU (مثلاً أمس/أول أمس/أول أول أمس)."""
@@ -681,6 +694,8 @@ def compute_stock_sales_rows(target_date, display_dates=None):
     multi_counts = build_daily_orders_counts(display_dates)
     rows = []
     for sku_up, qty in daily_qty.items():
+        if is_sku_only_in_excluded_warehouses(sku_up, excluded_wh):
+            continue
         info        = inv_map.get(sku_up, {})
         stock       = info.get("total_stock", 0)
         sales_month = info.get("sales", 0)
@@ -805,6 +820,7 @@ def get_recent_schedule_rows(days_back=4):
                 continue
             entry = {
                 "sku_up": sku_up, "asn": row[0], "date": row[3], "parsed": dd,
+                "qty": row[2] if len(row) > 2 else "",
                 "source": sheet_key, "source_label": src_label_map.get(sheet_key, sheet_key),
             }
             prev = by_sku.get(sku_up)
@@ -2130,6 +2146,8 @@ with tab10:
     transferred_from_sales = st.session_state.get("transferred_skus_t14", [])
     existing_skus_in_review = {r["sku_up"] for r in stock_review_rows}
     for tr in transferred_from_sales:
+        if is_sku_only_in_excluded_warehouses(tr["sku_up"], excluded_wh):
+            continue
         if tr["sku_up"] not in existing_skus_in_review:
             avg_tr = tr.get("effective_avg", 0)
             suggested_tr = round(avg_tr * 18) if avg_tr > 0 else 0
@@ -2523,6 +2541,9 @@ with tab14:
         # تحديث المرحلين بعد بناء الصفوف الكاملة
         _new_transferred = []
 
+        # ══ خريطة SKUs المجدولة خلال آخر 4 أيام (لعرض ASN + الكمية لو فعلاً ليها جدولة) ══
+        recent_sched_map_t14 = get_recent_schedule_rows(days_back=4)
+
         st.divider()
         for r in sales_tab_rows:
             c_img, c_info = st.columns([1, 7])
@@ -2675,6 +2696,18 @@ with tab14:
                 st.markdown(
                     f'<span style="background:{cov_badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{cov_badge_text}</span>',
                     unsafe_allow_html=True)
+
+                # ══ مجدولة خلال آخر 4 أيام؟ (لو فعلاً ليها جدولة) — تعرض ASN + الكمية + التاريخ ══
+                recent_sched_t14 = recent_sched_map_t14.get(r["sku_up"])
+                if recent_sched_t14:
+                    st.markdown(
+                        f'<span style="background:#7c3aed;color:white;border-radius:6px;padding:3px 10px;font-size:12px;">'
+                        f'📅 مجدولة خلال آخر 4 أيام | Scheduled in last 4 days — '
+                        f'ASN <b>{recent_sched_t14["asn"]}</b> &nbsp;|&nbsp; '
+                        f'الكمية | Qty: <b>{recent_sched_t14.get("qty","")}</b> &nbsp;|&nbsp; '
+                        f'بتاريخ {recent_sched_t14["date"]} [{recent_sched_t14["source_label"]}]'
+                        f'</span>',
+                        unsafe_allow_html=True)
 
                 # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة وبدون تفاصيل أخرى ══
                 is_needs_sched_only = (
