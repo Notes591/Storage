@@ -995,7 +995,9 @@ def compute_transferred_from_sales():
         avg_daily    = (total_recent / sales_days_now) if sales_days_now > 0 else (sales_month / 30 if sales_month > 0 else 0)
         eff_avg      = avg_daily if avg_daily > 0 else (sales_month / 30 if sales_month > 0 else 0)
         days_to_so   = round(stock / eff_avg) if eff_avg > 0 else 9999
-        stock_ok     = days_to_so >= cov_days_now if eff_avg > 0 else False
+        # نفس التصحيح اللي اتعمل في تاب المبيعات: لو مفيش أي متوسط بيع خالص،
+        # يبقى المخزون مش بينزل أصلاً، فمينفعش يترحّل كـ "محتاج جدولة"
+        stock_ok     = (eff_avg <= 0) or (days_to_so >= cov_days_now)
         if stock_ok:
             continue
         badge_text, _, sched = schedule_coverage_badge(sku_disp, days_to_so, delay_days_now)
