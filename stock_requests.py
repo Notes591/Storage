@@ -2677,16 +2677,22 @@ with tab14:
 
                 # ══ حالة التغطية ══
                 badge_text_t14, badge_color_t14, sched_t14 = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days_t14)
-                stock_self_ok = r["days_to_stockout"] >= coverage_days_t14 if r["effective_avg"] > 0 else False
+                # لو مفيش أي متوسط بيع (لا حديث ولا شهري) يبقى المخزون مش بينزل خالص —
+                # فمينفعش نعتبره "غير كافٍ" لمجرد إن مفيش بيانات بيع (كان ده الخلل قبل كده)
+                stock_self_ok = (r["effective_avg"] <= 0) or (r["days_to_stockout"] >= coverage_days_t14)
                 un_notes = get_unavailable_ordered_note(r["sku"])
 
                 if stock_self_ok and not sched_t14:
-                    cov_badge_text  = f"✅ مخزون كافٍ ({r['days_to_stockout']} يوم) — لا يحتاج جدولة الآن | Stock sufficient"
+                    if r["effective_avg"] <= 0:
+                        cov_badge_text = "✅ لا توجد مبيعات حالياً — لا يحتاج جدولة | No sales recorded — no scheduling needed"
+                    else:
+                        cov_badge_text = f"✅ مخزون كافٍ ({r['days_to_stockout']} يوم) — لا يحتاج جدولة الآن | Stock sufficient"
                     cov_badge_color = "#15803d"
                 elif stock_self_ok and sched_t14:
                     sched_src_t14 = "تشييك" if sched_t14.get("source") == "Check" else "مجدول"
                     arrival_t14 = (sched_t14["parsed"] + timedelta(days=delay_days_t14)).date() if sched_t14.get("parsed") else None
-                    cov_badge_text  = (f"✅ مخزون كافٍ ({r['days_to_stockout']} يوم) + ASN {sched_t14['asn']} بتاريخ {sched_t14['date']}"
+                    stockout_disp_t14 = f"{r['days_to_stockout']} يوم" if r["effective_avg"] > 0 else "لا توجد مبيعات"
+                    cov_badge_text  = (f"✅ مخزون كافٍ ({stockout_disp_t14}) + ASN {sched_t14['asn']} بتاريخ {sched_t14['date']}"
                                        + (f" — وصول: {arrival_t14}" if arrival_t14 else "") + f" [{sched_src_t14}]")
                     cov_badge_color = "#15803d"
                 else:
