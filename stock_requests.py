@@ -732,13 +732,15 @@ def build_orders_index(dates):
     return index
 
 def get_channel_sku_sets():
-    """يرجع (fbn_skus, fbb_skus): كل الـ SKUs اللي ليها أي أوردر FBN / FBB في تاريخ شيت الأوردرز كله
-    (مش بس أيام العرض) — ده اللي بيُستخدم لعرض 'موجود أيضاً في التاب التاني' في تابي FBN و FBB."""
+    """يرجع (fbb_skus, non_fbb_skus): كل الـ SKUs اللي ليها أي أوردر FBB، وكل الـ SKUs اللي ليها أي أوردر
+    من أي قناة تانية غير FBB (يعني FBN + سوبر مول + أي حاجة تانية — وهو بالظبط اللي بيظهر في تاب المبيعات
+    العام) — في تاريخ شيت الأوردرز كله (مش بس أيام العرض). ده اللي بيُستخدم لعرض ملاحظة
+    'موجود في التاب التاني' بين تاب FBB وتاب المبيعات العام."""
     cache_key = f"channel_sku_sets_{_daily_orders_cache_version()}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
     data = get_cached(daily_orders_sheet)
-    fbn_skus, fbb_skus = set(), set()
+    fbb_skus, non_fbb_skus = set(), set()
     if len(data) > 1:
         hdr = data[0]
         fm_col_idx = None
@@ -751,12 +753,12 @@ def get_channel_sku_sets():
             sku_up = row[0].strip().upper()
             fm_raw = row[fm_col_idx] if (fm_col_idx is not None and len(row) > fm_col_idx) else ""
             channel = classify_fulfillment(fm_raw)
-            if channel == "fbn":
-                fbn_skus.add(sku_up)
-            elif channel == "fbb":
+            if channel == "fbb":
                 fbb_skus.add(sku_up)
-    st.session_state[cache_key] = (fbn_skus, fbb_skus)
-    return fbn_skus, fbb_skus
+            else:
+                non_fbb_skus.add(sku_up)
+    st.session_state[cache_key] = (fbb_skus, non_fbb_skus)
+    return fbb_skus, non_fbb_skus
 
 def build_daily_orders_map(target_date):
     """يرجع dict: sku_upper -> عدد صفوف الأوردرز لليوم المحدد (كل القنوات)."""
@@ -1404,12 +1406,11 @@ tabs = st.tabs([
     "⚙️ الإعدادات | Settings",
     "📈 مراجعة المبيعات | Sales Review",
     "🛒 المبيعات | Sales",
-    "🟠 FBN",
     "🔵 FBB",
     "🗓️ تحليل الجدولة | Schedule Analysis",
     "📦 مخزون بدون بيع | No Sales",
 ])
-(tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab14,tab_fbn,tab_fbb,tab15,tab16) = tabs
+(tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab14,tab_fbb,tab15,tab16) = tabs
 
 # ══ TAB 1 — الطلبات ══
 with tab1:
@@ -2848,6 +2849,7 @@ with tab14:
         st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
     else:
         multi_counts_t14 = build_daily_orders_counts(sales_dates)
+        fbb_skus_for_t14, _non_fbb_skus_unused = get_channel_sku_sets()
         prices_map_t14   = build_daily_orders_prices(sales_dates)
 
         # بناء صفوف — كل SKU موجود في المخزون
@@ -3048,6 +3050,13 @@ with tab14:
                         f'</span>',
                         unsafe_allow_html=True)
 
+                # ══ عنده مبيعات FBB كمان؟ (تقاطع مع تاب FBB) ══
+                if r["sku_up"] in fbb_skus_for_t14:
+                    st.markdown(
+                        f'<span style="background:#0e7490;color:white;border-radius:6px;padding:3px 10px;font-size:12px;">'
+                        f'🔁 عنده مبيعات FBB كمان | Also has FBB sales — check the FBB tab</span>',
+                        unsafe_allow_html=True)
+
                 # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة وبدون تفاصيل أخرى ══
                 is_needs_sched_only = (
                     not stock_self_ok
@@ -3072,29 +3081,16 @@ with tab14:
         # حفظ المرحلين في session_state بعد اكتمال العرض
         st.session_state["transferred_skus_t14"] = _new_transferred
 
-# ══ TAB FBN — مبيعات Fulfilled by Noon (منفصلة) ══
-with tab_fbn:
-    fbn_skus_set, fbb_skus_set = get_channel_sku_sets()
-    render_fulfillment_channel_tab(
-        channel_key="fbn",
-        channel_emoji="🟠",
-        channel_title="FBN",
-        channel_subtitle="Fulfilled by Noon",
-        other_channel_title="FBB",
-        other_channel_skus=fbb_skus_set,
-        dl_prefix="sales_fbn",
-    )
-
-# ══ TAB FBB — مبيعات Fulfilled by Partner (FBP) (منفصلة، بنفس منطق تاب FBN بالظبط) ══
+# ══ TAB FBB — مبيعات Fulfilled by Partner (FBP) منفصلة، بنفس شكل ومنطق تاب المبيعات (Sales) ══
 with tab_fbb:
-    fbn_skus_set, fbb_skus_set = get_channel_sku_sets()
+    fbb_skus_set, non_fbb_skus_set = get_channel_sku_sets()
     render_fulfillment_channel_tab(
         channel_key="fbb",
         channel_emoji="🔵",
         channel_title="FBB",
         channel_subtitle="Fulfilled by Partner (FBP)",
-        other_channel_title="FBN",
-        other_channel_skus=fbn_skus_set,
+        other_channel_title="المبيعات | Sales",
+        other_channel_skus=non_fbb_skus_set,
         dl_prefix="sales_fbb",
     )
 
