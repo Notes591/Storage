@@ -687,7 +687,7 @@ def build_orders_index(dates):
             return None
         price_col_idx = find_col({"price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price"})
         qty_col_idx   = find_col({"quantity","qty","كمية","الكمية","count"})
-        fm_col_idx    = find_col({"fulfillment_model","fulfillment model","fulfillment","channel","fm"})
+        fm_col_idx    = find_col({"fulfillment_model","fulfillment model","fulfillment","channel","fm","is_fbn","is fbn"})
 
         for row in data[1:]:
             while len(row) < 2: row.append("")
@@ -745,7 +745,7 @@ def get_channel_sku_sets():
         hdr = data[0]
         fm_col_idx = None
         for ci, h in enumerate(hdr):
-            if str(h).strip().lower() in ("fulfillment_model","fulfillment model","fulfillment","channel","fm"):
+            if str(h).strip().lower() in ("fulfillment_model","fulfillment model","fulfillment","channel","fm","is_fbn","is fbn"):
                 fm_col_idx = ci; break
         for row in data[1:]:
             if not row or not row[0].strip():
@@ -2482,7 +2482,7 @@ with tab10:
                             if c.strip().lower() in ("quantity","qty","كمية","الكمية","count"): qty_col_do = c; break
                         fm_col_do = None
                         for c in df_do.columns:
-                            if c.strip().lower() in ("fulfillment_model","fulfillment model","fulfillment","channel","fm"): fm_col_do = c; break
+                            if c.strip().lower() in ("fulfillment_model","fulfillment model","fulfillment","channel","fm","is_fbn","is fbn"): fm_col_do = c; break
                         for _,row in df_do.iterrows():
                             sku_v   = str(row[sku_col_do]).strip()
                             ts_v    = str(row[ts_col_do]).strip()
