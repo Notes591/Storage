@@ -685,7 +685,7 @@ def build_orders_index(dates):
                 if str(h).strip().lower() in names:
                     return ci
             return None
-        price_col_idx = find_col({"price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price"})
+        price_col_idx = find_col({"price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price","offer_price"})
         qty_col_idx   = find_col({"quantity","qty","كمية","الكمية","count"})
         fm_col_idx    = find_col({"fulfillment_model","fulfillment model","fulfillment","channel","fm","is_fbn","is fbn"})
 
@@ -2476,7 +2476,7 @@ with tab10:
                         to_add = []
                         price_col_do = None
                         for c in df_do.columns:
-                            if c.strip().lower() in ("price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price"): price_col_do = c; break
+                            if c.strip().lower() in ("price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price","offer_price"): price_col_do = c; break
                         qty_col_do = None
                         for c in df_do.columns:
                             if c.strip().lower() in ("quantity","qty","كمية","الكمية","count"): qty_col_do = c; break
