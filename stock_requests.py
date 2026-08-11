@@ -43,6 +43,7 @@ TABS_CONFIG = {
     "Settings":          ["Key","Value"],
     "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelNotifications": ["ASN","SKUs","Schedule Date","Reason","Timestamp"],
+    "Tacweed":           ["SKU","Code01","Date Uploaded"],
 }
 
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
@@ -119,6 +120,7 @@ inventory_sheet      = sheets["Inventory"]
 daily_orders_sheet   = sheets["DailyOrders"]
 settings_sheet       = sheets["Settings"]
 cancel_notif_sheet   = sheets["CancelNotifications"]
+tacweed_sheet        = sheets["Tacweed"]
 
 # ══ كاش ══
 def safe_get_all_values(sheet, retries=6, delay=1):
@@ -191,6 +193,112 @@ def get_links_map():
         if len(row) >= 2 and row[0].strip():
             m[row[0].strip().upper()] = row[1].strip()
     return m
+
+# ══ tacweed map (SKU -> الكود 01) ══
+@st.cache_data(ttl=300)
+def get_tacweed_map():
+    data = safe_get_all_values(tacweed_sheet)
+    m = {}
+    for row in data[1:]:
+        if len(row) >= 2 and row[0].strip():
+            code = row[1].strip()
+            if code:
+                m[row[0].strip().upper()] = code
+    return m
+
+def tacweed_badge(sku_up):
+    """يرجع HTML صغير للكود 01 لو موجود لل SKU ده، وإلا يرجع سلسلة فاضية."""
+    code = get_tacweed_map().get(sku_up, "")
+    if not code:
+        return ""
+    return f'<span class="wh-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>'
+
+def render_tacweed_upload(key_prefix):
+    """واجهة رفع ملف التكويد (تكتشف شيت Noon تلقائيًا وتستخرج SKU + الكود 01)."""
+    with st.expander("📤 رفع ملف التكويد | Upload Tacweed (Code Mapping) File", expanded=False):
+        upl_tc = st.file_uploader(
+            "ارفع ملف التكويد (xlsx/xlsm/csv) | Upload Tacweed File",
+            type=["xlsx", "xls", "xlsm", "csv"], key=f"{key_prefix}_tacweed_upload")
+        if upl_tc:
+            try:
+                if upl_tc.name.lower().endswith(".csv"):
+                    df_tc = pd.read_csv(upl_tc, dtype=str).fillna("")
+                else:
+                    xls = pd.ExcelFile(upl_tc)
+                    sheet_names = xls.sheet_names
+                    chosen_sheet = None
+                    for sn in sheet_names:
+                        if "noon" in sn.strip().lower():
+                            chosen_sheet = sn
+                            break
+                    if not chosen_sheet:
+                        if len(sheet_names) > 1:
+                            chosen_sheet = st.selectbox(
+                                "اختار الشيت اللي فيه التكويد | Choose the sheet with the mapping",
+                                sheet_names, key=f"{key_prefix}_tacweed_sheet_pick")
+                        else:
+                            chosen_sheet = sheet_names[0]
+                    df_tc = pd.read_excel(upl_tc, sheet_name=chosen_sheet, dtype=str).fillna("")
+
+                sku_col_tc = code_col_tc = None
+                for c in df_tc.columns:
+                    cl = str(c).strip().lower()
+                    if sku_col_tc is None and "sku" in cl:
+                        sku_col_tc = c
+                    if code_col_tc is None and (("كود" in str(c) and "01" in str(c)) or cl in ("code01", "code 01")):
+                        code_col_tc = c
+                if not sku_col_tc:
+                    sku_col_tc = df_tc.columns[0]
+                if not code_col_tc:
+                    # fallback: أقرب عمود اسمه فيه "كود"
+                    for c in df_tc.columns:
+                        if "كود" in str(c):
+                            code_col_tc = c
+                            break
+
+                st.info(f"📊 {len(df_tc)} صف | SKU: `{sku_col_tc}` | الكود 01: `{code_col_tc}`")
+                st.dataframe(df_tc[[sku_col_tc] + ([code_col_tc] if code_col_tc else [])].head(10),
+                             use_container_width=True, height=180)
+
+                def do_upload_tc(replace=True):
+                    dn = now_str()
+                    to_add = []
+                    for _, row in df_tc.iterrows():
+                        sku = str(row[sku_col_tc]).strip()
+                        code = str(row[code_col_tc]).strip() if code_col_tc else ""
+                        if sku and sku.lower() != "nan":
+                            to_add.append([sku, code, dn])
+                    if replace:
+                        safe_delete_all(tacweed_sheet)
+                    safe_batch_append(tacweed_sheet, to_add)
+                    clear_cache(tacweed_sheet)
+                    get_tacweed_map.clear()
+                    return len(to_add)
+
+                ca_tc, cb_tc = st.columns(2)
+                with ca_tc:
+                    if st.button("📤 إضافة للموجود | Append", type="primary",
+                                 use_container_width=True, key=f"{key_prefix}_tc_append"):
+                        n = do_upload_tc(replace=False)
+                        st.success(f"✅ أُضيف {n} صف | rows added")
+                        st.rerun()
+                with cb_tc:
+                    if st.button("🔄 استبدال الكل | Replace All", type="secondary",
+                                 use_container_width=True, key=f"{key_prefix}_tc_replace"):
+                        st.session_state[f"{key_prefix}_confirm_replace_tc"] = True
+                if st.session_state.get(f"{key_prefix}_confirm_replace_tc"):
+                    st.warning("⚠️ هيمسح كل التكويد القديم ويرفع الجديد؟ | Replace all existing mapping?")
+                    cy_tc, cn_tc = st.columns(2)
+                    if cy_tc.button("✅ نعم | Yes", key=f"{key_prefix}_yes_rep_tc"):
+                        n = do_upload_tc(replace=True)
+                        st.session_state[f"{key_prefix}_confirm_replace_tc"] = False
+                        st.success(f"✅ تم الاستبدال — {n} صف")
+                        st.rerun()
+                    if cn_tc.button("❌ لا | No", key=f"{key_prefix}_no_rep_tc"):
+                        st.session_state[f"{key_prefix}_confirm_replace_tc"] = False
+                        st.rerun()
+            except Exception as e:
+                st.error(f"❌ {e}")
 
 # ══ inv_map ══
 def _to_int(v):
@@ -1973,6 +2081,7 @@ with tab8:
 with tab9:
     st.subheader("📊 المخزون والمبيع الشهري | Inventory & Monthly Sales")
     links_map = get_links_map()
+    render_tacweed_upload("inv")
     col_t,_ = st.columns([1,3])
     with col_t:
         st.download_button("⬇️ Template المخزون | Inventory Template",
@@ -2055,6 +2164,9 @@ with tab9:
             with c_img: show_img(info["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{info['sku']}`")
+                tc_badge = tacweed_badge(sku_key)
+                if tc_badge:
+                    st.markdown(tc_badge, unsafe_allow_html=True)
                 st.markdown(f"📦 **إجمالي المخزون | Stock:** **{info['total_stock']}** &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly Sales:** **{info['sales']}**")
                 badges = []
                 for wh,stk in sorted(info["warehouses"].items()):
@@ -2451,6 +2563,7 @@ with tab13:
 with tab14:
     st.subheader("🛒 المبيعات اليومية | Daily Sales")
     st.caption("كل SKU عنده مخزون — مبيعاته اليومية من أمس للوراء بجانب مخزونه ومبيعاته الشهرية وحالة التغطية | All SKUs with inventory — daily sales, stock, monthly sales, and coverage status")
+    render_tacweed_upload("sales")
 
     sales_display_days = int(load_settings().get("sales_display_days","7") or 7)
     today_t14 = datetime.now().date()
@@ -2553,6 +2666,9 @@ with tab14:
                 show_img(r["img"], 70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
+                tc_badge_t14 = tacweed_badge(r["sku_up"])
+                if tc_badge_t14:
+                    st.markdown(tc_badge_t14, unsafe_allow_html=True)
 
                 # ══ أمس بارز ══
                 yesterday_t14 = sales_dates[0] if sales_dates else None
