@@ -44,6 +44,7 @@ TABS_CONFIG = {
     "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelNotifications": ["ASN","SKUs","Schedule Date","Reason","Timestamp"],
     "Tacweed":           ["SKU","Code01","Date Uploaded"],
+    "WarehouseStock":    ["Code","Quantity","Item Name","Date Uploaded"],
 }
 
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
@@ -121,6 +122,7 @@ daily_orders_sheet   = sheets["DailyOrders"]
 settings_sheet       = sheets["Settings"]
 cancel_notif_sheet   = sheets["CancelNotifications"]
 tacweed_sheet        = sheets["Tacweed"]
+warehouse_stock_sheet = sheets["WarehouseStock"]
 
 # ══ كاش ══
 def safe_get_all_values(sheet, retries=6, delay=1):
@@ -296,6 +298,122 @@ def render_tacweed_upload(key_prefix):
                         st.rerun()
                     if cn_tc.button("❌ لا | No", key=f"{key_prefix}_no_rep_tc"):
                         st.session_state[f"{key_prefix}_confirm_replace_tc"] = False
+                        st.rerun()
+            except Exception as e:
+                st.error(f"❌ {e}")
+
+# ══ warehouse stock map (Code -> Quantity) — مربوط بالكود 01 من التكويد ══
+@st.cache_data(ttl=300)
+def get_warehouse_stock_map():
+    data = safe_get_all_values(warehouse_stock_sheet)
+    m = {}
+    for row in data[1:]:
+        if len(row) >= 2 and row[0].strip():
+            m[row[0].strip()] = row[1].strip()
+    return m
+
+def warehouse_available_badge(sku_up):
+    """يعرض الكود 01 + الكمية المتوفرة بالمستودع (لو الكود موجود ف ملف المستودع) جنب الSKU."""
+    code = get_tacweed_map().get(sku_up, "")
+    if not code:
+        return ""
+    qty = get_warehouse_stock_map().get(code, "")
+    if qty == "":
+        return f'<span class="wh-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>'
+    return (
+        f'<span class="wh-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span> '
+        f'<span class="wh-badge" style="background:#78350f;color:#fde68a;">📦 المتوفر بالمستودع: {qty}</span>'
+    )
+
+def render_warehouse_stock_upload(key_prefix):
+    """واجهة رفع ملف جرد المستودع (بيتكشف شيت فيه عمود باركود وعمود كمية إجمالية تلقائيًا)."""
+    with st.expander("📤 رفع ملف جرد المستودع | Upload Warehouse Stock File", expanded=False):
+        upl_ws = st.file_uploader(
+            "ارفع ملف جرد المستودع (xlsx/xls/csv) | Upload Warehouse Stock File",
+            type=["xlsx", "xls", "xlsm", "csv"], key=f"{key_prefix}_wstock_upload")
+        if upl_ws:
+            try:
+                if upl_ws.name.lower().endswith(".csv"):
+                    df_ws = pd.read_csv(upl_ws, dtype=str).fillna("")
+                else:
+                    xls_ws = pd.ExcelFile(upl_ws)
+                    sheet_names_ws = xls_ws.sheet_names
+                    chosen_sheet_ws = None
+                    for sn in sheet_names_ws:
+                        try:
+                            hdr = pd.read_excel(upl_ws, sheet_name=sn, dtype=str, nrows=0).columns
+                        except Exception:
+                            continue
+                        if any("باركود" in str(c) or "barcode" in str(c).lower() for c in hdr):
+                            chosen_sheet_ws = sn
+                            break
+                    if not chosen_sheet_ws:
+                        if len(sheet_names_ws) > 1:
+                            chosen_sheet_ws = st.selectbox(
+                                "اختار الشيت اللي فيه بيانات الجرد | Choose the sheet with the stock data",
+                                sheet_names_ws, key=f"{key_prefix}_wstock_sheet_pick")
+                        else:
+                            chosen_sheet_ws = sheet_names_ws[0]
+                    df_ws = pd.read_excel(upl_ws, sheet_name=chosen_sheet_ws, dtype=str).fillna("")
+
+                code_col_ws = qty_col_ws = name_col_ws = None
+                for c in df_ws.columns:
+                    cs = str(c).strip()
+                    if code_col_ws is None and ("باركود" in cs or "barcode" in cs.lower()):
+                        code_col_ws = c
+                    if qty_col_ws is None and ("الكمية الإجمالية" in cs or "الكمية الاجمالية" in cs):
+                        qty_col_ws = c
+                    if name_col_ws is None and ("اسم المادة" in cs or "اسم المنتج" in cs):
+                        name_col_ws = c
+                if not code_col_ws:
+                    code_col_ws = df_ws.columns[0]
+                if not qty_col_ws:
+                    for c in df_ws.columns:
+                        if "كمية" in str(c) and "فعلي" not in str(c):
+                            qty_col_ws = c
+                            break
+
+                st.info(f"📊 {len(df_ws)} صف | الباركود: `{code_col_ws}` | الكمية: `{qty_col_ws}`" + (f" | الاسم: `{name_col_ws}`" if name_col_ws else ""))
+                preview_cols = [code_col_ws] + ([qty_col_ws] if qty_col_ws else []) + ([name_col_ws] if name_col_ws else [])
+                st.dataframe(df_ws[preview_cols].head(10), use_container_width=True, height=180)
+
+                def do_upload_ws(replace=True):
+                    dn = now_str()
+                    to_add = []
+                    for _, row in df_ws.iterrows():
+                        code = str(row[code_col_ws]).strip()
+                        qty = str(row[qty_col_ws]).strip() if qty_col_ws else ""
+                        name = str(row[name_col_ws]).strip() if name_col_ws else ""
+                        if code and code.lower() != "nan":
+                            to_add.append([code, qty, name, dn])
+                    if replace:
+                        safe_delete_all(warehouse_stock_sheet)
+                    safe_batch_append(warehouse_stock_sheet, to_add)
+                    clear_cache(warehouse_stock_sheet)
+                    get_warehouse_stock_map.clear()
+                    return len(to_add)
+
+                ca_ws, cb_ws = st.columns(2)
+                with ca_ws:
+                    if st.button("📤 إضافة للموجود | Append", type="primary",
+                                 use_container_width=True, key=f"{key_prefix}_ws_append"):
+                        n = do_upload_ws(replace=False)
+                        st.success(f"✅ أُضيف {n} صف | rows added")
+                        st.rerun()
+                with cb_ws:
+                    if st.button("🔄 استبدال الكل | Replace All", type="secondary",
+                                 use_container_width=True, key=f"{key_prefix}_ws_replace"):
+                        st.session_state[f"{key_prefix}_confirm_replace_ws"] = True
+                if st.session_state.get(f"{key_prefix}_confirm_replace_ws"):
+                    st.warning("⚠️ هيمسح كل بيانات المستودع القديمة ويرفع الجديد؟ | Replace all existing warehouse stock?")
+                    cy_ws, cn_ws = st.columns(2)
+                    if cy_ws.button("✅ نعم | Yes", key=f"{key_prefix}_yes_rep_ws"):
+                        n = do_upload_ws(replace=True)
+                        st.session_state[f"{key_prefix}_confirm_replace_ws"] = False
+                        st.success(f"✅ تم الاستبدال — {n} صف")
+                        st.rerun()
+                    if cn_ws.button("❌ لا | No", key=f"{key_prefix}_no_rep_ws"):
+                        st.session_state[f"{key_prefix}_confirm_replace_ws"] = False
                         st.rerun()
             except Exception as e:
                 st.error(f"❌ {e}")
@@ -2082,6 +2200,7 @@ with tab9:
     st.subheader("📊 المخزون والمبيع الشهري | Inventory & Monthly Sales")
     links_map = get_links_map()
     render_tacweed_upload("inv")
+    render_warehouse_stock_upload("inv")
     col_t,_ = st.columns([1,3])
     with col_t:
         st.download_button("⬇️ Template المخزون | Inventory Template",
@@ -2164,7 +2283,7 @@ with tab9:
             with c_img: show_img(info["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{info['sku']}`")
-                tc_badge = tacweed_badge(sku_key)
+                tc_badge = warehouse_available_badge(sku_key)
                 if tc_badge:
                     st.markdown(tc_badge, unsafe_allow_html=True)
                 st.markdown(f"📦 **إجمالي المخزون | Stock:** **{info['total_stock']}** &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly Sales:** **{info['sales']}**")
@@ -2564,6 +2683,7 @@ with tab14:
     st.subheader("🛒 المبيعات اليومية | Daily Sales")
     st.caption("كل SKU عنده مخزون — مبيعاته اليومية من أمس للوراء بجانب مخزونه ومبيعاته الشهرية وحالة التغطية | All SKUs with inventory — daily sales, stock, monthly sales, and coverage status")
     render_tacweed_upload("sales")
+    render_warehouse_stock_upload("sales")
 
     sales_display_days = int(load_settings().get("sales_display_days","7") or 7)
     today_t14 = datetime.now().date()
@@ -2666,7 +2786,7 @@ with tab14:
                 show_img(r["img"], 70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
-                tc_badge_t14 = tacweed_badge(r["sku_up"])
+                tc_badge_t14 = warehouse_available_badge(r["sku_up"])
                 if tc_badge_t14:
                     st.markdown(tc_badge_t14, unsafe_allow_html=True)
 
