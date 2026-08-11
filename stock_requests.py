@@ -319,10 +319,10 @@ def warehouse_available_badge(sku_up):
         return ""
     qty = get_warehouse_stock_map().get(code, "")
     if qty == "":
-        return f'<span class="wh-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>'
+        return f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>'
     return (
-        f'<span class="wh-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span> '
-        f'<span class="wh-badge" style="background:#78350f;color:#fde68a;">📦 المتوفر بالمستودع: {qty}</span>'
+        f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span> '
+        f'<span class="tacweed-badge" style="background:#78350f;color:#fde68a;">📦 المتوفر بالمستودع: {qty}</span>'
     )
 
 def render_warehouse_stock_upload(key_prefix):
@@ -679,6 +679,7 @@ st.markdown("""
 .stTabs [data-baseweb="tab"]{background:#1e293b;color:white;border-radius:8px;padding:6px 12px;font-weight:bold;font-size:11px;}
 .stTabs [aria-selected="true"]{background:#3b82f6!important;}
 .wh-badge{display:inline-block;border-radius:6px;padding:2px 9px;margin:2px;font-size:12px;}
+.tacweed-badge{display:inline-block;border-radius:8px;padding:6px 14px;margin:4px 3px;font-size:17px;font-weight:bold;}
 .cancel-notif-card{
     background: linear-gradient(135deg,#2d0a0a,#1a0000);
     border: 1px solid #ef4444;
@@ -1114,6 +1115,9 @@ def render_recent_scheduled_section(rows, day_dates, day_labels, dl_key):
         with c_img: show_img(r["img"], 70)
         with c_info:
             st.markdown(f"**SKU:** `{r['sku']}`")
+            tc_badge_rs = warehouse_available_badge(r["sku_up"])
+            if tc_badge_rs:
+                st.markdown(tc_badge_rs, unsafe_allow_html=True)
             st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
             st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
             st.markdown(recent_schedule_badge_html(r["sched"]), unsafe_allow_html=True)
@@ -2417,6 +2421,9 @@ with tab10:
             with c_img: show_img(r["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
+                tc_badge_t10 = warehouse_available_badge(r["sku_up"])
+                if tc_badge_t10:
+                    st.markdown(tc_badge_t10, unsafe_allow_html=True)
                 if r.get("_transferred_from_sales"):
                     st.markdown('<span style="background:#7c3aed;color:white;border-radius:6px;padding:2px 10px;font-size:11px;">📌 مرحّل من تاب المبيعات — محتاج جدولة | Transferred from Sales tab — needs scheduling</span>', unsafe_allow_html=True)
                 st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
@@ -2463,6 +2470,9 @@ with tab10:
             with c_img: show_img(r["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
+                tc_badge_t10b = warehouse_available_badge(r["sku_up"])
+                if tc_badge_t10b:
+                    st.markdown(tc_badge_t10b, unsafe_allow_html=True)
                 st.error("⛔ مخزونه انتهى — مش موجود في ملف المخزون | Stock ran out — not found in inventory file")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
                 st.markdown(f"📈 **مبيع شهري تقديري (بناءً على آخر 3 أيام) | Estimated Monthly Sales (based on last 3 days):** **{r['est_monthly_sales']}**")
@@ -2621,6 +2631,9 @@ with tab13:
             with c_img: show_img(r["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
+                tc_badge_t13 = warehouse_available_badge(r["sku_up"])
+                if tc_badge_t13:
+                    st.markdown(tc_badge_t13, unsafe_allow_html=True)
                 st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 st.markdown(f"⚡ **نفاد خلال بيع اليوم | Days to stockout (today's rate):** {r['days_to_stockout_today']} يوم")
@@ -2663,6 +2676,9 @@ with tab13:
             with c_img: show_img(r["img"],70)
             with c_info:
                 st.markdown(f"**SKU:** `{r['sku']}`")
+                tc_badge_t13b = warehouse_available_badge(r["sku_up"])
+                if tc_badge_t13b:
+                    st.markdown(tc_badge_t13b, unsafe_allow_html=True)
                 st.error("⛔ مخزونه انتهى — مش موجود في ملف المخزون | Stock ran out — not found in inventory file")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 st.markdown(f"📈 **مبيع شهري تقديري (بناءً على آخر 3 أيام) | Estimated Monthly Sales (based on last 3 days):** **{r['est_monthly_sales']}**")
