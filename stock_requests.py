@@ -208,6 +208,10 @@ def get_tacweed_map():
                 m[row[0].strip().upper()] = code
     return m
 
+def big_note_html(text):
+    """نص ملاحظة (غير متوفر سابقاً / تم طلبه سابقاً) بخط أكبر وأسود بولد بدل الكابشن الصغير الرمادي."""
+    return f'<span class="status-badge-lg" style="background:#e5e7eb;">{text}</span>'
+
 def tacweed_badge(sku_up):
     """يرجع HTML صغير للكود 01 لو موجود لل SKU ده، وإلا يرجع سلسلة فاضية."""
     code = get_tacweed_map().get(sku_up, "")
@@ -680,6 +684,7 @@ st.markdown("""
 .stTabs [aria-selected="true"]{background:#3b82f6!important;}
 .wh-badge{display:inline-block;border-radius:6px;padding:2px 9px;margin:2px;font-size:12px;}
 .tacweed-badge{display:inline-block;border-radius:8px;padding:6px 14px;margin:4px 3px;font-size:17px;font-weight:bold;}
+.status-badge-lg{display:inline-block;border-radius:8px;padding:6px 14px;margin:4px 3px;font-size:16px;font-weight:bold;color:#000!important;}
 .cancel-notif-card{
     background: linear-gradient(135deg,#2d0a0a,#1a0000);
     border: 1px solid #ef4444;
@@ -1059,7 +1064,7 @@ def recent_schedule_badge_html(entry):
     """شارة توضيحية لسكو اتجدول (أو انتهت جدولته) خلال آخر 4 أيام — تمنع إعادة الطلب بالغلط."""
     color = "#7c3aed" if entry["source"] != "Expired" else "#b45309"
     return (
-        f'<span style="background:{color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">'
+        f'<span class="status-badge-lg" style="background:{color};">'
         f'📅 مجدول بتاريخ {entry["date"]} (ASN {entry["asn"]}) [{entry["source_label"]}] — '
         f'خلال آخر 4 أيام، لسه في فترة الوصول — لا تطلبه تاني | '
         f'Scheduled within the last 4 days — still within arrival window, don\'t re-order</span>'
@@ -1122,7 +1127,7 @@ def render_recent_scheduled_section(rows, day_dates, day_labels, dl_key):
             st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
             st.markdown(recent_schedule_badge_html(r["sched"]), unsafe_allow_html=True)
             for note in get_unavailable_ordered_note(r["sku"]):
-                st.caption(note)
+                st.markdown(big_note_html(note), unsafe_allow_html=True)
         st.divider()
 
 def get_latest_schedule_info(sku):
@@ -2441,12 +2446,12 @@ with tab10:
                 recent_sched_r = get_recent_schedule_rows(days_back=4).get(r["sku_up"])
                 show_normal_badge = not (recent_sched_r and "محتاج جدولة" in badge_text)
                 if show_normal_badge:
-                    st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                    st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
                 if recent_sched_r:
                     st.markdown(recent_schedule_badge_html(recent_sched_r), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
-                    st.caption(note)
+                    st.markdown(big_note_html(note), unsafe_allow_html=True)
             st.divider()
 
     # ══ نحسب الأول قايمة "منتهي بالكامل" عشان نستبعدها من سكشن "مجدولة مؤخراً" ══
@@ -2486,12 +2491,12 @@ with tab10:
                 recent_sched_miss = recent_sched_map_t10.get(r["sku_up"])
                 show_normal_badge_miss = not (recent_sched_miss and "محتاج جدولة" in badge_text)
                 if show_normal_badge_miss:
-                    st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                    st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
                 if recent_sched_miss:
                     st.markdown(recent_schedule_badge_html(recent_sched_miss), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
-                    st.caption(note)
+                    st.markdown(big_note_html(note), unsafe_allow_html=True)
             st.divider()
 
 # ══ TAB 11 — منتهية الصلاحية ══
@@ -2647,12 +2652,12 @@ with tab13:
                 recent_sched_r2 = get_recent_schedule_rows(days_back=4).get(r["sku_up"])
                 show_normal_badge2 = not (recent_sched_r2 and "محتاج جدولة" in badge_text)
                 if show_normal_badge2:
-                    st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                    st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
                 if recent_sched_r2:
                     st.markdown(recent_schedule_badge_html(recent_sched_r2), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
-                    st.caption(note)
+                    st.markdown(big_note_html(note), unsafe_allow_html=True)
             st.divider()
 
     # ══ نحسب الأول قايمة "منتهي بالكامل" عشان نستبعدها من سكشن "مجدولة مؤخراً" ══
@@ -2692,12 +2697,12 @@ with tab13:
                 recent_sched_miss2 = recent_sched_map_t13.get(r["sku_up"])
                 show_normal_badge_miss2 = not (recent_sched_miss2 and "محتاج جدولة" in badge_text)
                 if show_normal_badge_miss2:
-                    st.markdown(f'<span style="background:{badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{badge_text}</span>', unsafe_allow_html=True)
+                    st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
                 if recent_sched_miss2:
                     st.markdown(recent_schedule_badge_html(recent_sched_miss2), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
-                    st.caption(note)
+                    st.markdown(big_note_html(note), unsafe_allow_html=True)
             st.divider()
 
 # ══ TAB 14 — المبيعات ══
@@ -2960,14 +2965,14 @@ with tab14:
                     cov_badge_color = badge_color_t14
 
                 st.markdown(
-                    f'<span style="background:{cov_badge_color};color:white;border-radius:6px;padding:3px 10px;font-size:12px;">{cov_badge_text}</span>',
+                    f'<span class="status-badge-lg" style="background:{cov_badge_color};">{cov_badge_text}</span>',
                     unsafe_allow_html=True)
 
                 # ══ مجدولة خلال آخر 4 أيام؟ (لو فعلاً ليها جدولة) — تعرض ASN + الكمية + التاريخ ══
                 recent_sched_t14 = recent_sched_map_t14.get(r["sku_up"])
                 if recent_sched_t14:
                     st.markdown(
-                        f'<span style="background:#7c3aed;color:white;border-radius:6px;padding:3px 10px;font-size:12px;">'
+                        f'<span class="status-badge-lg" style="background:#7c3aed;">'
                         f'📅 مجدولة خلال آخر 4 أيام | Scheduled in last 4 days — '
                         f'ASN <b>{recent_sched_t14["asn"]}</b> &nbsp;|&nbsp; '
                         f'الكمية | Qty: <b>{recent_sched_t14.get("qty","")}</b> &nbsp;|&nbsp; '
@@ -2993,7 +2998,7 @@ with tab14:
 
                 if un_notes:
                     for note in un_notes:
-                        st.caption(note)
+                        st.markdown(big_note_html(note), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
             st.divider()
         # حفظ المرحلين في session_state بعد اكتمال العرض
@@ -3236,7 +3241,7 @@ with tab15:
 
                 render_recent_expired_note(sku_raw)
                 for note in get_unavailable_ordered_note(sku_raw):
-                    st.caption(note)
+                    st.markdown(big_note_html(note), unsafe_allow_html=True)
 
                 # تجميع صف الإكسيل
                 excel_row_t15 = {
@@ -3330,7 +3335,7 @@ with tab16:
                         arrival_ns = (sched_ns["parsed"] + timedelta(days=int(load_settings().get("schedule_delay_days","3") or 3))).date() if sched_ns.get("parsed") else None
                         st.caption(f"📅 ASN {sched_ns['asn']} بتاريخ {sched_ns['date']}" + (f" — وصول: {arrival_ns}" if arrival_ns else ""))
                     for note in get_unavailable_ordered_note(r["sku"]):
-                        st.caption(note)
+                        st.markdown(big_note_html(note), unsafe_allow_html=True)
                 st.divider()
 
         sub1, sub2, sub3 = st.tabs([
