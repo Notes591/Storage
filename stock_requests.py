@@ -1621,6 +1621,9 @@ with tab3:
             with c_img: show_img(img,70)
             with c_info:
                 st.markdown(f"**SKU:** `{sku}`")
+                tc_badge_un = warehouse_available_badge(sku.strip().upper())
+                if tc_badge_un:
+                    st.markdown(tc_badge_un, unsafe_allow_html=True)
                 show_sku_inv(sku)
                 st.markdown(f"**Qty طلب | Requested:** {qty}")
                 if cnt_un > 1:
@@ -1667,6 +1670,9 @@ with tab4:
             with c_img: show_img(img,70)
             with c_info:
                 st.markdown(f"**SKU:** `{sku}`")
+                tc_badge_ord = warehouse_available_badge(sku.strip().upper())
+                if tc_badge_ord:
+                    st.markdown(tc_badge_ord, unsafe_allow_html=True)
                 show_sku_inv(sku)
                 st.markdown(f"**Quantity | الكمية:** {qty}")
                 if cnt_ord > 1:
