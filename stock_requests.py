@@ -34,6 +34,11 @@ TABS_CONFIG = {
     "Approved":          ["SKU","Quantity Requested","Quantity Approved","Image URL","Date Added","Date Approved"],
     "Unavailable":       ["SKU","Quantity","Image URL","Date Added","Date Marked Unavailable"],
     "Ordered":           ["SKU","Quantity","Image URL","Date Added","Order Count","Notes"],
+    # ملاحظة: تاب Scheduled الحقيقي فيه دلوقتي أعمدة زيادة (Store Name/Warehouse Name/Total QTY/
+    # Section/Approval) من برنامج الجدولة المكتبي. الليستة هنا بتُستخدم بس للتأكد إن الأعمدة
+    # الأساسية دي موجودة (get_or_create_worksheet بتضيف أي عمود ناقص من غيرها في آخر الشيت،
+    # ومش بتغيّر ترتيب الأعمدة الموجودة). القراءة/الكتابة الفعلية بتتم حسب اسم العمود مش مكانه
+    # (شوف get_scheduled_normalized / build_scheduled_row فوق).
     "Scheduled":         ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelledSchedule": ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Cancel Reason","Date Cancelled"],
     "Rescheduled":       ["ASN","SKU","Quantity","Old Schedule Date","Image URL","Date Added","Reschedule Reason","Date Moved"],
@@ -114,6 +119,47 @@ approved_sheet    = sheets["Approved"]
 unavailable_sheet = sheets["Unavailable"]
 ordered_sheet     = sheets["Ordered"]
 scheduled_sheet   = sheets["Scheduled"]
+# ══ توافق تاب الجدولة بعد إضافة أعمدة جديدة (Store Name / Warehouse Name / Total QTY / Section / Approval) ══
+# برنامج الجدولة المكتبي (schedule_entry_app) بقى بيكتب في تاب "Scheduled" بترتيب أعمدة جديد:
+# Store Name, Warehouse Name, ASN, Total QTY, Section, Approval, SKU, Quantity, Schedule Date,
+# Image URL, Date Added, Notes, Flag
+# لكن كل الكود هنا في stock_requests.py لسه مبني على الترتيب القديم:
+# ASN, SKU, Quantity, Schedule Date, Image URL, Date Added, Notes, Flag
+# بدل ما نغيّر كل مكان بيستخدم row[0]/row[1]/... في الملف ده، بنعمل طبقة توافق:
+# بنقرا/بنكتب دايماً حسب اسم العمود مش مكانه، فأي ترتيب أعمدة جديد في الشيت هيفضل شغال تمام.
+OLD_SCHED_COLS = ["ASN", "SKU", "Quantity", "Schedule Date", "Image URL", "Date Added", "Notes", "Flag"]
+
+def get_scheduled_normalized(force=False):
+    """يرجع نفس شكل get_all_values() (هيدر + صفوف) لكن بترتيب أعمدة ثابت (OLD_SCHED_COLS)
+    بغض النظر عن ترتيب الأعمدة الحقيقي في تاب Scheduled دلوقتي — عشان باقي الكود اللي
+    بيفترض row[0]=ASN, row[1]=SKU, row[2]=Quantity, row[3]=Schedule Date ...الخ يفضل شغال صح."""
+    raw = get_cached(scheduled_sheet, force=force)
+    if not raw:
+        return raw
+    real_header = raw[0]
+    idx_map = {name: real_header.index(name) for name in OLD_SCHED_COLS if name in real_header}
+    out_rows = [OLD_SCHED_COLS]
+    for row in raw[1:]:
+        if len(row) < len(real_header):
+            row = row + [""] * (len(real_header) - len(row))
+        out_rows.append([
+            row[idx_map[c]] if c in idx_map and idx_map[c] < len(row) else ""
+            for c in OLD_SCHED_COLS
+        ])
+    return out_rows
+
+def build_scheduled_row(asn, sku, qty, sdate, img, date_added, notes="", flag=""):
+    """يبني صف جاهز للإضافة في تاب Scheduled حسب ترتيب أعمدة الشيت الحقيقي دلوقتي
+    (بما فيها الأعمدة الجديدة Store Name/Warehouse Name/Total QTY/Section/Approval)،
+    وبيسيب الأعمدة الجديدة دي فاضية لأن stock_requests.py مش هو المصدر بتاعها —
+    برنامج الجدولة المكتبي هو اللي بيملاها."""
+    raw = get_cached(scheduled_sheet, force=False)
+    real_header = raw[0] if raw else OLD_SCHED_COLS
+    values = {
+        "ASN": asn, "SKU": sku, "Quantity": qty, "Schedule Date": sdate,
+        "Image URL": img, "Date Added": date_added, "Notes": notes, "Flag": flag,
+    }
+    return [values.get(h, "") for h in real_header]
 cancelled_sheet   = sheets["CancelledSchedule"]
 reschedule_sheet  = sheets["Rescheduled"]
 expired_sheet     = sheets["Expired"]
@@ -656,7 +702,7 @@ def delete_all_cancel_notifications():
     clear_cache(cancel_notif_sheet)
 
 def check_expired_scheduled():
-    data = get_cached(scheduled_sheet, force=True)
+    data = get_scheduled_normalized(force=True)
     if len(data) <= 1:
         return
     today = datetime.now().date()
@@ -1035,7 +1081,7 @@ def get_recent_schedule_rows(days_back=4):
     src_label_map = {"Scheduled": "الجدولة | Scheduled", "Check": "تشييك | Check", "Expired": "منتهية | Expired"}
     by_sku = {}
     for sheet_key in ("Scheduled", "Check", "Expired"):
-        data = get_cached(sheets[sheet_key])
+        data = get_scheduled_normalized() if sheet_key == "Scheduled" else get_cached(sheets[sheet_key])
         if len(data) <= 1:
             continue
         for row in data[1:]:
@@ -1135,7 +1181,7 @@ def get_latest_schedule_info(sku):
     sku_up = sku.strip().upper()
     candidates = []
     for sheet_key in ("Scheduled","Check"):
-        data = get_cached(sheets[sheet_key])
+        data = get_scheduled_normalized() if sheet_key == "Scheduled" else get_cached(sheets[sheet_key])
         if len(data) <= 1:
             continue
         for row in data[1:]:
@@ -1731,7 +1777,7 @@ with tab5:
             st.info(f"📊 {len(df_sc)} صف | rows")
             st.dataframe(df_sc, use_container_width=True, height=150)
             if st.button("📤 إضافة الجدولة | Add Schedule", type="primary"):
-                existing = get_cached(scheduled_sheet, force=True)
+                existing = get_scheduled_normalized(force=True)
                 ex_pairs = set()
                 if len(existing)>1:
                     for r in existing[1:]:
@@ -1755,7 +1801,7 @@ with tab5:
                         if pair in ex_pairs:
                             skipped+=1
                         else:
-                            to_add.append([asn,sku,qty,ds,img,dn])
+                            to_add.append(build_scheduled_row(asn,sku,qty,ds,img,dn))
                             ex_pairs.add(pair)
                 safe_batch_append(scheduled_sheet,to_add)
                 msg = f"✅ أُضيف | Added: {len(to_add)}"
@@ -1766,7 +1812,7 @@ with tab5:
 
     st.divider()
     st.subheader("📋 الجدولة الحالية | Current Schedule")
-    data_sch = get_cached(scheduled_sheet)
+    data_sch = get_scheduled_normalized()
     if len(data_sch) <= 1:
         st.info("لا توجد جدولة | No scheduled items.")
     else:
@@ -1917,7 +1963,7 @@ with tab5:
                                 flag = ""
                             to_add.append([r[0],r[1],r[2],r[3],r[4],dn,"",flag])
                         safe_batch_append(sheets["Check"], to_add)
-                        sch_d = get_cached(scheduled_sheet, force=True)
+                        sch_d = get_scheduled_normalized(force=True)
                         del_i = [i2 for i2,sr in enumerate(sch_d[1:],start=2) if sr[0].strip().upper()==asn.upper()]
                         for i2 in sorted(del_i,reverse=True):
                             safe_delete(scheduled_sheet,i2)
@@ -1930,7 +1976,7 @@ with tab5:
                         dn = now_str()
                         to_add = [[r[0],r[1],r[2],r[3],r[4],r[5],f"غير متوفر | Unavailable — {reason_u}",dn] for r in skus_]
                         safe_batch_append(cancelled_sheet, to_add)
-                        sch_data = get_cached(scheduled_sheet, force=True)
+                        sch_data = get_scheduled_normalized(force=True)
                         del_idx = [idx for idx,sr in enumerate(sch_data[1:],start=2) if sr[0].strip().upper()==asn.upper()]
                         for idx in sorted(del_idx, reverse=True):
                             safe_delete(scheduled_sheet,idx)
@@ -1942,7 +1988,7 @@ with tab5:
                         dn = now_str()
                         to_add = [[r[0],r[1],r[2],r[3],r[4],r[5],reason_r,dn] for r in skus_]
                         safe_batch_append(reschedule_sheet, to_add)
-                        sch_data = get_cached(scheduled_sheet, force=True)
+                        sch_data = get_scheduled_normalized(force=True)
                         del_idx = [idx for idx,sr in enumerate(sch_data[1:],start=2) if sr[0].strip().upper()==asn.upper()]
                         for idx in sorted(del_idx, reverse=True):
                             safe_delete(scheduled_sheet,idx)
@@ -2035,7 +2081,7 @@ with tab_check:
                 if st.button(f"↩️ رجّع للجدولة | Return to Schedule — {asn}", key=f"ret_chk_{asn}", type="primary"):
                     dn = now_str()
                     lm = get_links_map()
-                    to_add = [[r[0],r[1],r[2],r[3],lm.get(r[1].strip().upper(),r[4]),dn,"تم تشييكه | Checked",""] for r in skus_]
+                    to_add = [build_scheduled_row(r[0],r[1],r[2],r[3],lm.get(r[1].strip().upper(),r[4]),dn,"تم تشييكه | Checked","") for r in skus_]
                     safe_batch_append(scheduled_sheet, to_add)
                     for idx in sorted(grp["indices"], reverse=True):
                         safe_delete(sheets["Check"], idx)
@@ -2165,7 +2211,7 @@ with tab7:
                         st.error("❌ أدخل تاريخ جديد | Enter new schedule date")
                     else:
                         dn = now_str()
-                        to_add = [[new_asn, sku, qty, new_date, links_map2.get(sku.upper(), img), dn] for sku,qty,img in edited_skus]
+                        to_add = [build_scheduled_row(new_asn, sku, qty, new_date, links_map2.get(sku.upper(), img), dn) for sku,qty,img in edited_skus]
                         safe_batch_append(scheduled_sheet, to_add)
                         for idx in sorted(grp["indices"], reverse=True):
                             safe_delete(reschedule_sheet, idx)
@@ -2177,7 +2223,7 @@ with tab7:
 with tab8:
     st.subheader("⚠️ تنبيهات الجدولة | Schedule Alerts")
     st.caption("الكمية المجدولة أعلى من المبيع الشهري | Scheduled qty > Monthly sales")
-    data_sc8 = get_cached(scheduled_sheet)
+    data_sc8 = get_scheduled_normalized()
     alerts = []
     if len(data_sc8) > 1:
         for row in data_sc8[1:]:
@@ -3132,7 +3178,7 @@ with tab15:
                 # الجدولات الحالية
                 existing_schedules = []
                 for sheet_key in ("Scheduled", "Check"):
-                    sdata = get_cached(sheets[sheet_key])
+                    sdata = get_scheduled_normalized() if sheet_key == "Scheduled" else get_cached(sheets[sheet_key])
                     if len(sdata) <= 1:
                         continue
                     for row in sdata[1:]:
