@@ -1255,6 +1255,7 @@ if "transferred_skus_t14" not in st.session_state:
     st.session_state["transferred_skus_t14"] = compute_transferred_from_sales()
 
 tabs = st.tabs([
+    "🛒 المبيعات | Sales",
     "📋 الطلبات | Requests",
     "✅ الموافقة | Approved",
     "❌ غير متوفر | Unavailable",
@@ -1269,11 +1270,10 @@ tabs = st.tabs([
     "🗂️ منتهية | Expired",
     "⚙️ الإعدادات | Settings",
     "📈 مراجعة المبيعات | Sales Review",
-    "🛒 المبيعات | Sales",
     "🗓️ تحليل الجدولة | Schedule Analysis",
     "📦 مخزون بدون بيع | No Sales",
 ])
-(tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab14,tab15,tab16) = tabs
+(tab14,tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab15,tab16) = tabs
 
 # ══ TAB 1 — الطلبات ══
 with tab1:
