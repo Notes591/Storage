@@ -50,6 +50,11 @@ TABS_CONFIG = {
     "CancelNotifications": ["ASN","SKUs","Schedule Date","Reason","Timestamp"],
     "Tacweed":           ["SKU","Code01","Date Uploaded"],
     "WarehouseStock":    ["Code","Quantity","Item Name","Date Uploaded"],
+    # تاب "قيد الموافقة" بيتكتب فيه من برنامج الجدولة المكتبي (schedule_entry_app) لما تتحدد
+    # علامة Approval — نفس أعمدة تاب Scheduled الجديدة. هنا بنقراه بس (حسب اسم العمود مش
+    # مكانه) عشان نعرض ملحوظة في تابات ثانية إن السكو ده لسه قيد الموافقة.
+    "PendingApproval":   ["Store Name","Warehouse Name","ASN","Total QTY","Section","Approval",
+                           "SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
 }
 
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
@@ -119,6 +124,7 @@ approved_sheet    = sheets["Approved"]
 unavailable_sheet = sheets["Unavailable"]
 ordered_sheet     = sheets["Ordered"]
 scheduled_sheet   = sheets["Scheduled"]
+pending_approval_sheet = sheets["PendingApproval"]
 # ══ توافق تاب الجدولة بعد إضافة أعمدة جديدة (Store Name / Warehouse Name / Total QTY / Section / Approval) ══
 # برنامج الجدولة المكتبي (schedule_entry_app) بقى بيكتب في تاب "Scheduled" بترتيب أعمدة جديد:
 # Store Name, Warehouse Name, ASN, Total QTY, Section, Approval, SKU, Quantity, Schedule Date,
@@ -1116,6 +1122,35 @@ def recent_schedule_badge_html(entry):
         f'Scheduled within the last 4 days — still within arrival window, don\'t re-order</span>'
     )
 
+def get_pending_approval_skus(force=False):
+    """يرجع set بكل الـ SKUs الموجودة حالياً في تاب PendingApproval — يعني لسه مستنية اعتماد
+    الجدولة من برنامج الجدولة المكتبي (schedule_entry_app) وما اتنقلتش لتاب Scheduled لسه.
+    القراءة حسب اسم عمود SKU مش مكانه، عشان تفضل شغالة أياً كان ترتيب الأعمدة الحقيقي في الشيت."""
+    raw = get_cached(pending_approval_sheet, force=force)
+    if not raw or len(raw) <= 1:
+        return set()
+    header = raw[0]
+    if "SKU" not in header:
+        return set()
+    sku_idx = header.index("SKU")
+    out = set()
+    for row in raw[1:]:
+        if sku_idx < len(row):
+            sku_up = row[sku_idx].strip().upper()
+            if sku_up:
+                out.add(sku_up)
+    return out
+
+def pending_approval_badge_html():
+    """شارة توضيحية إن السكو موجود في تاب 'قيد الموافقة' — يعني فيه جدولة مقترحة لسه مستنية
+    اعتماد من برنامج الجدولة المكتبي، عشان محدش يطلبه أو يجدوله تاني بالغلط."""
+    return (
+        '<span class="status-badge-lg" style="background:#b45309;">'
+        '⏳ قيد الموافقة | Pending Approval — في انتظار اعتماد الجدولة من برنامج الجدولة المكتبي، '
+        'لا تطلبه أو تجدوله تاني | Awaiting schedule approval from the desktop scheduling app — '
+        'don\'t re-order or re-schedule</span>'
+    )
+
 def compute_recent_scheduled_rows(exclude_skus, day_dates, days_back=4):
     """يبني صفوف SKUs اتجدولت أو انتهت جدولتها خلال آخر days_back يوم ومش ظاهرة أصلاً
     في قائمة المراجعة الرئيسية (exclude_skus) — عشان تتعرض في سكشن منفصل يفكّر المستخدم
@@ -1546,6 +1581,8 @@ with tab1:
                 st.success(f"🛒 تم طلب {len(selected_idx)} منتج | Ordered")
                 st.rerun()
 
+        pending_approval_skus_t1 = get_pending_approval_skus()
+
         st.divider()
         for i, row in enumerate(rows, start=2):
             while len(row) < 5: row.append("")
@@ -1563,6 +1600,8 @@ with tab1:
                 if prev_count > 0:
                     ordn = ordinal_map.get(prev_count, f"{prev_count+1}")
                     st.warning(f"🔁 تم الطلب للمرة {ordn} | Already ordered {prev_count} time(s)")
+                if sku.strip().upper() in pending_approval_skus_t1:
+                    st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
             with c_act:
                 ca,cb,cc,cd = st.columns(4)
                 with ca:
@@ -2473,6 +2512,8 @@ with tab10:
         with c1: dl_btn(df_sr,"stock_review")
         with c2: st.error(f"🔴 SKUs محتاجة مراجعة | Needs Review: {len(stock_review_rows)}")
 
+        pending_approval_skus_t10 = get_pending_approval_skus()
+
         for r in stock_review_rows:
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(r["img"],70)
@@ -2495,6 +2536,8 @@ with tab10:
                     st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
                 if recent_sched_r:
                     st.markdown(recent_schedule_badge_html(recent_sched_r), unsafe_allow_html=True)
+                if r["sku_up"] in pending_approval_skus_t10:
+                    st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.markdown(big_note_html(note), unsafe_allow_html=True)
@@ -2540,6 +2583,8 @@ with tab10:
                     st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
                 if recent_sched_miss:
                     st.markdown(recent_schedule_badge_html(recent_sched_miss), unsafe_allow_html=True)
+                if r["sku_up"] in pending_approval_skus_t10:
+                    st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.markdown(big_note_html(note), unsafe_allow_html=True)
@@ -2683,6 +2728,8 @@ with tab13:
         with c1: dl_btn(df_sales,"sales_review")
         with c2: st.warning(f"📈 SKUs محتاجة مراجعة | Needs Review: {len(sales_review_rows)}")
 
+        pending_approval_skus_t13 = get_pending_approval_skus()
+
         for r in sales_review_rows:
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(r["img"],70)
@@ -2701,6 +2748,8 @@ with tab13:
                     st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
                 if recent_sched_r2:
                     st.markdown(recent_schedule_badge_html(recent_sched_r2), unsafe_allow_html=True)
+                if r["sku_up"] in pending_approval_skus_t13:
+                    st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.markdown(big_note_html(note), unsafe_allow_html=True)
@@ -2746,6 +2795,8 @@ with tab13:
                     st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
                 if recent_sched_miss2:
                     st.markdown(recent_schedule_badge_html(recent_sched_miss2), unsafe_allow_html=True)
+                if r["sku_up"] in pending_approval_skus_t13:
+                    st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
                 for note in get_unavailable_ordered_note(r["sku"]):
                     st.markdown(big_note_html(note), unsafe_allow_html=True)
@@ -2851,6 +2902,7 @@ with tab14:
 
         # ══ خريطة SKUs المجدولة خلال آخر 4 أيام (لعرض ASN + الكمية لو فعلاً ليها جدولة) ══
         recent_sched_map_t14 = get_recent_schedule_rows(days_back=4)
+        pending_approval_skus_t14 = get_pending_approval_skus()
 
         st.divider()
         for r in sales_tab_rows:
@@ -3025,6 +3077,9 @@ with tab14:
                         f'بتاريخ {recent_sched_t14["date"]} [{recent_sched_t14["source_label"]}]'
                         f'</span>',
                         unsafe_allow_html=True)
+
+                if r["sku_up"] in pending_approval_skus_t14:
+                    st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
 
                 # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة وبدون تفاصيل أخرى ══
                 is_needs_sched_only = (
