@@ -2472,14 +2472,21 @@ with tab10:
     st.caption(f"📅 بيانات يوم | Data for: **{d1.strftime('%Y-%m-%d')}** (أمس | yesterday) — التنبيه نفسه مبني على أمس فقط، والأيام التانية للعرض فقط | Alert itself is based on yesterday only; the other days are for display")
 
     delay_days = int(load_settings().get("schedule_delay_days","3") or 3)
+    # SKUs ليها جدولة (أو جدولة منتهية) خلال آخر 4 أيام ولسه في فترة الوصول —
+    # دي أموره تمام بالفعل، فمينفعش تظهر في مراجعة المخزون خالص (شايفينها بس في سكشن
+    # "مجدولة خلال آخر 4 أيام" تحت)
+    recent_sched_map_t10_all = get_recent_schedule_rows(days_back=4)
     all_review_rows = compute_stock_sales_rows(d1, day_dates)
-    stock_review_rows = [r for r in all_review_rows if r["stock_alert"]]
+    stock_review_rows = [r for r in all_review_rows
+                          if r["stock_alert"] and r["sku_up"] not in recent_sched_map_t10_all]
 
     # إضافة المرحلين من تاب المبيعات (محتاج جدولة فقط)
     transferred_from_sales = st.session_state.get("transferred_skus_t14", [])
     existing_skus_in_review = {r["sku_up"] for r in stock_review_rows}
     for tr in transferred_from_sales:
         if is_sku_only_in_excluded_warehouses(tr["sku_up"], excluded_wh):
+            continue
+        if tr["sku_up"] in recent_sched_map_t10_all:
             continue
         if tr["sku_up"] not in existing_skus_in_review:
             avg_tr = tr.get("effective_avg", 0)
@@ -2530,7 +2537,7 @@ with tab10:
                 if r["sales_alert"]:
                     st.warning("📈 مبيعات أعلى من المعتاد كمان | Also selling faster than usual")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days)
-                recent_sched_r = get_recent_schedule_rows(days_back=4).get(r["sku_up"])
+                recent_sched_r = recent_sched_map_t10_all.get(r["sku_up"])
                 show_normal_badge = not (recent_sched_r and "محتاج جدولة" in badge_text)
                 if show_normal_badge:
                     st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
@@ -2543,8 +2550,10 @@ with tab10:
                     st.markdown(big_note_html(note), unsafe_allow_html=True)
             st.divider()
 
-    # ══ نحسب الأول قايمة "منتهي بالكامل" عشان نستبعدها من سكشن "مجدولة مؤخراً" ══
+    # ══ نحسب الأول قايمة "منتهي بالكامل" — ونستبعد منها السكيوهات المجدولة مؤخراً
+    #    (أموره تمام بالفعل، هتظهر بس في سكشن "مجدولة خلال آخر 4 أيام" تحت) ══
     missing_rows_t10 = compute_missing_inventory_rows(day_dates)
+    missing_rows_t10 = [r for r in missing_rows_t10 if r["sku_up"] not in recent_sched_map_t10_all]
 
     # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمتين اللي فوق وتحت ══
     exclude_skus_t10 = {r["sku_up"] for r in stock_review_rows} | {r["sku_up"] for r in missing_rows_t10}
@@ -2564,7 +2573,7 @@ with tab10:
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_miss10,"out_of_stock", key="dlbtn_oos_t10")
         with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t10)}")
-        recent_sched_map_t10 = get_recent_schedule_rows(days_back=4)
+        recent_sched_map_t10 = recent_sched_map_t10_all
         for r in missing_rows_t10:
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(r["img"],70)
@@ -2705,13 +2714,22 @@ with tab13:
     st.caption(f"📅 بيانات يوم | Data for: **{e1.strftime('%Y-%m-%d')}** (أمس | yesterday) — التنبيه نفسه مبني على أمس فقط، والأيام التانية للعرض فقط | Alert itself is based on yesterday only; the other days are for display")
 
     delay_days2 = int(load_settings().get("schedule_delay_days","3") or 3)
+    # SKUs ليها جدولة (أو جدولة منتهية) خلال آخر 4 أيام ولسه في فترة الوصول —
+    # دي أموره تمام بالفعل، فمينفعش تظهر في مراجعة المبيعات خالص (شايفينها بس في سكشن
+    # "مجدولة خلال آخر 4 أيام" تحت)
+    recent_sched_map_t13_all = get_recent_schedule_rows(days_back=4)
+    # أي SKU ظاهر بالفعل في مراجعة المخزون (تاب 10) مينفعش يتكرر هنا كمان —
+    # كل تاب له وظيفة مختلفة والسكو يظهر في تاب واحد بس
+    stock_review_skus_t10_for_t13 = {r["sku_up"] for r in stock_review_rows}
     all_review_rows2 = compute_stock_sales_rows(e1, day_dates2)
     valid_days_set = {1,2,3,4,5,6,7,8,10}
     sales_review_rows = [r for r in all_review_rows2
         if r["days_to_stockout_today"] in valid_days_set
         and r["sales_month"] > 0
         and r["sales_alert"]
-        and not r["stock_alert"]]
+        and not r["stock_alert"]
+        and r["sku_up"] not in recent_sched_map_t13_all
+        and r["sku_up"] not in stock_review_skus_t10_for_t13]
     sales_review_rows.sort(key=lambda r: (-r["qty"], -r["sales_month"]))
 
     if not inv_map:
@@ -2742,7 +2760,7 @@ with tab13:
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 st.markdown(f"⚡ **نفاد خلال بيع اليوم | Days to stockout (today's rate):** {r['days_to_stockout_today']} يوم")
                 badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days2)
-                recent_sched_r2 = get_recent_schedule_rows(days_back=4).get(r["sku_up"])
+                recent_sched_r2 = recent_sched_map_t13_all.get(r["sku_up"])
                 show_normal_badge2 = not (recent_sched_r2 and "محتاج جدولة" in badge_text)
                 if show_normal_badge2:
                     st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
@@ -2755,8 +2773,10 @@ with tab13:
                     st.markdown(big_note_html(note), unsafe_allow_html=True)
             st.divider()
 
-    # ══ نحسب الأول قايمة "منتهي بالكامل" عشان نستبعدها من سكشن "مجدولة مؤخراً" ══
+    # ══ نحسب الأول قايمة "منتهي بالكامل" — ونستبعد منها السكيوهات المجدولة مؤخراً
+    #    (أموره تمام بالفعل، هتظهر بس في سكشن "مجدولة خلال آخر 4 أيام" تحت) ══
     missing_rows_t13 = compute_missing_inventory_rows(day_dates2)
+    missing_rows_t13 = [r for r in missing_rows_t13 if r["sku_up"] not in recent_sched_map_t13_all]
 
     # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمتين اللي فوق وتحت ══
     exclude_skus_t13 = {r["sku_up"] for r in sales_review_rows} | {r["sku_up"] for r in missing_rows_t13}
@@ -2776,7 +2796,7 @@ with tab13:
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_miss13,"out_of_stock", key="dlbtn_oos_t13")
         with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t13)}")
-        recent_sched_map_t13 = get_recent_schedule_rows(days_back=4)
+        recent_sched_map_t13 = recent_sched_map_t13_all
         for r in missing_rows_t13:
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(r["img"],70)
@@ -3044,6 +3064,8 @@ with tab14:
                 # فمينفعش نعتبره "غير كافٍ" لمجرد إن مفيش بيانات بيع (كان ده الخلل قبل كده)
                 stock_self_ok = (r["effective_avg"] <= 0) or (r["days_to_stockout"] >= coverage_days_t14)
                 un_notes = get_unavailable_ordered_note(r["sku"])
+                # ══ مجدولة خلال آخر 4 أيام؟ (بنحسبها الأول عشان نستخدمها في قرار عرض شارة التغطية والترحيل) ══
+                recent_sched_t14 = recent_sched_map_t14.get(r["sku_up"])
 
                 if stock_self_ok and not sched_t14:
                     if r["effective_avg"] <= 0:
@@ -3062,12 +3084,15 @@ with tab14:
                     cov_badge_text  = badge_text_t14
                     cov_badge_color = badge_color_t14
 
-                st.markdown(
-                    f'<span class="status-badge-lg" style="background:{cov_badge_color};">{cov_badge_text}</span>',
-                    unsafe_allow_html=True)
+                # لو السكو فعلاً ليه جدولة خلال آخر 4 أيام، منعرضش شارة "محتاج جدولة الآن"
+                # المتناقضة جنب شارة الجدولة الحديثة (البنفسجي) اللي هتتعرض تحت — عشان محدش يتلخبط
+                show_normal_cov_badge_t14 = not (recent_sched_t14 and "محتاج جدولة" in cov_badge_text)
+                if show_normal_cov_badge_t14:
+                    st.markdown(
+                        f'<span class="status-badge-lg" style="background:{cov_badge_color};">{cov_badge_text}</span>',
+                        unsafe_allow_html=True)
 
                 # ══ مجدولة خلال آخر 4 أيام؟ (لو فعلاً ليها جدولة) — تعرض ASN + الكمية + التاريخ ══
-                recent_sched_t14 = recent_sched_map_t14.get(r["sku_up"])
                 if recent_sched_t14:
                     st.markdown(
                         f'<span class="status-badge-lg" style="background:#7c3aed;">'
@@ -3081,12 +3106,15 @@ with tab14:
                 if r["sku_up"] in pending_approval_skus_t14:
                     st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
 
-                # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة وبدون تفاصيل أخرى ══
+                # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة
+                #    وبدون تفاصيل أخرى وبدون جدولة حديثة (آخر 4 أيام) — لو ليه جدولة حديثة
+                #    (حتى لو منتهية) يبقى أموره تمام ومينفعش يترحّل لمراجعة المخزون ══
                 is_needs_sched_only = (
                     not stock_self_ok
                     and badge_text_t14 and "محتاج جدولة" in badge_text_t14
                     and not sched_t14
                     and not un_notes
+                    and not recent_sched_t14
                 )
                 if is_needs_sched_only:
                     _new_transferred.append({
