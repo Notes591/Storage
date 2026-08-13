@@ -2473,12 +2473,22 @@ with tab10:
 
     delay_days = int(load_settings().get("schedule_delay_days","3") or 3)
     # SKUs ليها جدولة (أو جدولة منتهية) خلال آخر 4 أيام ولسه في فترة الوصول —
-    # دي أموره تمام بالفعل، فمينفعش تظهر في مراجعة المخزون خالص (شايفينها بس في سكشن
-    # "مجدولة خلال آخر 4 أيام" تحت)
+    # دي أموره تمام بالفعل، فمينفعش تظهر في مراجعة المخزون خالص
     recent_sched_map_t10_all = get_recent_schedule_rows(days_back=4)
     all_review_rows = compute_stock_sales_rows(d1, day_dates)
-    stock_review_rows = [r for r in all_review_rows
-                          if r["stock_alert"] and r["sku_up"] not in recent_sched_map_t10_all]
+    stock_review_rows = []
+    for r in all_review_rows:
+        if not r["stock_alert"]:
+            continue
+        if r["sku_up"] in recent_sched_map_t10_all:
+            continue
+        # لو ليه جدولة موجودة أصلاً وهتوصل قبل النفاد ("✅ ... هيوصل قبل النفاد")،
+        # يبقى أموره تمام ومش محتاج مراجعة — نستبعده خالص
+        cov_badge_text, cov_badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days)
+        if cov_badge_color == "#22c55e":
+            continue
+        r["_cov_badge_text"], r["_cov_badge_color"] = cov_badge_text, cov_badge_color
+        stock_review_rows.append(r)
 
     # إضافة المرحلين من تاب المبيعات (محتاج جدولة فقط)
     transferred_from_sales = st.session_state.get("transferred_skus_t14", [])
@@ -2491,16 +2501,21 @@ with tab10:
         if tr["sku_up"] not in existing_skus_in_review:
             avg_tr = tr.get("effective_avg", 0)
             suggested_tr = round(avg_tr * 18) if avg_tr > 0 else 0
+            days_to_so_tr = tr.get("days_to_stockout", 0)
+            cov_badge_text_tr, cov_badge_color_tr, _ = schedule_coverage_badge(tr["sku"], days_to_so_tr, delay_days)
+            if cov_badge_color_tr == "#22c55e":
+                continue
             stock_review_rows.append({
                 "sku": tr["sku"], "sku_up": tr["sku_up"],
                 "stock": tr["stock"], "sales_month": tr["sales_month"],
                 "img": tr["img"], "stock_alert": True, "sales_alert": False,
                 "suggested_qty": suggested_tr,
-                "days_to_stockout": tr.get("days_to_stockout", 0),
-                "days_to_stockout_today": tr.get("days_to_stockout", 0),
+                "days_to_stockout": days_to_so_tr,
+                "days_to_stockout_today": days_to_so_tr,
                 "qty": tr["day_counts"].get(d1, 0) if tr.get("day_counts") else 0,
                 "day_counts": tr.get("day_counts", {d: 0 for d in day_dates}),
                 "_transferred_from_sales": True,
+                "_cov_badge_text": cov_badge_text_tr, "_cov_badge_color": cov_badge_color_tr,
             })
 
     stock_review_rows.sort(key=lambda r: (-r["qty"], -r["sales_month"]))
@@ -2536,13 +2551,7 @@ with tab10:
                 st.markdown(f"💡 **اقتراح الكمية | Suggested Qty:** **{r['suggested_qty']}** &nbsp;|&nbsp; ⏳ **نفاد خلال | Days to stockout:** {r['days_to_stockout']} يوم")
                 if r["sales_alert"]:
                     st.warning("📈 مبيعات أعلى من المعتاد كمان | Also selling faster than usual")
-                badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days)
-                recent_sched_r = recent_sched_map_t10_all.get(r["sku_up"])
-                show_normal_badge = not (recent_sched_r and "محتاج جدولة" in badge_text)
-                if show_normal_badge:
-                    st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
-                if recent_sched_r:
-                    st.markdown(recent_schedule_badge_html(recent_sched_r), unsafe_allow_html=True)
+                st.markdown(f'<span class="status-badge-lg" style="background:{r["_cov_badge_color"]};">{r["_cov_badge_text"]}</span>', unsafe_allow_html=True)
                 if r["sku_up"] in pending_approval_skus_t10:
                     st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
@@ -2550,15 +2559,19 @@ with tab10:
                     st.markdown(big_note_html(note), unsafe_allow_html=True)
             st.divider()
 
-    # ══ نحسب الأول قايمة "منتهي بالكامل" — ونستبعد منها السكيوهات المجدولة مؤخراً
-    #    (أموره تمام بالفعل، هتظهر بس في سكشن "مجدولة خلال آخر 4 أيام" تحت) ══
+    # ══ قايمة "منتهي بالكامل" — بنستبعد منها السكيوهات المجدولة مؤخراً وكمان اللي ليها
+    #    جدولة هتوصل قبل النفاد أصلاً (أموره تمام، مش محتاجة مراجعة) ══
     missing_rows_t10 = compute_missing_inventory_rows(day_dates)
-    missing_rows_t10 = [r for r in missing_rows_t10 if r["sku_up"] not in recent_sched_map_t10_all]
-
-    # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمتين اللي فوق وتحت ══
-    exclude_skus_t10 = {r["sku_up"] for r in stock_review_rows} | {r["sku_up"] for r in missing_rows_t10}
-    recent_scheduled_rows_t10 = compute_recent_scheduled_rows(exclude_skus_t10, day_dates, days_back=4)
-    render_recent_scheduled_section(recent_scheduled_rows_t10, day_dates, day_labels, "recent_scheduled_t10")
+    filtered_missing_t10 = []
+    for r in missing_rows_t10:
+        if r["sku_up"] in recent_sched_map_t10_all:
+            continue
+        cov_badge_text, cov_badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days)
+        if cov_badge_color == "#22c55e":
+            continue
+        r["_cov_badge_text"], r["_cov_badge_color"] = cov_badge_text, cov_badge_color
+        filtered_missing_t10.append(r)
+    missing_rows_t10 = filtered_missing_t10
 
     st.divider()
     st.subheader("⛔ مخزون منتهي بالكامل | Completely Out of Stock")
@@ -2573,7 +2586,6 @@ with tab10:
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_miss10,"out_of_stock", key="dlbtn_oos_t10")
         with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t10)}")
-        recent_sched_map_t10 = recent_sched_map_t10_all
         for r in missing_rows_t10:
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(r["img"],70)
@@ -2585,13 +2597,7 @@ with tab10:
                 st.error("⛔ مخزونه انتهى — مش موجود في ملف المخزون | Stock ran out — not found in inventory file")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates, day_labels))
                 st.markdown(f"📈 **مبيع شهري تقديري (بناءً على آخر 3 أيام) | Estimated Monthly Sales (based on last 3 days):** **{r['est_monthly_sales']}**")
-                badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days)
-                recent_sched_miss = recent_sched_map_t10.get(r["sku_up"])
-                show_normal_badge_miss = not (recent_sched_miss and "محتاج جدولة" in badge_text)
-                if show_normal_badge_miss:
-                    st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
-                if recent_sched_miss:
-                    st.markdown(recent_schedule_badge_html(recent_sched_miss), unsafe_allow_html=True)
+                st.markdown(f'<span class="status-badge-lg" style="background:{r["_cov_badge_color"]};">{r["_cov_badge_text"]}</span>', unsafe_allow_html=True)
                 if r["sku_up"] in pending_approval_skus_t10:
                     st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
@@ -2723,13 +2729,21 @@ with tab13:
     stock_review_skus_t10_for_t13 = {r["sku_up"] for r in stock_review_rows}
     all_review_rows2 = compute_stock_sales_rows(e1, day_dates2)
     valid_days_set = {1,2,3,4,5,6,7,8,10}
-    sales_review_rows = [r for r in all_review_rows2
-        if r["days_to_stockout_today"] in valid_days_set
-        and r["sales_month"] > 0
-        and r["sales_alert"]
-        and not r["stock_alert"]
-        and r["sku_up"] not in recent_sched_map_t13_all
-        and r["sku_up"] not in stock_review_skus_t10_for_t13]
+    sales_review_rows = []
+    for r in all_review_rows2:
+        if not (r["days_to_stockout_today"] in valid_days_set
+                and r["sales_month"] > 0
+                and r["sales_alert"]
+                and not r["stock_alert"]
+                and r["sku_up"] not in recent_sched_map_t13_all
+                and r["sku_up"] not in stock_review_skus_t10_for_t13):
+            continue
+        # لو ليه جدولة موجودة أصلاً وهتوصل قبل النفاد، يبقى أموره تمام ومش محتاج مراجعة
+        cov_badge_text, cov_badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days2)
+        if cov_badge_color == "#22c55e":
+            continue
+        r["_cov_badge_text"], r["_cov_badge_color"] = cov_badge_text, cov_badge_color
+        sales_review_rows.append(r)
     sales_review_rows.sort(key=lambda r: (-r["qty"], -r["sales_month"]))
 
     if not inv_map:
@@ -2759,13 +2773,7 @@ with tab13:
                 st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 st.markdown(f"⚡ **نفاد خلال بيع اليوم | Days to stockout (today's rate):** {r['days_to_stockout_today']} يوم")
-                badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days2)
-                recent_sched_r2 = recent_sched_map_t13_all.get(r["sku_up"])
-                show_normal_badge2 = not (recent_sched_r2 and "محتاج جدولة" in badge_text)
-                if show_normal_badge2:
-                    st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
-                if recent_sched_r2:
-                    st.markdown(recent_schedule_badge_html(recent_sched_r2), unsafe_allow_html=True)
+                st.markdown(f'<span class="status-badge-lg" style="background:{r["_cov_badge_color"]};">{r["_cov_badge_text"]}</span>', unsafe_allow_html=True)
                 if r["sku_up"] in pending_approval_skus_t13:
                     st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
@@ -2773,15 +2781,19 @@ with tab13:
                     st.markdown(big_note_html(note), unsafe_allow_html=True)
             st.divider()
 
-    # ══ نحسب الأول قايمة "منتهي بالكامل" — ونستبعد منها السكيوهات المجدولة مؤخراً
-    #    (أموره تمام بالفعل، هتظهر بس في سكشن "مجدولة خلال آخر 4 أيام" تحت) ══
+    # ══ قايمة "منتهي بالكامل" — بنستبعد منها السكيوهات المجدولة مؤخراً وكمان اللي ليها
+    #    جدولة هتوصل قبل النفاد أصلاً (أموره تمام، مش محتاجة مراجعة) ══
     missing_rows_t13 = compute_missing_inventory_rows(day_dates2)
-    missing_rows_t13 = [r for r in missing_rows_t13 if r["sku_up"] not in recent_sched_map_t13_all]
-
-    # ══ SKUs مجدولة خلال آخر 4 أيام ومش ظاهرة أصلاً في القايمتين اللي فوق وتحت ══
-    exclude_skus_t13 = {r["sku_up"] for r in sales_review_rows} | {r["sku_up"] for r in missing_rows_t13}
-    recent_scheduled_rows_t13 = compute_recent_scheduled_rows(exclude_skus_t13, day_dates2, days_back=4)
-    render_recent_scheduled_section(recent_scheduled_rows_t13, day_dates2, day_labels2, "recent_scheduled_t13")
+    filtered_missing_t13 = []
+    for r in missing_rows_t13:
+        if r["sku_up"] in recent_sched_map_t13_all:
+            continue
+        cov_badge_text, cov_badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days2)
+        if cov_badge_color == "#22c55e":
+            continue
+        r["_cov_badge_text"], r["_cov_badge_color"] = cov_badge_text, cov_badge_color
+        filtered_missing_t13.append(r)
+    missing_rows_t13 = filtered_missing_t13
 
     st.divider()
     st.subheader("⛔ مخزون منتهي بالكامل | Completely Out of Stock")
@@ -2796,7 +2808,6 @@ with tab13:
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_miss13,"out_of_stock", key="dlbtn_oos_t13")
         with c2: st.error(f"⛔ SKUs منتهية | Out of Stock: {len(missing_rows_t13)}")
-        recent_sched_map_t13 = recent_sched_map_t13_all
         for r in missing_rows_t13:
             c_img,c_info = st.columns([1,6])
             with c_img: show_img(r["img"],70)
@@ -2808,13 +2819,7 @@ with tab13:
                 st.error("⛔ مخزونه انتهى — مش موجود في ملف المخزون | Stock ran out — not found in inventory file")
                 st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
                 st.markdown(f"📈 **مبيع شهري تقديري (بناءً على آخر 3 أيام) | Estimated Monthly Sales (based on last 3 days):** **{r['est_monthly_sales']}**")
-                badge_text, badge_color, _ = schedule_coverage_badge(r["sku"], 0, delay_days2)
-                recent_sched_miss2 = recent_sched_map_t13.get(r["sku_up"])
-                show_normal_badge_miss2 = not (recent_sched_miss2 and "محتاج جدولة" in badge_text)
-                if show_normal_badge_miss2:
-                    st.markdown(f'<span class="status-badge-lg" style="background:{badge_color};">{badge_text}</span>', unsafe_allow_html=True)
-                if recent_sched_miss2:
-                    st.markdown(recent_schedule_badge_html(recent_sched_miss2), unsafe_allow_html=True)
+                st.markdown(f'<span class="status-badge-lg" style="background:{r["_cov_badge_color"]};">{r["_cov_badge_text"]}</span>', unsafe_allow_html=True)
                 if r["sku_up"] in pending_approval_skus_t13:
                     st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
                 render_recent_expired_note(r["sku"])
