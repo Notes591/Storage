@@ -1337,6 +1337,7 @@ if "transferred_skus_t14" not in st.session_state:
 
 tabs = st.tabs([
     "🛒 المبيعات | Sales",
+    "📊 داشبورد المبيعات | Sales Dashboard",
     "📋 الطلبات | Requests",
     "✅ الموافقة | Approved",
     "❌ غير متوفر | Unavailable",
@@ -1354,7 +1355,7 @@ tabs = st.tabs([
     "🗓️ تحليل الجدولة | Schedule Analysis",
     "📦 مخزون بدون بيع | No Sales",
 ])
-(tab14,tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab15,tab16) = tabs
+(tab14,tab_dash,tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab15,tab16) = tabs
 
 # ══ TAB 1 — الطلبات ══
 with tab1:
@@ -2829,207 +2830,6 @@ with tab13:
 
 # ══ TAB 14 — المبيعات ══
 with tab14:
-    # ══════════════════════════════════════════════════════════════════
-    # ══ [إضافة جديدة] تحليلات المبيعات — لا تعدّل أي عرض أو Logic أصلي ══
-    # ══ [NEW] Sales Analytics — additions only, original content is    ══
-    # ══ untouched and appears below this section exactly as before    ══
-    # ══════════════════════════════════════════════════════════════════
-    st.subheader("📈 تحليلات المبيعات | Sales Analytics")
-
-    if not inv_map:
-        st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
-    else:
-        analysis_period_map_t14 = {
-            "آخر 7 أيام | Last 7 days": 7,
-            "آخر 15 يوم | Last 15 days": 15,
-            "آخر 30 يوم | Last 30 days": 30,
-            "آخر 60 يوم | Last 60 days": 60,
-            "آخر 90 يوم | Last 90 days": 90,
-        }
-        analysis_period_label_t14 = st.selectbox(
-            "🗓️ اختر فترة التحليل | Select Analysis Period",
-            list(analysis_period_map_t14.keys()),
-            index=2,
-            key="sales_analytics_period_t14",
-            help="يؤثر على التحليلات والرسوم فقط، ولا يغير الجدول الأصلي أسفل الصفحة | Affects analytics only, does not change the original table below")
-        analysis_days_t14 = analysis_period_map_t14[analysis_period_label_t14]
-
-        today_an_t14  = datetime.now().date()
-        cur_dates_an_t14  = [today_an_t14 - timedelta(days=i) for i in range(1, analysis_days_t14 + 1)]
-        prev_dates_an_t14 = [today_an_t14 - timedelta(days=i) for i in range(analysis_days_t14 + 1, analysis_days_t14 * 2 + 1)]
-
-        cur_counts_an_t14  = build_daily_orders_counts(cur_dates_an_t14)
-        prev_counts_an_t14 = build_daily_orders_counts(prev_dates_an_t14)
-
-        def _an_sku_total_t14(counts_map, sku_up, dates):
-            return sum(counts_map.get(sku_up, {}).get(d, 0) for d in dates)
-
-        analytics_rows_t14 = []
-        for sku_up_an, info_an in inv_map.items():
-            cur_total_an  = _an_sku_total_t14(cur_counts_an_t14, sku_up_an, cur_dates_an_t14)
-            prev_total_an = _an_sku_total_t14(prev_counts_an_t14, sku_up_an, prev_dates_an_t14)
-            analytics_rows_t14.append({
-                "sku_up": sku_up_an, "sku": info_an.get("sku", sku_up_an),
-                "cur_total": cur_total_an, "prev_total": prev_total_an,
-                "stock": info_an.get("total_stock", 0),
-            })
-
-        total_sales_period_t14 = sum(r["cur_total"] for r in analytics_rows_t14)
-        total_sales_prev_t14   = sum(r["prev_total"] for r in analytics_rows_t14)
-        avg_daily_period_t14   = (total_sales_period_t14 / analysis_days_t14) if analysis_days_t14 > 0 else 0
-        top_sku_row_t14 = max(analytics_rows_t14, key=lambda r: r["cur_total"], default=None)
-        if total_sales_prev_t14 > 0:
-            growth_pct_t14 = (total_sales_period_t14 - total_sales_prev_t14) / total_sales_prev_t14 * 100
-        else:
-            growth_pct_t14 = 100.0 if total_sales_period_t14 > 0 else 0.0
-
-        # ── 1) كروت التحليل | Analytics cards ──
-        cA_t14, cB_t14, cC_t14, cD_t14 = st.columns(4)
-        with cA_t14:
-            st.metric("📦 إجمالي المبيعات | Total Sales", f"{total_sales_period_t14:,}")
-        with cB_t14:
-            st.metric("📊 متوسط المبيعات اليومية | Daily Avg", f"{avg_daily_period_t14:,.1f}")
-        with cC_t14:
-            if top_sku_row_t14 and top_sku_row_t14["cur_total"] > 0:
-                st.metric("🔥 أعلى SKU مبيعًا | Top SKU", top_sku_row_t14["sku"], f"{top_sku_row_t14['cur_total']:,}")
-            else:
-                st.metric("🔥 أعلى SKU مبيعًا | Top SKU", "—")
-        with cD_t14:
-            st.metric("📈 نسبة نمو المبيعات | Growth", f"{growth_pct_t14:+.2f}%")
-
-        # ── 3) رسم بياني للمبيعات | Sales trend chart ──
-        cur_dates_sorted_t14 = sorted(cur_dates_an_t14)
-        daily_totals_t14 = {
-            d: sum(cur_counts_an_t14.get(r["sku_up"], {}).get(d, 0) for r in analytics_rows_t14)
-            for d in cur_dates_sorted_t14
-        }
-        chart_df_t14 = pd.DataFrame({
-            "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_t14],
-            "المبيعات | Sales": [daily_totals_t14.get(d, 0) for d in cur_dates_sorted_t14],
-        }).set_index("التاريخ | Date")
-        st.markdown("##### 📉 اتجاه المبيعات | Sales Trend")
-        st.line_chart(chart_df_t14)
-
-        # ── 4) تحليل نمو المبيعات | Growth comparison ──
-        growth_icon_t14 = "📈" if growth_pct_t14 >= 0 else "📉"
-        growth_word_t14 = "نمو المبيعات | Sales Growth" if growth_pct_t14 >= 0 else "انخفاض المبيعات | Sales Decline"
-        st.markdown(
-            f"{growth_icon_t14} **{growth_word_t14}:** {growth_pct_t14:+.2f}% "
-            f"&nbsp;|&nbsp; {analysis_period_label_t14.split('|')[0].strip()} = **{total_sales_period_t14:,}** "
-            f"&nbsp;|&nbsp; الفترة السابقة | Previous period = **{total_sales_prev_t14:,}**"
-        )
-
-        st.divider()
-
-        # ── 5) أعلى الأصناف مبيعًا | 6) الأصناف البطيئة ──
-        sorted_rows_t14  = sorted(analytics_rows_t14, key=lambda r: -r["cur_total"])
-        top10_rows_t14   = [r for r in sorted_rows_t14 if r["cur_total"] > 0][:10]
-        slow10_rows_t14  = sorted(analytics_rows_t14, key=lambda r: r["cur_total"])[:10]
-
-        colTop_t14, colSlow_t14 = st.columns(2)
-        with colTop_t14:
-            st.markdown("###### 🔥 أعلى الأصناف مبيعًا | Top 10 Best Sellers")
-            if top10_rows_t14:
-                df_top10_t14 = pd.DataFrame([{
-                    "الترتيب | #": i + 1, "SKU": r["sku"], "المبيعات | Sales": r["cur_total"],
-                    "متوسط يومي | Daily Avg": round(r["cur_total"] / analysis_days_t14, 2),
-                } for i, r in enumerate(top10_rows_t14)])
-                st.dataframe(df_top10_t14, use_container_width=True, hide_index=True)
-            else:
-                st.caption("لا توجد بيانات مبيعات كافية | Not enough sales data")
-        with colSlow_t14:
-            st.markdown("###### 🐌 الأصناف البطيئة | Slow Moving (Bottom 10)")
-            if slow10_rows_t14:
-                df_slow10_t14 = pd.DataFrame([{
-                    "SKU": r["sku"], "المبيعات | Sales": r["cur_total"],
-                    "متوسط يومي | Daily Avg": round(r["cur_total"] / analysis_days_t14, 2),
-                } for r in slow10_rows_t14])
-                st.dataframe(df_slow10_t14, use_container_width=True, hide_index=True)
-
-        st.divider()
-
-        # ── 7) تحليل اتجاه كل SKU | Per-SKU trend ──
-        st.markdown("###### 🔎 تحليل اتجاه SKU | SKU Trend Analysis")
-        sku_options_t14 = sorted({r["sku"] for r in analytics_rows_t14})
-        selected_sku_t14 = st.selectbox("اختر SKU للتحليل | Select SKU", ["—"] + sku_options_t14, key="sales_analytics_sku_t14")
-        if selected_sku_t14 and selected_sku_t14 != "—":
-            sel_row_t14 = next((r for r in analytics_rows_t14 if r["sku"] == selected_sku_t14), None)
-            if sel_row_t14:
-                sel_sku_up_t14 = sel_row_t14["sku_up"]
-                sel_daily_t14  = {d: cur_counts_an_t14.get(sel_sku_up_t14, {}).get(d, 0) for d in cur_dates_sorted_t14}
-                sel_cur_total_t14  = sel_row_t14["cur_total"]
-                sel_prev_total_t14 = sel_row_t14["prev_total"]
-                sel_avg_t14 = (sel_cur_total_t14 / analysis_days_t14) if analysis_days_t14 > 0 else 0
-                if sel_prev_total_t14 > 0:
-                    sel_growth_t14 = (sel_cur_total_t14 - sel_prev_total_t14) / sel_prev_total_t14 * 100
-                else:
-                    sel_growth_t14 = 100.0 if sel_cur_total_t14 > 0 else 0.0
-                max_day_t14 = max(sel_daily_t14.items(), key=lambda x: x[1], default=(None, 0))
-                min_day_t14 = min(sel_daily_t14.items(), key=lambda x: x[1], default=(None, 0))
-
-                m1_t14, m2_t14, m3_t14 = st.columns(3)
-                m1_t14.metric("مبيعات الفترة | Period Sales", f"{sel_cur_total_t14:,}")
-                m2_t14.metric("متوسط يومي | Daily Avg", f"{sel_avg_t14:,.1f}")
-                m3_t14.metric("النمو | Growth", f"{sel_growth_t14:+.2f}%")
-                st.caption(f"مبيعات الفترة السابقة | Previous period sales: **{sel_prev_total_t14:,}**")
-                m4_t14, m5_t14 = st.columns(2)
-                with m4_t14:
-                    st.markdown(f"📈 **أعلى يوم مبيعات | Best Day:** "
-                                f"{max_day_t14[0].strftime('%Y-%m-%d') if max_day_t14[0] else '—'} ({max_day_t14[1]})")
-                with m5_t14:
-                    st.markdown(f"📉 **أقل يوم مبيعات | Worst Day:** "
-                                f"{min_day_t14[0].strftime('%Y-%m-%d') if min_day_t14[0] else '—'} ({min_day_t14[1]})")
-                sku_chart_df_t14 = pd.DataFrame({
-                    "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_t14],
-                    "المبيعات | Sales": [sel_daily_t14.get(d, 0) for d in cur_dates_sorted_t14],
-                }).set_index("التاريخ | Date")
-                st.line_chart(sku_chart_df_t14)
-
-        st.divider()
-
-        # ── 8) تحليل المبيعات + المخزون | Needs-attention section ──
-        # (بيستخدم الدوال الأصلية load_settings / get_recent_schedule_rows / schedule_coverage_badge
-        #  بدون تعديل أي منطق حساب مخزون أو نفاد | reuses existing helper functions unchanged)
-        st.markdown("###### 🚨 أصناف تحتاج انتباه | Needs Attention")
-        delay_days_an_t14 = int(load_settings().get("schedule_delay_days", "3") or 3)
-        recent_sched_an_t14 = get_recent_schedule_rows(days_back=4)
-        attention_rows_t14 = []
-        for r_an in analytics_rows_t14:
-            avg_d_an = (r_an["cur_total"] / analysis_days_t14) if analysis_days_t14 > 0 else 0
-            if avg_d_an <= 0:
-                continue
-            days_to_so_an = round(r_an["stock"] / avg_d_an) if avg_d_an > 0 else 9999
-            if days_to_so_an > 10:
-                continue
-            badge_text_an, badge_color_an, sched_an = schedule_coverage_badge(r_an["sku"], days_to_so_an, delay_days_an_t14)
-            if "محتاج جدولة" not in badge_text_an and not sched_an:
-                continue
-            if sched_an:
-                status_an = "⚠️ لديها جدولة — قد تنفد قبل الوصول | Scheduled — may run out before arrival" \
-                    if "محتاج" not in badge_text_an and "لكن متأخر" in badge_text_an else \
-                    ("✅ مجدولة وستصل قبل النفاد | Scheduled, arrives before stockout" if "✅" in badge_text_an else
-                     "⚠️ لديها جدولة — قد تنفد قبل الوصول | Scheduled — may run out before arrival")
-            else:
-                status_an = "🚨 محتاج جدولة الآن | Needs scheduling now"
-            if status_an.startswith("✅"):
-                continue
-            attention_rows_t14.append({
-                "SKU": r_an["sku"], "المخزون | Stock": r_an["stock"],
-                "متوسط يومي | Daily Avg": round(avg_d_an, 2),
-                "أيام النفاد المتوقعة | Days to Stockout": days_to_so_an,
-                "الحالة | Status": status_an,
-            })
-        if attention_rows_t14:
-            attention_rows_t14.sort(key=lambda r: r["أيام النفاد المتوقعة | Days to Stockout"])
-            st.dataframe(pd.DataFrame(attention_rows_t14), use_container_width=True, hide_index=True)
-        else:
-            st.success("✅ لا توجد أصناف محتاجة انتباه حالياً | No items currently need attention")
-
-    st.markdown("---")
-    # ══════════════════════════════════════════════════════════════════
-    # ⬇️ من هنا يبدأ محتوى تاب المبيعات الأصلي كما هو بالضبط — بدون أي حذف أو تعديل
-    # ⬇️ Original Sales tab content starts here — exactly as before, untouched
-    # ══════════════════════════════════════════════════════════════════
     st.subheader("🛒 المبيعات اليومية | Daily Sales")
     st.caption("كل SKU عنده مخزون — مبيعاته اليومية من أمس للوراء بجانب مخزونه ومبيعاته الشهرية وحالة التغطية | All SKUs with inventory — daily sales, stock, monthly sales, and coverage status")
     render_tacweed_upload("sales")
@@ -3338,6 +3138,234 @@ with tab14:
             st.divider()
         # حفظ المرحلين في session_state بعد اكتمال العرض
         st.session_state["transferred_skus_t14"] = _new_transferred
+
+# ══ TAB DASHBOARD — داشبورد تحليلات المبيعات (تاب جديدة منفصلة) ══
+with tab_dash:
+    st.header("📊 داشبورد المبيعات | Sales Dashboard")
+    st.caption("تحليلات موسّعة على بيانات المبيعات مع صور المنتجات — منفصلة تمامًا عن تاب المبيعات الأصلي ولا تؤثر عليه | Extended sales analytics with product images — fully separate from, and does not affect, the original Sales tab")
+
+    if not inv_map:
+        st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
+    else:
+        analysis_period_map_td = {
+            "آخر 7 أيام | Last 7 days": 7,
+            "آخر 15 يوم | Last 15 days": 15,
+            "آخر 30 يوم | Last 30 days": 30,
+            "آخر 60 يوم | Last 60 days": 60,
+            "آخر 90 يوم | Last 90 days": 90,
+        }
+        analysis_period_label_td = st.selectbox(
+            "🗓️ فترة التحليل | Analysis Period",
+            list(analysis_period_map_td.keys()),
+            index=2,
+            key="dash_period_td")
+        analysis_days_td = analysis_period_map_td[analysis_period_label_td]
+
+        today_td  = datetime.now().date()
+        cur_dates_td  = [today_td - timedelta(days=i) for i in range(1, analysis_days_td + 1)]
+        prev_dates_td = [today_td - timedelta(days=i) for i in range(analysis_days_td + 1, analysis_days_td * 2 + 1)]
+
+        cur_counts_td  = build_daily_orders_counts(cur_dates_td)
+        prev_counts_td = build_daily_orders_counts(prev_dates_td)
+
+        def _td_total(counts_map, sku_up, dates):
+            return sum(counts_map.get(sku_up, {}).get(d, 0) for d in dates)
+
+        rows_td = []
+        for sku_up_td, info_td in inv_map.items():
+            cur_t_td  = _td_total(cur_counts_td, sku_up_td, cur_dates_td)
+            prev_t_td = _td_total(prev_counts_td, sku_up_td, prev_dates_td)
+            rows_td.append({
+                "sku_up": sku_up_td, "sku": info_td.get("sku", sku_up_td), "img": info_td.get("img", ""),
+                "cur": cur_t_td, "prev": prev_t_td, "stock": info_td.get("total_stock", 0),
+            })
+
+        total_cur_td  = sum(r["cur"] for r in rows_td)
+        total_prev_td = sum(r["prev"] for r in rows_td)
+        avg_daily_td  = (total_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
+        active_skus_td = sum(1 for r in rows_td if r["cur"] > 0)
+        zero_skus_td   = sum(1 for r in rows_td if r["cur"] == 0)
+        top_row_td = max(rows_td, key=lambda r: r["cur"], default=None)
+        if total_prev_td > 0:
+            growth_td = (total_cur_td - total_prev_td) / total_prev_td * 100
+        else:
+            growth_td = 100.0 if total_cur_td > 0 else 0.0
+
+        # ── كروت رئيسية | Main metric cards ──
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        cc1.metric("📦 إجمالي المبيعات | Total Sales", f"{total_cur_td:,}")
+        cc2.metric("📊 متوسط يومي | Daily Avg", f"{avg_daily_td:,.1f}")
+        cc3.metric("🟢 أصناف نشطة | Active SKUs", f"{active_skus_td:,}")
+        cc4.metric("📈 نمو المبيعات | Growth", f"{growth_td:+.2f}%")
+        st.caption(f"⚪ أصناف بدون مبيعات خلال الفترة | SKUs with no sales in period: {zero_skus_td:,}")
+
+        # ── كارت أعلى SKU مع صورة | Top SKU card with image ──
+        if top_row_td and top_row_td["cur"] > 0:
+            st.markdown("##### 🔥 أعلى SKU مبيعًا | Top-Selling SKU")
+            ci_top, cinfo_top = st.columns([1, 6])
+            with ci_top:
+                show_img(top_row_td["img"], 90)
+            with cinfo_top:
+                st.markdown(f"**`{top_row_td['sku']}`**")
+                st.markdown(
+                    f"📦 **مبيعات الفترة | Period Sales:** {top_row_td['cur']:,} &nbsp;|&nbsp; "
+                    f"📊 **متوسط يومي | Daily Avg:** {(top_row_td['cur']/analysis_days_td):,.1f} &nbsp;|&nbsp; "
+                    f"📦 **مخزون | Stock:** {top_row_td['stock']:,}")
+
+        st.divider()
+
+        # ── رسم بياني لاتجاه المبيعات | Sales trend chart ──
+        cur_dates_sorted_td = sorted(cur_dates_td)
+        daily_totals_td = {
+            d: sum(cur_counts_td.get(r["sku_up"], {}).get(d, 0) for r in rows_td)
+            for d in cur_dates_sorted_td
+        }
+        chart_df_td = pd.DataFrame({
+            "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_td],
+            "المبيعات | Sales": [daily_totals_td.get(d, 0) for d in cur_dates_sorted_td],
+        }).set_index("التاريخ | Date")
+        st.markdown("##### 📉 اتجاه المبيعات | Sales Trend")
+        st.line_chart(chart_df_td)
+
+        growth_icon_td = "📈" if growth_td >= 0 else "📉"
+        growth_word_td = "نمو | Growth" if growth_td >= 0 else "انخفاض | Decline"
+        st.markdown(
+            f"{growth_icon_td} **{growth_word_td}:** {growth_td:+.2f}% "
+            f"&nbsp;|&nbsp; الفترة الحالية | Current = **{total_cur_td:,}** "
+            f"&nbsp;|&nbsp; الفترة السابقة | Previous = **{total_prev_td:,}**")
+
+        st.divider()
+
+        # ── أعلى 10 أصناف مبيعًا (مع صور) | Top 10 best sellers (with images) ──
+        st.markdown("### 🔥 أعلى 10 أصناف مبيعًا | Top 10 Best Sellers")
+        top10_td = sorted([r for r in rows_td if r["cur"] > 0], key=lambda r: -r["cur"])[:10]
+        if top10_td:
+            df_top10_td = pd.DataFrame([{
+                "الترتيب | #": i + 1, "SKU": r["sku"], "المبيعات | Sales": r["cur"],
+                "متوسط يومي | Daily Avg": round(r["cur"] / analysis_days_td, 2), "المخزون | Stock": r["stock"],
+            } for i, r in enumerate(top10_td)])
+            dl_btn(df_top10_td, "top_sellers", key="dl_top10_td")
+            for i, r in enumerate(top10_td):
+                ci_t, cinfo_t = st.columns([1, 6])
+                with ci_t:
+                    show_img(r["img"], 70)
+                with cinfo_t:
+                    st.markdown(f"**#{i+1} — `{r['sku']}`**")
+                    st.markdown(
+                        f"📦 مبيعات | Sales: **{r['cur']:,}** &nbsp;|&nbsp; "
+                        f"📊 يومي | Daily: **{r['cur']/analysis_days_td:.1f}** &nbsp;|&nbsp; "
+                        f"📦 مخزون | Stock: **{r['stock']:,}**")
+                st.divider()
+        else:
+            st.caption("لا توجد بيانات مبيعات كافية | Not enough sales data")
+
+        # ── الأصناف البطيئة (مع صور) | Slow moving items (with images) ──
+        st.markdown("### 🐌 الأصناف البطيئة | Slow Moving (Bottom 10)")
+        slow10_td = sorted(rows_td, key=lambda r: r["cur"])[:10]
+        if slow10_td:
+            df_slow10_td = pd.DataFrame([{
+                "SKU": r["sku"], "المبيعات | Sales": r["cur"],
+                "متوسط يومي | Daily Avg": round(r["cur"] / analysis_days_td, 2), "المخزون | Stock": r["stock"],
+            } for r in slow10_td])
+            dl_btn(df_slow10_td, "slow_movers", key="dl_slow10_td")
+            for r in slow10_td:
+                ci_s, cinfo_s = st.columns([1, 6])
+                with ci_s:
+                    show_img(r["img"], 70)
+                with cinfo_s:
+                    st.markdown(f"**`{r['sku']}`**")
+                    st.markdown(
+                        f"📦 مبيعات | Sales: **{r['cur']:,}** &nbsp;|&nbsp; "
+                        f"📊 يومي | Daily: **{r['cur']/analysis_days_td:.1f}** &nbsp;|&nbsp; "
+                        f"📦 مخزون | Stock: **{r['stock']:,}**")
+                st.divider()
+
+        # ── تحليل اتجاه SKU فردي (مع صورة) | Per-SKU trend (with image) ──
+        st.markdown("### 🔎 تحليل اتجاه SKU | SKU Trend Analysis")
+        sku_options_td = sorted({r["sku"] for r in rows_td})
+        selected_sku_td = st.selectbox("اختر SKU للتحليل | Select SKU", ["—"] + sku_options_td, key="dash_sku_td")
+        if selected_sku_td and selected_sku_td != "—":
+            sel_row_td = next((r for r in rows_td if r["sku"] == selected_sku_td), None)
+            if sel_row_td:
+                sel_daily_td = {d: cur_counts_td.get(sel_row_td["sku_up"], {}).get(d, 0) for d in cur_dates_sorted_td}
+                sel_cur_td, sel_prev_td = sel_row_td["cur"], sel_row_td["prev"]
+                sel_avg_td = (sel_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
+                if sel_prev_td > 0:
+                    sel_growth_td = (sel_cur_td - sel_prev_td) / sel_prev_td * 100
+                else:
+                    sel_growth_td = 100.0 if sel_cur_td > 0 else 0.0
+                max_day_td = max(sel_daily_td.items(), key=lambda x: x[1], default=(None, 0))
+                min_day_td = min(sel_daily_td.items(), key=lambda x: x[1], default=(None, 0))
+
+                ci_sel, cinfo_sel = st.columns([1, 6])
+                with ci_sel:
+                    show_img(sel_row_td["img"], 90)
+                with cinfo_sel:
+                    st.markdown(f"**`{sel_row_td['sku']}`** &nbsp;|&nbsp; 📦 مخزون | Stock: **{sel_row_td['stock']:,}**")
+
+                m1_td, m2_td, m3_td = st.columns(3)
+                m1_td.metric("مبيعات الفترة | Period Sales", f"{sel_cur_td:,}")
+                m2_td.metric("متوسط يومي | Daily Avg", f"{sel_avg_td:,.1f}")
+                m3_td.metric("النمو | Growth", f"{sel_growth_td:+.2f}%")
+                st.caption(f"مبيعات الفترة السابقة | Previous period sales: **{sel_prev_td:,}**")
+                m4_td, m5_td = st.columns(2)
+                with m4_td:
+                    st.markdown(f"📈 **أعلى يوم مبيعات | Best Day:** "
+                                f"{max_day_td[0].strftime('%Y-%m-%d') if max_day_td[0] else '—'} ({max_day_td[1]})")
+                with m5_td:
+                    st.markdown(f"📉 **أقل يوم مبيعات | Worst Day:** "
+                                f"{min_day_td[0].strftime('%Y-%m-%d') if min_day_td[0] else '—'} ({min_day_td[1]})")
+                sku_chart_df_td = pd.DataFrame({
+                    "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_td],
+                    "المبيعات | Sales": [sel_daily_td.get(d, 0) for d in cur_dates_sorted_td],
+                }).set_index("التاريخ | Date")
+                st.line_chart(sku_chart_df_td)
+
+        st.divider()
+
+        # ── أصناف تحتاج انتباه (مع صور) | Needs-attention (with images) ──
+        # يستخدم الدوال الأصلية بدون تعديل أي منطق حساب مخزون/نفاد
+        # Reuses existing helper functions — does not alter any stock/stockout logic
+        st.markdown("### 🚨 أصناف تحتاج انتباه | Needs Attention")
+        delay_days_td = int(load_settings().get("schedule_delay_days", "3") or 3)
+        attention_rows_td = []
+        for r_td in rows_td:
+            avg_d_td = (r_td["cur"] / analysis_days_td) if analysis_days_td > 0 else 0
+            if avg_d_td <= 0:
+                continue
+            days_to_so_td = round(r_td["stock"] / avg_d_td) if avg_d_td > 0 else 9999
+            if days_to_so_td > 10:
+                continue
+            badge_text_td, badge_color_td, sched_td = schedule_coverage_badge(r_td["sku"], days_to_so_td, delay_days_td)
+            if "✅" in badge_text_td:
+                continue
+            status_td = ("⚠️ لديها جدولة — قد تنفد قبل الوصول | Scheduled — may run out before arrival"
+                         if sched_td else "🚨 محتاج جدولة الآن | Needs scheduling now")
+            attention_rows_td.append({**r_td, "days_to_so": days_to_so_td, "avg_d": avg_d_td, "status": status_td})
+
+        if attention_rows_td:
+            attention_rows_td.sort(key=lambda r: r["days_to_so"])
+            df_att_td = pd.DataFrame([{
+                "SKU": r["sku"], "المخزون | Stock": r["stock"],
+                "متوسط يومي | Daily Avg": round(r["avg_d"], 2),
+                "أيام النفاد المتوقعة | Days to Stockout": r["days_to_so"],
+                "الحالة | Status": r["status"],
+            } for r in attention_rows_td])
+            dl_btn(df_att_td, "needs_attention", key="dl_attention_td")
+            for r in attention_rows_td:
+                ci_a, cinfo_a = st.columns([1, 6])
+                with ci_a:
+                    show_img(r["img"], 70)
+                with cinfo_a:
+                    st.markdown(f"**`{r['sku']}`**")
+                    st.markdown(
+                        f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
+                        f"📊 يومي | Daily Avg: **{r['avg_d']:.1f}** &nbsp;|&nbsp; "
+                        f"⏳ نفاد خلال | Stockout in: **{r['days_to_so']}** يوم")
+                    st.markdown(r["status"])
+                st.divider()
+        else:
+            st.success("✅ لا توجد أصناف محتاجة انتباه حالياً | No items currently need attention")
 
 # ══ TAB 15 — تحليل الجدولة ══
 with tab15:
