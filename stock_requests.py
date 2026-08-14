@@ -3167,17 +3167,36 @@ with tab_dash:
 
         cur_counts_td  = build_daily_orders_counts(cur_dates_td)
         prev_counts_td = build_daily_orders_counts(prev_dates_td)
+        cur_prices_td  = build_daily_orders_prices(cur_dates_td)
+        prev_prices_td = build_daily_orders_prices(prev_dates_td)
 
         def _td_total(counts_map, sku_up, dates):
             return sum(counts_map.get(sku_up, {}).get(d, 0) for d in dates)
+
+        def _td_parse_price(p):
+            try:
+                return float(str(p).replace(",", "").strip())
+            except Exception:
+                return 0.0
+
+        def _td_revenue_total(prices_map, sku_up, dates):
+            total = 0.0
+            for d in dates:
+                for p, qty in prices_map.get(sku_up, {}).get(d, []):
+                    if p and str(p).strip().lower() not in ("", "nan", "none"):
+                        total += _td_parse_price(p) * qty
+            return total
 
         rows_td = []
         for sku_up_td, info_td in inv_map.items():
             cur_t_td  = _td_total(cur_counts_td, sku_up_td, cur_dates_td)
             prev_t_td = _td_total(prev_counts_td, sku_up_td, prev_dates_td)
+            cur_rev_td  = _td_revenue_total(cur_prices_td, sku_up_td, cur_dates_td)
+            prev_rev_td = _td_revenue_total(prev_prices_td, sku_up_td, prev_dates_td)
             rows_td.append({
                 "sku_up": sku_up_td, "sku": info_td.get("sku", sku_up_td), "img": info_td.get("img", ""),
                 "cur": cur_t_td, "prev": prev_t_td, "stock": info_td.get("total_stock", 0),
+                "cur_rev": cur_rev_td, "prev_rev": prev_rev_td,
             })
 
         total_cur_td  = sum(r["cur"] for r in rows_td)
@@ -3191,12 +3210,28 @@ with tab_dash:
         else:
             growth_td = 100.0 if total_cur_td > 0 else 0.0
 
+        total_cur_rev_td  = sum(r["cur_rev"] for r in rows_td)
+        total_prev_rev_td = sum(r["prev_rev"] for r in rows_td)
+        avg_daily_rev_td  = (total_cur_rev_td / analysis_days_td) if analysis_days_td > 0 else 0
+        if total_prev_rev_td > 0:
+            growth_rev_td = (total_cur_rev_td - total_prev_rev_td) / total_prev_rev_td * 100
+        else:
+            growth_rev_td = 100.0 if total_cur_rev_td > 0 else 0.0
+
         # ── كروت رئيسية | Main metric cards ──
         cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric("📦 إجمالي المبيعات | Total Sales", f"{total_cur_td:,}")
-        cc2.metric("📊 متوسط يومي | Daily Avg", f"{avg_daily_td:,.1f}")
+        cc1.metric("📦 إجمالي المبيعات | Total Sales (Orders)", f"{total_cur_td:,}")
+        cc2.metric("📊 متوسط يومي | Daily Avg (Orders)", f"{avg_daily_td:,.1f}")
         cc3.metric("🟢 أصناف نشطة | Active SKUs", f"{active_skus_td:,}")
-        cc4.metric("📈 نمو المبيعات | Growth", f"{growth_td:+.2f}%")
+        cc4.metric("📈 نمو المبيعات | Growth (Orders)", f"{growth_td:+.2f}%")
+
+        cr1, cr2, cr3 = st.columns(3)
+        cr1.metric("💰 إجمالي الإيرادات | Total Revenue", f"{total_cur_rev_td:,.0f} ريال")
+        cr2.metric("💵 متوسط الإيراد اليومي | Daily Avg Revenue", f"{avg_daily_rev_td:,.0f} ريال")
+        cr3.metric("📈 نمو الإيرادات | Revenue Growth", f"{growth_rev_td:+.2f}%")
+        if total_cur_rev_td == 0:
+            st.caption("ℹ️ لا توجد أسعار مسجلة لهذه الفترة في شيت الطلبات — الإيراد بيتحسب فقط من الصفوف اللي فيها سعر | No prices recorded for this period — revenue is computed only from rows that include a price")
+
         st.caption(f"⚪ أصناف بدون مبيعات خلال الفترة | SKUs with no sales in period: {zero_skus_td:,}")
 
         # ── كارت أعلى SKU مع صورة | Top SKU card with image ──
@@ -3211,6 +3246,7 @@ with tab_dash:
                     f"📦 **مبيعات الفترة | Period Sales:** {top_row_td['cur']:,} &nbsp;|&nbsp; "
                     f"📊 **متوسط يومي | Daily Avg:** {(top_row_td['cur']/analysis_days_td):,.1f} &nbsp;|&nbsp; "
                     f"📦 **مخزون | Stock:** {top_row_td['stock']:,}")
+                st.markdown(f"💰 **إيراد الفترة | Period Revenue:** {top_row_td['cur_rev']:,.0f} ريال")
 
         st.divider()
 
@@ -3230,9 +3266,15 @@ with tab_dash:
         growth_icon_td = "📈" if growth_td >= 0 else "📉"
         growth_word_td = "نمو | Growth" if growth_td >= 0 else "انخفاض | Decline"
         st.markdown(
-            f"{growth_icon_td} **{growth_word_td}:** {growth_td:+.2f}% "
-            f"&nbsp;|&nbsp; الفترة الحالية | Current = **{total_cur_td:,}** "
-            f"&nbsp;|&nbsp; الفترة السابقة | Previous = **{total_prev_td:,}**")
+            f"{growth_icon_td} **{growth_word_td} (عدد الطلبات | Orders):** {growth_td:+.2f}% "
+            f"&nbsp;|&nbsp; الحالية | Current = **{total_cur_td:,}** "
+            f"&nbsp;|&nbsp; السابقة | Previous = **{total_prev_td:,}**")
+        growth_rev_icon_td = "📈" if growth_rev_td >= 0 else "📉"
+        growth_rev_word_td = "نمو | Growth" if growth_rev_td >= 0 else "انخفاض | Decline"
+        st.markdown(
+            f"{growth_rev_icon_td} **{growth_rev_word_td} (الإيراد | Revenue):** {growth_rev_td:+.2f}% "
+            f"&nbsp;|&nbsp; الحالية | Current = **{total_cur_rev_td:,.0f} ريال** "
+            f"&nbsp;|&nbsp; السابقة | Previous = **{total_prev_rev_td:,.0f} ريال**")
 
         st.divider()
 
@@ -3243,6 +3285,7 @@ with tab_dash:
             df_top10_td = pd.DataFrame([{
                 "الترتيب | #": i + 1, "SKU": r["sku"], "المبيعات | Sales": r["cur"],
                 "متوسط يومي | Daily Avg": round(r["cur"] / analysis_days_td, 2), "المخزون | Stock": r["stock"],
+                "الإيراد | Revenue (ريال)": round(r["cur_rev"], 2),
             } for i, r in enumerate(top10_td)])
             dl_btn(df_top10_td, "top_sellers", key="dl_top10_td")
             for i, r in enumerate(top10_td):
@@ -3254,7 +3297,8 @@ with tab_dash:
                     st.markdown(
                         f"📦 مبيعات | Sales: **{r['cur']:,}** &nbsp;|&nbsp; "
                         f"📊 يومي | Daily: **{r['cur']/analysis_days_td:.1f}** &nbsp;|&nbsp; "
-                        f"📦 مخزون | Stock: **{r['stock']:,}**")
+                        f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
+                        f"💰 إيراد | Revenue: **{r['cur_rev']:,.0f} ريال**")
                 st.divider()
         else:
             st.caption("لا توجد بيانات مبيعات كافية | Not enough sales data")
@@ -3266,6 +3310,7 @@ with tab_dash:
             df_slow10_td = pd.DataFrame([{
                 "SKU": r["sku"], "المبيعات | Sales": r["cur"],
                 "متوسط يومي | Daily Avg": round(r["cur"] / analysis_days_td, 2), "المخزون | Stock": r["stock"],
+                "الإيراد | Revenue (ريال)": round(r["cur_rev"], 2),
             } for r in slow10_td])
             dl_btn(df_slow10_td, "slow_movers", key="dl_slow10_td")
             for r in slow10_td:
@@ -3277,7 +3322,8 @@ with tab_dash:
                     st.markdown(
                         f"📦 مبيعات | Sales: **{r['cur']:,}** &nbsp;|&nbsp; "
                         f"📊 يومي | Daily: **{r['cur']/analysis_days_td:.1f}** &nbsp;|&nbsp; "
-                        f"📦 مخزون | Stock: **{r['stock']:,}**")
+                        f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
+                        f"💰 إيراد | Revenue: **{r['cur_rev']:,.0f} ريال**")
                 st.divider()
 
         # ── تحليل اتجاه SKU فردي (مع صورة) | Per-SKU trend (with image) ──
@@ -3289,11 +3335,16 @@ with tab_dash:
             if sel_row_td:
                 sel_daily_td = {d: cur_counts_td.get(sel_row_td["sku_up"], {}).get(d, 0) for d in cur_dates_sorted_td}
                 sel_cur_td, sel_prev_td = sel_row_td["cur"], sel_row_td["prev"]
+                sel_cur_rev_td, sel_prev_rev_td = sel_row_td["cur_rev"], sel_row_td["prev_rev"]
                 sel_avg_td = (sel_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
                 if sel_prev_td > 0:
                     sel_growth_td = (sel_cur_td - sel_prev_td) / sel_prev_td * 100
                 else:
                     sel_growth_td = 100.0 if sel_cur_td > 0 else 0.0
+                if sel_prev_rev_td > 0:
+                    sel_growth_rev_td = (sel_cur_rev_td - sel_prev_rev_td) / sel_prev_rev_td * 100
+                else:
+                    sel_growth_rev_td = 100.0 if sel_cur_rev_td > 0 else 0.0
                 max_day_td = max(sel_daily_td.items(), key=lambda x: x[1], default=(None, 0))
                 min_day_td = min(sel_daily_td.items(), key=lambda x: x[1], default=(None, 0))
 
@@ -3308,6 +3359,13 @@ with tab_dash:
                 m2_td.metric("متوسط يومي | Daily Avg", f"{sel_avg_td:,.1f}")
                 m3_td.metric("النمو | Growth", f"{sel_growth_td:+.2f}%")
                 st.caption(f"مبيعات الفترة السابقة | Previous period sales: **{sel_prev_td:,}**")
+
+                mr1_td, mr2_td, mr3_td = st.columns(3)
+                mr1_td.metric("إيراد الفترة | Period Revenue", f"{sel_cur_rev_td:,.0f} ريال")
+                mr2_td.metric("متوسط إيراد يومي | Daily Avg Revenue", f"{(sel_cur_rev_td/analysis_days_td if analysis_days_td>0 else 0):,.0f} ريال")
+                mr3_td.metric("نمو الإيراد | Revenue Growth", f"{sel_growth_rev_td:+.2f}%")
+                st.caption(f"إيراد الفترة السابقة | Previous period revenue: **{sel_prev_rev_td:,.0f} ريال**")
+
                 m4_td, m5_td = st.columns(2)
                 with m4_td:
                     st.markdown(f"📈 **أعلى يوم مبيعات | Best Day:** "
