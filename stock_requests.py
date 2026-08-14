@@ -44,7 +44,7 @@ TABS_CONFIG = {
     "Rescheduled":       ["ASN","SKU","Quantity","Old Schedule Date","Image URL","Date Added","Reschedule Reason","Date Moved"],
     "Expired":           ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Date Expired"],
     "Inventory":         ["SKU","Warehouse","Stock","Monthly Sales","Image URL","Date Uploaded"],
-    "DailyOrders":       ["SKU","Order Timestamp","Status","Price","Quantity","Date Uploaded"],
+    "DailyOrders":       ["SKU","Order Timestamp","Status","Price","Quantity","Date Uploaded","Family"],
     "Settings":          ["Key","Value"],
     "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelNotifications": ["ASN","SKUs","Schedule Date","Reason","Timestamp"],
@@ -956,6 +956,98 @@ def build_daily_orders_prices(dates):
                 prices[sku_up] = {dd: [] for dd in dates}
             prices[sku_up][d.date()].append((price_val, qty_val))
     return prices
+
+# ══ الأقسام | Departments (عمود Family في DailyOrders — اختياري، لو مش موجود الكود بيكمل عادي) ══
+FAMILY_HOME_GROUP = {"kitchen_dining", "home_improvement", "gardening", "home_decor", "furniture", "bedding"}
+FAMILY_LABELS = {
+    # لو عايز تضيف أقسام تانية معروفة، ضيفها هنا: "raw_family_value": "🔖 الاسم بالعربي | Name in English"
+    "electronics": "⚡ إلكترونيات | Electronics",
+    "fashion": "👗 موضة | Fashion",
+    "beauty": "💄 جمال | Beauty",
+    "toys": "🧸 ألعاب | Toys",
+    "baby": "👶 مستلزمات أطفال | Baby",
+    "sports": "🏀 رياضة | Sports",
+    "grocery": "🛒 بقالة | Grocery",
+    "automotive": "🚗 سيارات | Automotive",
+    "books": "📚 كتب | Books",
+    "pet_supplies": "🐾 مستلزمات حيوانات | Pet Supplies",
+    "office": "🖊️ مستلزمات مكتبية | Office",
+    "health": "💊 صحة | Health",
+}
+
+def family_display_name(raw_family):
+    """يحوّل قيمة عمود Family الخام لاسم قسم عربي/إنجليزي — يجمع أقسام المنزل تحت 'الهوم' واحدة."""
+    key = str(raw_family).strip().lower().replace(" ", "_")
+    if not key or key in ("nan", "none"):
+        return None
+    if key in FAMILY_HOME_GROUP:
+        return "🏠 الهوم | Home"
+    if key in FAMILY_LABELS:
+        return FAMILY_LABELS[key]
+    return f"📦 {str(raw_family).strip().replace('_',' ').title()}"
+
+def build_daily_orders_family_stats(dates):
+    """يرجع dict: اسم القسم -> {"orders": عدد, "revenue": إيراد} لفترة تواريخ محددة.
+    لو عمود Family مش موجود في الشيت، أو الصف مالوش قيمة Family، بيتجاهله بهدوء
+    بدون ما يوقف الكود أو يأثر على أي تحليل تاني."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    stats = {}
+    if len(data) <= 1:
+        return stats
+    hdr = data[0] if data else []
+    family_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("family", "القسم", "قسم", "department", "category"):
+            family_col_idx = ci; break
+    if family_col_idx is None:
+        return stats
+    price_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price"):
+            price_col_idx = ci; break
+    qty_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("quantity","qty","كمية","الكمية","count"):
+            qty_col_idx = ci; break
+    for row in data[1:]:
+        while len(row) <= family_col_idx:
+            row.append("")
+        sku = row[0].strip() if len(row) > 0 else ""
+        ts  = row[1].strip() if len(row) > 1 else ""
+        if not sku or not ts:
+            continue
+        d = parse_excel_date(ts)
+        if not d or d.date() not in dates_set:
+            continue
+        fam_raw = row[family_col_idx].strip() if len(row) > family_col_idx else ""
+        if not fam_raw or fam_raw.lower() in ("nan", "none"):
+            continue  # لا يوجد قسم لهذا الصف — يتجاهل من تحليل الأقسام فقط
+        dept_name = family_display_name(fam_raw)
+        if not dept_name:
+            continue
+        price_val = ""
+        if price_col_idx is not None and len(row) > price_col_idx:
+            price_val = str(row[price_col_idx]).strip()
+        qty_val = 1
+        if qty_col_idx is not None and len(row) > qty_col_idx:
+            try:
+                qty_val = int(float(str(row[qty_col_idx]).strip()))
+            except Exception:
+                qty_val = 1
+        if qty_val < 1:
+            qty_val = 1
+        rev_val = 0.0
+        if price_val and price_val.lower() not in ("", "nan", "none"):
+            try:
+                rev_val = float(price_val.replace(",", "")) * qty_val
+            except Exception:
+                rev_val = 0.0
+        if dept_name not in stats:
+            stats[dept_name] = {"orders": 0, "revenue": 0.0}
+        stats[dept_name]["orders"]  += 1
+        stats[dept_name]["revenue"] += rev_val
+    return stats
 
 def is_sku_only_in_excluded_warehouses(sku_up, excluded_wh):
     """يتحقق هل كل مستودعات هذا الـ SKU (في ملف المخزون) هي مستودعات مستثناة فقط —
@@ -3275,6 +3367,26 @@ with tab_dash:
             f"{growth_rev_icon_td} **{growth_rev_word_td} (الإيراد | Revenue):** {growth_rev_td:+.2f}% "
             f"&nbsp;|&nbsp; الحالية | Current = **{total_cur_rev_td:,.0f} ريال** "
             f"&nbsp;|&nbsp; السابقة | Previous = **{total_prev_rev_td:,.0f} ريال**")
+
+        st.divider()
+
+        # ── المبيعات حسب القسم (فلوس وعدد) | Sales by Department (revenue & orders) ──
+        # بيعتمد على عمود Family (اختياري) في شيت DailyOrders — لو مش موجود أو الصف مالوش
+        # قيمة، الكود بيكمل عادي من غير ما يوقف وبيتجاهل هذا الصف من تحليل الأقسام بس
+        st.markdown("### 📂 المبيعات حسب القسم | Sales by Department")
+        dept_stats_td = build_daily_orders_family_stats(cur_dates_td)
+        if not dept_stats_td:
+            st.caption("لا توجد بيانات أقسام (عمود Family) لهذه الفترة — العمود اختياري ولا يؤثر على باقي التحليلات | No department (Family) data for this period — the column is optional and does not affect other analytics")
+        else:
+            dept_sorted_td = sorted(dept_stats_td.items(), key=lambda x: -x[1]["revenue"])
+            df_dept_td = pd.DataFrame([{
+                "القسم | Department": dept,
+                "عدد الطلبات | Orders": v["orders"],
+                "الإيراد | Revenue (ريال)": round(v["revenue"], 2),
+            } for dept, v in dept_sorted_td])
+            dl_btn(df_dept_td, "sales_by_department", key="dl_dept_td")
+            st.dataframe(df_dept_td, use_container_width=True, hide_index=True)
+            st.bar_chart(df_dept_td.set_index("القسم | Department")[["الإيراد | Revenue (ريال)"]])
 
         st.divider()
 
