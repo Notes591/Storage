@@ -3215,6 +3215,32 @@ with tab14:
                     latest_price_t14 = get_latest_sku_price(r, sales_dates)
                     if latest_price_t14 is not None:
                         net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
+
+                        # ── هل الإعلان مربح ولا بيخسّرنا؟ (تكلفة الطلب من الإعلان مقابل صافي الربح بعد
+                        #    العمولة والتوصيل والضريبة) — رسالة قصيرة تلفت النظر تحت الأرقام ──
+                        ad_insight_t14 = ""
+                        if ads_entries_t14 and total_orders_t14 > 0:
+                            cpa_t14 = total_spends_t14 / total_orders_t14
+                            diff_t14 = net_tax_t14 - cpa_t14
+                            if diff_t14 >= 0:
+                                ad_insight_t14 = (
+                                    '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#052e1655;'
+                                    'border:1px solid #16a34a;border-radius:7px;">'
+                                    f'<span style="color:#4ade80;font-size:13px;font-weight:800;">🎯 الإعلان مربح: '
+                                    f'تكلفة الطلب من الإعلان {cpa_t14:,.2f} ريال، وصافي ربحك {net_tax_t14:,.2f} ريال — '
+                                    f'يعني لسه فاضل معاك <u>{diff_t14:,.2f} ريال</u> ربح صافي في كل طلب جاي من الإعلان 👌</span>'
+                                    '</div>')
+                            else:
+                                loss_t14 = -diff_t14
+                                ad_insight_t14 = (
+                                    '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
+                                    'border:1px solid #dc2626;border-radius:7px;">'
+                                    f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 الإعلان بيخسّرك: '
+                                    f'تكلفة الطلب من الإعلان {cpa_t14:,.2f} ريال أعلى من صافي ربحك {net_tax_t14:,.2f} ريال — '
+                                    f'يعني كل طلب جاي من الإعلان ده بيكلفك تقريباً <u>{loss_t14:,.2f} ريال خسارة</u>. '
+                                    'يستاهل تفتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
+                                    '</div>')
+
                         st.markdown(
                             f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
                             f'padding:8px 14px;margin:4px 0;">'
@@ -3223,6 +3249,7 @@ with tab14:
                             f'&nbsp;|&nbsp; 🏷️ عمولة: <b>{com_info_t14["commission_pct"]:,.0f}%</b></span><br>'
                             f'<span style="color:#4ade80;font-size:14px;font-weight:bold;">💳 الصافي بعد خصم العمولة والتوصيل: {net_fees_t14:,.2f} ريال</span><br>'
                             f'<span style="color:#fbbf24;font-size:14px;font-weight:bold;">🧾 الصافي بعد خصم 15% ضريبة: {net_tax_t14:,.2f} ريال</span>'
+                            f'{ad_insight_t14}'
                             f'</div>',
                             unsafe_allow_html=True)
                     else:
