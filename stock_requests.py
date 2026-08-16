@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-import streamlit.components.v1 as components
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
@@ -1601,78 +1600,25 @@ tabs = st.tabs([
 ])
 (tab14,tab_dash,tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab15,tab16) = tabs
 
-# ══════════════════════════════════════════════
-# ══ قائمة جانبية بدل شريط التابات الأفقي | Sidebar navigation instead of the horizontal tab bar ══
-# ── التابات الأصلية (st.tabs) فوق فضلت زي ما هي بالظبط — كل منطق كل تاب شغال زي الأول من
-#    غير أي تعديل. إحنا بس مخفيين الشريط الأفقي بتاعها، وحاطين قائمة في الشريط الجانبي بدل
-#    منه، وبنضغط تلقائياً على التاب المطابق (بجافاسكريبت) لما تختار حاجة من القائمة الجانبية.
-#    | The original st.tabs above are untouched — every tab's logic still runs exactly as
-#    before. We just hide their horizontal bar and drive selection from a sidebar menu that
-#    programmatically clicks the matching native tab. ══
-# ══════════════════════════════════════════════
+# ── تحسينات بسيطة لشكل شريط التابات الأصلي (مسافات، حواف مدوّرة، خط أوضح للتاب النشط) ──
 st.markdown("""
 <style>
-/* إخفاء شريط التابات الأفقي الأصلي — استخدمنا القائمة الجانبية بدل منه */
-div[data-baseweb="tab-list"] { display: none !important; }
-section[data-testid="stSidebar"] .stButton button {
-    width: 100%; direction: rtl; text-align: right; justify-content: flex-start;
-    border-radius: 8px; margin-bottom: 3px; font-size: 14px; padding: 8px 14px;
+div[data-baseweb="tab-list"] {
+    gap: 4px;
+    flex-wrap: wrap;
+    border-bottom: 1px solid rgba(150,150,150,0.25);
+}
+div[data-baseweb="tab-list"] button[data-baseweb="tab"] {
+    border-radius: 8px 8px 0 0;
+    padding: 8px 14px;
+    font-size: 14px;
+}
+div[data-baseweb="tab-list"] button[data-baseweb="tab"][aria-selected="true"] {
+    font-weight: 700;
+    border-bottom: 3px solid #ef4444;
 }
 </style>
 """, unsafe_allow_html=True)
-
-_NAV_LABELS = [
-    "🛒 المبيعات | Sales",
-    "📊 داشبورد المبيعات | Sales Dashboard",
-    "📋 الطلبات | Requests",
-    "✅ الموافقة | Approved",
-    "❌ غير متوفر | Unavailable",
-    "🛒 تم الطلب | Ordered",
-    "📅 الجدولة | Scheduled",
-    "☑️ تشييك | Check",
-    "🚫 جدولة ملغية | Cancelled",
-    "🔄 تعديل موعد | Rescheduled",
-    "⚠️ تنبيهات | Alerts",
-    "📊 المخزون | Inventory",
-    "🔴 مراجعة المخزون | Stock Review",
-    "🗂️ منتهية | Expired",
-    "⚙️ الإعدادات | Settings",
-    "📈 مراجعة المبيعات | Sales Review",
-    "🗓️ تحليل الجدولة | Schedule Analysis",
-    "📦 مخزون بدون بيع | No Sales",
-]
-if "active_nav_idx" not in st.session_state:
-    st.session_state["active_nav_idx"] = 0
-
-with st.sidebar:
-    st.markdown("### 📦 القائمة | Menu")
-    for _nav_i, _nav_lbl in enumerate(_NAV_LABELS):
-        _is_active = (_nav_i == st.session_state["active_nav_idx"])
-        if st.button(_nav_lbl, key=f"nav_btn_{_nav_i}",
-                     type=("primary" if _is_active else "secondary")):
-            st.session_state["active_nav_idx"] = _nav_i
-            st.rerun()
-    st.markdown("---")
-
-# نضغط (بجافاسكريبت) على التاب الأصلي المطابق للاختيار في القائمة الجانبية — عشان محتوى
-# التاب المطلوب هو اللي يظهر، بدون ما نغيّر أي حاجة في منطق التابات نفسها
-components.html(f"""
-<script>
-const idx = {st.session_state['active_nav_idx']};
-function clickNavTab(tries) {{
-    const doc = window.parent.document;
-    const tabBtns = doc.querySelectorAll('div[data-baseweb="tab-list"] button[data-baseweb="tab"]');
-    if (tabBtns.length > idx) {{
-        if (tabBtns[idx].getAttribute('aria-selected') !== 'true') {{
-            tabBtns[idx].click();
-        }}
-    }} else if (tries > 0) {{
-        setTimeout(function() {{ clickNavTab(tries - 1); }}, 120);
-    }}
-}}
-clickNavTab(25);
-</script>
-""", height=0)
 
 # ══ TAB 1 — الطلبات ══
 with tab1:
