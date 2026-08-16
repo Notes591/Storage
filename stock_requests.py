@@ -3216,30 +3216,37 @@ with tab14:
                     if latest_price_t14 is not None:
                         net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
 
-                        # ── هل الإعلان مربح ولا بيخسّرنا؟ (تكلفة الطلب من الإعلان مقابل صافي الربح بعد
-                        #    العمولة والتوصيل والضريبة) — رسالة قصيرة تلفت النظر تحت الأرقام ──
+                        # ── فلوس الإعلان دي مفديه ولا لأ؟ | Did the ad spend pay off overall? ──
+                        # مقارنة إجمالية: صافي الربح الكلي من الطلبات اللي جابها الإعلان مقابل
+                        # إجمالي اللي اتصرف على الإعلان — مش مقارنة لكل طلب لوحده
                         ad_insight_t14 = ""
-                        if ads_entries_t14 and total_orders_t14 > 0:
-                            cpa_t14 = total_spends_t14 / total_orders_t14
-                            diff_t14 = net_tax_t14 - cpa_t14
-                            if diff_t14 >= 0:
-                                ad_insight_t14 = (
-                                    '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#052e1655;'
-                                    'border:1px solid #16a34a;border-radius:7px;">'
-                                    f'<span style="color:#4ade80;font-size:13px;font-weight:800;">🎯 الإعلان مربح: '
-                                    f'تكلفة الطلب من الإعلان {cpa_t14:,.2f} ريال، وصافي ربحك {net_tax_t14:,.2f} ريال — '
-                                    f'يعني لسه فاضل معاك <u>{diff_t14:,.2f} ريال</u> ربح صافي في كل طلب جاي من الإعلان 👌</span>'
-                                    '</div>')
-                            else:
-                                loss_t14 = -diff_t14
+                        if ads_entries_t14:
+                            if total_orders_t14 <= 0:
                                 ad_insight_t14 = (
                                     '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
                                     'border:1px solid #dc2626;border-radius:7px;">'
-                                    f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 الإعلان بيخسّرك: '
-                                    f'تكلفة الطلب من الإعلان {cpa_t14:,.2f} ريال أعلى من صافي ربحك {net_tax_t14:,.2f} ريال — '
-                                    f'يعني كل طلب جاي من الإعلان ده بيكلفك تقريباً <u>{loss_t14:,.2f} ريال خسارة</u>. '
-                                    'يستاهل تفتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
+                                    f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 مفدتش لحد دلوقتي: '
+                                    f'اتصرف {total_spends_t14:,.2f} ريال على الإعلان ده ولسه ما جابش أي طلبات فعلية — يستاهل تراجع التفاصيل فوق 👆</span>'
                                     '</div>')
+                            else:
+                                total_net_from_ads_t14 = total_orders_t14 * net_tax_t14
+                                net_result_t14 = total_net_from_ads_t14 - total_spends_t14
+                                if net_result_t14 >= 0:
+                                    ad_insight_t14 = (
+                                        '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#052e1655;'
+                                        'border:1px solid #16a34a;border-radius:7px;">'
+                                        f'<span style="color:#4ade80;font-size:13px;font-weight:800;">🎯 فلوس الإعلان مفديه: '
+                                        f'جاب {total_orders_t14:,.0f} طلب بصافي ربح إجمالي {total_net_from_ads_t14:,.2f} ريال مقابل '
+                                        f'{total_spends_t14:,.2f} ريال اتصرفوا — يعني حقق <u>{net_result_t14:,.2f} ريال ربح صافي</u> فوق تكلفته 👌</span>'
+                                        '</div>')
+                                else:
+                                    ad_insight_t14 = (
+                                        '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
+                                        'border:1px solid #dc2626;border-radius:7px;">'
+                                        f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 فلوس الإعلان مش مفديه: '
+                                        f'اتصرف {total_spends_t14:,.2f} ريال، لكن صافي الربح من {total_orders_t14:,.0f} طلب بس {total_net_from_ads_t14:,.2f} ريال — '
+                                        f'يعني خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. يستاهل تفتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
+                                        '</div>')
 
                         st.markdown(
                             f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
