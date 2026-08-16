@@ -3323,6 +3323,7 @@ with tab_dash:
         avg_daily_td  = (total_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
         active_skus_td = sum(1 for r in rows_td if r["cur"] > 0)
         zero_skus_td   = sum(1 for r in rows_td if r["cur"] == 0)
+        zero_rows_td   = sorted([r for r in rows_td if r["cur"] == 0], key=lambda r: -r["stock"])
         top_row_td = max(rows_td, key=lambda r: r["cur"], default=None)
         if total_prev_td > 0:
             growth_td = (total_cur_td - total_prev_td) / total_prev_td * 100
@@ -3338,10 +3339,14 @@ with tab_dash:
             growth_rev_td = 100.0 if total_cur_rev_td > 0 else 0.0
 
         # ── منتجات انخفضت/ارتفعت مبيعاتها (٪20 فأكثر) | Declining / rising SKUs (20%+) ──
-        decline_rows_td = [r for r in rows_td if r["prev"] > 0 and r["cur"] < r["prev"]
-                            and (r["prev"] - r["cur"]) / r["prev"] >= 0.20]
-        rise_rows_td = [r for r in rows_td if r["prev"] > 0 and r["cur"] > r["prev"]
-                         and (r["cur"] - r["prev"]) / r["prev"] >= 0.20]
+        decline_rows_td = sorted(
+            [r for r in rows_td if r["prev"] > 0 and r["cur"] < r["prev"]
+             and (r["prev"] - r["cur"]) / r["prev"] >= 0.20],
+            key=lambda r: -((r["prev"] - r["cur"]) / r["prev"]))
+        rise_rows_td = sorted(
+            [r for r in rows_td if r["prev"] > 0 and r["cur"] > r["prev"]
+             and (r["cur"] - r["prev"]) / r["prev"] >= 0.20],
+            key=lambda r: -((r["cur"] - r["prev"]) / r["prev"]))
 
         # ── أصناف تحتاج انتباه (معرضة لنفاد المخزون) — محسوبة هنا عشان تُستخدم في
         #    شريط التنبيهات السريعة فوق، وبتتعرض بالتفصيل تحت في قسم "أصناف تحتاج انتباه" ──
@@ -3424,6 +3429,66 @@ with tab_dash:
         with ac4:
             st.markdown(_alert_chip_html("🟢", "#f0fdf4", "#22c55e", "منتجات ارتفعت مبيعاتها",
                         f"{len(rise_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
+
+        # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم ──
+        def _render_alert_sku_row(r, extra_line=""):
+            ci_al, cinfo_al = st.columns([1, 6])
+            with ci_al:
+                show_img(r["img"], 55)
+            with cinfo_al:
+                st.markdown(f"{sku_link_html(r['sku'])}", unsafe_allow_html=True)
+                if extra_line:
+                    st.caption(extra_line)
+
+        with st.expander(f"🔴 عرض منتجات معرضة لنفاد المخزون ({len(attention_rows_td):,}) | Show at-risk SKUs"):
+            if attention_rows_td:
+                df_al1 = pd.DataFrame([{
+                    "SKU": r["sku"], "المخزون | Stock": r["stock"],
+                    "متوسط يومي | Daily Avg": round(r["avg_d"], 2),
+                    "أيام النفاد | Days to Stockout": r["days_to_so"],
+                } for r in attention_rows_td])
+                dl_btn(df_al1, "alert_stockout_risk", key="dl_alert_stockout_td")
+                for r in attention_rows_td:
+                    _render_alert_sku_row(r, f"📦 مخزون: {r['stock']:,} — ⏳ نفاد خلال {r['days_to_so']} يوم")
+            else:
+                st.caption("لا توجد أصناف معرضة لنفاد المخزون حالياً")
+
+        with st.expander(f"🟡 عرض منتجات بدون مبيعات في الفترة ({zero_skus_td:,}) | Show no-sale SKUs"):
+            if zero_rows_td:
+                df_al2 = pd.DataFrame([{
+                    "SKU": r["sku"], "المخزون | Stock": r["stock"], "مبيعات الفترة | Period Sales": r["cur"],
+                } for r in zero_rows_td])
+                dl_btn(df_al2, "alert_no_sales", key="dl_alert_nosale_td")
+                for r in zero_rows_td:
+                    _render_alert_sku_row(r, f"📦 مخزون: {r['stock']:,} — لا يوجد مبيعات خلال {analysis_days_td} يوم")
+            else:
+                st.caption("كل الأصناف باعت خلال الفترة المحددة")
+
+        with st.expander(f"🟠 عرض منتجات انخفضت مبيعاتها ({len(decline_rows_td):,}) | Show declining SKUs"):
+            if decline_rows_td:
+                df_al3 = pd.DataFrame([{
+                    "SKU": r["sku"], "الفترة الحالية | Current": r["cur"], "الفترة السابقة | Previous": r["prev"],
+                    "الانخفاض | Drop %": round((r["prev"] - r["cur"]) / r["prev"] * 100, 1),
+                } for r in decline_rows_td])
+                dl_btn(df_al3, "alert_declining", key="dl_alert_decline_td")
+                for r in decline_rows_td:
+                    drop_pct = (r["prev"] - r["cur"]) / r["prev"] * 100
+                    _render_alert_sku_row(r, f"📉 {r['cur']:,} مقابل {r['prev']:,} (-{drop_pct:.0f}%)")
+            else:
+                st.caption("لا توجد أصناف انخفضت مبيعاتها بنسبة 20%+ حالياً")
+
+        with st.expander(f"🟢 عرض منتجات ارتفعت مبيعاتها ({len(rise_rows_td):,}) | Show rising SKUs"):
+            if rise_rows_td:
+                df_al4 = pd.DataFrame([{
+                    "SKU": r["sku"], "الفترة الحالية | Current": r["cur"], "الفترة السابقة | Previous": r["prev"],
+                    "الارتفاع | Rise %": round((r["cur"] - r["prev"]) / r["prev"] * 100, 1),
+                } for r in rise_rows_td])
+                dl_btn(df_al4, "alert_rising", key="dl_alert_rise_td")
+                for r in rise_rows_td:
+                    rise_pct = (r["cur"] - r["prev"]) / r["prev"] * 100
+                    _render_alert_sku_row(r, f"📈 {r['cur']:,} مقابل {r['prev']:,} (+{rise_pct:.0f}%)")
+            else:
+                st.caption("لا توجد أصناف ارتفعت مبيعاتها بنسبة 20%+ حالياً")
 
         st.write("")
 
