@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
+import streamlit.components.v1 as components
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
@@ -1599,6 +1600,79 @@ tabs = st.tabs([
     "📦 مخزون بدون بيع | No Sales",
 ])
 (tab14,tab_dash,tab1,tab2,tab3,tab4,tab5,tab_check,tab6,tab7,tab8,tab9,tab10,tab11,tab12,tab13,tab15,tab16) = tabs
+
+# ══════════════════════════════════════════════
+# ══ قائمة جانبية بدل شريط التابات الأفقي | Sidebar navigation instead of the horizontal tab bar ══
+# ── التابات الأصلية (st.tabs) فوق فضلت زي ما هي بالظبط — كل منطق كل تاب شغال زي الأول من
+#    غير أي تعديل. إحنا بس مخفيين الشريط الأفقي بتاعها، وحاطين قائمة في الشريط الجانبي بدل
+#    منه، وبنضغط تلقائياً على التاب المطابق (بجافاسكريبت) لما تختار حاجة من القائمة الجانبية.
+#    | The original st.tabs above are untouched — every tab's logic still runs exactly as
+#    before. We just hide their horizontal bar and drive selection from a sidebar menu that
+#    programmatically clicks the matching native tab. ══
+# ══════════════════════════════════════════════
+st.markdown("""
+<style>
+/* إخفاء شريط التابات الأفقي الأصلي — استخدمنا القائمة الجانبية بدل منه */
+div[data-baseweb="tab-list"] { display: none !important; }
+section[data-testid="stSidebar"] .stButton button {
+    width: 100%; direction: rtl; text-align: right; justify-content: flex-start;
+    border-radius: 8px; margin-bottom: 3px; font-size: 14px; padding: 8px 14px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+_NAV_LABELS = [
+    "🛒 المبيعات | Sales",
+    "📊 داشبورد المبيعات | Sales Dashboard",
+    "📋 الطلبات | Requests",
+    "✅ الموافقة | Approved",
+    "❌ غير متوفر | Unavailable",
+    "🛒 تم الطلب | Ordered",
+    "📅 الجدولة | Scheduled",
+    "☑️ تشييك | Check",
+    "🚫 جدولة ملغية | Cancelled",
+    "🔄 تعديل موعد | Rescheduled",
+    "⚠️ تنبيهات | Alerts",
+    "📊 المخزون | Inventory",
+    "🔴 مراجعة المخزون | Stock Review",
+    "🗂️ منتهية | Expired",
+    "⚙️ الإعدادات | Settings",
+    "📈 مراجعة المبيعات | Sales Review",
+    "🗓️ تحليل الجدولة | Schedule Analysis",
+    "📦 مخزون بدون بيع | No Sales",
+]
+if "active_nav_idx" not in st.session_state:
+    st.session_state["active_nav_idx"] = 0
+
+with st.sidebar:
+    st.markdown("### 📦 القائمة | Menu")
+    for _nav_i, _nav_lbl in enumerate(_NAV_LABELS):
+        _is_active = (_nav_i == st.session_state["active_nav_idx"])
+        if st.button(_nav_lbl, key=f"nav_btn_{_nav_i}",
+                     type=("primary" if _is_active else "secondary")):
+            st.session_state["active_nav_idx"] = _nav_i
+            st.rerun()
+    st.markdown("---")
+
+# نضغط (بجافاسكريبت) على التاب الأصلي المطابق للاختيار في القائمة الجانبية — عشان محتوى
+# التاب المطلوب هو اللي يظهر، بدون ما نغيّر أي حاجة في منطق التابات نفسها
+components.html(f"""
+<script>
+const idx = {st.session_state['active_nav_idx']};
+function clickNavTab(tries) {{
+    const doc = window.parent.document;
+    const tabBtns = doc.querySelectorAll('div[data-baseweb="tab-list"] button[data-baseweb="tab"]');
+    if (tabBtns.length > idx) {{
+        if (tabBtns[idx].getAttribute('aria-selected') !== 'true') {{
+            tabBtns[idx].click();
+        }}
+    }} else if (tries > 0) {{
+        setTimeout(function() {{ clickNavTab(tries - 1); }}, 120);
+    }}
+}}
+clickNavTab(25);
+</script>
+""", height=0)
 
 # ══ TAB 1 — الطلبات ══
 with tab1:
@@ -3613,6 +3687,33 @@ with tab_dash:
 
         st.write("")
 
+        # ── ربحية الإعلانات لكل SKU (نفس منطق تاب المبيعات: صافي الربح الكلي من طلبات الإعلان
+        #    مقابل إجمالي المصروف عليه) — عشان تظهر في التنبيهات السريعة تحت ──
+        ads_map_dash = get_ads_map()
+        com_map_dash = get_com_map()
+        ads_profit_rows_td, ads_loss_rows_td = [], []
+        for r_ad in rows_td:
+            ads_entries_ad = ads_map_dash.get(r_ad["sku_up"])
+            com_info_ad = com_map_dash.get(r_ad["sku_up"])
+            if not ads_entries_ad or not com_info_ad:
+                continue
+            latest_price_ad = get_latest_sku_price(r_ad, sales_dates)
+            if latest_price_ad is None:
+                continue
+            _, net_tax_ad = compute_net_price_after_fees(latest_price_ad, com_info_ad)
+            total_spends_ad = sum(a["spends"] for a in ads_entries_ad)
+            total_orders_ad = sum(a["orders"] for a in ads_entries_ad)
+            total_net_ad = total_orders_ad * net_tax_ad
+            result_ad = total_net_ad - total_spends_ad
+            entry_ad = {**r_ad, "spends": total_spends_ad, "orders": total_orders_ad,
+                        "net_total": total_net_ad, "result": result_ad}
+            if total_orders_ad <= 0 or result_ad < 0:
+                ads_loss_rows_td.append(entry_ad)
+            else:
+                ads_profit_rows_td.append(entry_ad)
+        ads_profit_rows_td.sort(key=lambda r: -r["result"])
+        ads_loss_rows_td.sort(key=lambda r: r["result"])  # الأكثر خسارة أولاً
+
         # ── التنبيهات السريعة | Quick alerts strip ──
         st.markdown("##### 🔔 التنبيهات السريعة | Quick Alerts")
         def _alert_chip_html(icon, bg, border, label, value, sub):
@@ -3636,6 +3737,14 @@ with tab_dash:
         with ac4:
             st.markdown(_alert_chip_html("🟢", "#f0fdf4", "#22c55e", "منتجات ارتفعت مبيعاتها",
                         f"{len(rise_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
+
+        ac5, ac6 = st.columns(2)
+        with ac5:
+            st.markdown(_alert_chip_html("🎯", "#f0fdf4", "#22c55e", "منتجات ربحانة من الإعلانات",
+                        f"{len(ads_profit_rows_td):,}", "صافي ربح الطلبات > المصروف على الإعلان"), unsafe_allow_html=True)
+        with ac6:
+            st.markdown(_alert_chip_html("🚨", "#fef2f2", "#ef4444", "منتجات خسرانة من الإعلانات",
+                        f"{len(ads_loss_rows_td):,}", "المصروف على الإعلان أكبر من صافي الربح (أو من غير طلبات)"), unsafe_allow_html=True)
 
         # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم،
         #    مع سياق كافي (غير متوفر؟ ليها جدولة حديثة؟ في انتظار اعتماد؟) عشان التحليل يكون مفهوم ──
@@ -3747,6 +3856,44 @@ with tab_dash:
                         badges_html=_extra_context_badges(r, include_schedule=False))
             else:
                 st.caption("لا توجد أصناف ارتفعت مبيعاتها بنسبة 20%+ حالياً")
+
+        def _ads_insight_html(r):
+            if r["orders"] <= 0:
+                return (f'<span style="color:#f87171;font-size:12px;font-weight:700;">🚨 مفدتش لحد دلوقتي: '
+                        f'اتصرف {r["spends"]:,.2f} ريال ولسه ما جابش أي طلبات فعلية</span>')
+            if r["result"] >= 0:
+                return (f'<span style="color:#4ade80;font-size:12px;font-weight:700;">🎯 الاعلان مربح: '
+                        f'عدد طلبات الاعلان {r["orders"]:,.0f} طلب بصافي ربح إجمالي {r["net_total"]:,.2f} ريال مقابل '
+                        f'{r["spends"]:,.2f} ريال مدفوع — حقق {r["result"]:,.2f} ريال 👌</span>')
+            return (f'<span style="color:#f87171;font-size:12px;font-weight:700;">🚨 الاعلان غير مربح: '
+                    f'مدفوع {r["spends"]:,.2f} ريال، لكن صافي الربح من {r["orders"]:,.0f} طلب بس {r["net_total"]:,.2f} ريال — '
+                    f'خسران {abs(r["result"]):,.2f} ريال إجمالي</span>')
+
+        with st.expander(f"🎯 عرض منتجات ربحانة من الإعلانات ({len(ads_profit_rows_td):,}) | Show profitable-ads SKUs"):
+            if ads_profit_rows_td:
+                df_al5 = pd.DataFrame([{
+                    "SKU": r["sku"], "طلبات الإعلان | Ad Orders": r["orders"],
+                    "المصروف | Spends": round(r["spends"], 2), "صافي الربح | Net Total": round(r["net_total"], 2),
+                    "النتيجة | Result": round(r["result"], 2),
+                } for r in ads_profit_rows_td])
+                dl_btn(df_al5, "alert_ads_profit", key="dl_alert_ads_profit_td")
+                for r in ads_profit_rows_td:
+                    _render_alert_sku_row(r, badges_html=_ads_insight_html(r))
+            else:
+                st.caption("لا توجد أصناف ربحانة من الإعلانات حالياً")
+
+        with st.expander(f"🚨 عرض منتجات خسرانة من الإعلانات ({len(ads_loss_rows_td):,}) | Show losing-ads SKUs"):
+            if ads_loss_rows_td:
+                df_al6 = pd.DataFrame([{
+                    "SKU": r["sku"], "طلبات الإعلان | Ad Orders": r["orders"],
+                    "المصروف | Spends": round(r["spends"], 2), "صافي الربح | Net Total": round(r["net_total"], 2),
+                    "النتيجة | Result": round(r["result"], 2),
+                } for r in ads_loss_rows_td])
+                dl_btn(df_al6, "alert_ads_loss", key="dl_alert_ads_loss_td")
+                for r in ads_loss_rows_td:
+                    _render_alert_sku_row(r, badges_html=_ads_insight_html(r))
+            else:
+                st.caption("لا توجد أصناف خسرانة من الإعلانات حالياً 🎉")
 
         st.write("")
 
