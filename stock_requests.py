@@ -1470,6 +1470,16 @@ def clear_unavailable_ordered_for_sku(sku):
         if ri:
             safe_delete(sh, ri)
 
+def is_sku_unavailable(sku_up):
+    """True لو الـ SKU موجود حالياً في تاب Unavailable (يعني متسجل غير متوفر ولسه محدش وافق
+    على طلب جديد له). | True if the SKU currently sits in the Unavailable sheet."""
+    data_un = get_cached(unavailable_sheet)
+    if len(data_un) > 1:
+        for row in data_un[1:]:
+            if row and row[0].strip().upper() == sku_up:
+                return True
+    return False
+
 def get_unavailable_ordered_note(sku):
     """لو الـ SKU سبق اتسجل غير متوفر أو تم طلبه، يرجع ملاحظات بالتواريخ."""
     sku_up = sku.strip().upper()
@@ -3472,8 +3482,9 @@ with tab_dash:
         total_prev_td = sum(r["prev"] for r in rows_td)
         avg_daily_td  = (total_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
         active_skus_td = sum(1 for r in rows_td if r["cur"] > 0)
-        zero_skus_td   = sum(1 for r in rows_td if r["cur"] == 0)
-        zero_rows_td   = sorted([r for r in rows_td if r["cur"] == 0], key=lambda r: -r["stock"])
+        # أصناف بدون مبيعات، لكن استبعدنا اللي مخزونها صفر (طبيعي متبعش لو مفيش مخزون أصلاً — مش تنبيه مفيد)
+        zero_rows_td   = sorted([r for r in rows_td if r["cur"] == 0 and r["stock"] > 0], key=lambda r: -r["stock"])
+        zero_skus_td   = len(zero_rows_td)
         top_row_td = max(rows_td, key=lambda r: r["cur"], default=None)
         if total_prev_td > 0:
             growth_td = (total_cur_td - total_prev_td) / total_prev_td * 100
@@ -3516,6 +3527,10 @@ with tab_dash:
                          if sched_td else "🚨 محتاج جدولة الآن | Needs scheduling now")
             attention_rows_td.append({**r_td, "days_to_so": days_to_so_td, "avg_d": avg_d_td, "status": status_td})
         attention_rows_td.sort(key=lambda r: r["days_to_so"])
+
+        # ── بيانات مساعدة لعرض تفاصيل أوضح تحت كل تنبيه (جدولة حديثة / غير متوفر / اعتماد معلّق) ──
+        recent_sched_map_td = get_recent_schedule_rows(days_back=4)
+        pending_approval_skus_dash = get_pending_approval_skus()
 
         # ── كروت رئيسية (نظرة عامة) | Main overview cards ──
         def _kpi_card_html(icon, icon_bg, label, value, delta_text=None, delta_positive=True):
@@ -3580,15 +3595,31 @@ with tab_dash:
             st.markdown(_alert_chip_html("🟢", "#f0fdf4", "#22c55e", "منتجات ارتفعت مبيعاتها",
                         f"{len(rise_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
 
-        # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم ──
-        def _render_alert_sku_row(r, extra_line=""):
+        # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم،
+        #    مع سياق كافي (غير متوفر؟ ليها جدولة حديثة؟ في انتظار اعتماد؟) عشان التحليل يكون مفهوم ──
+        def _render_alert_sku_row(r, lines=None, badges_html=""):
             ci_al, cinfo_al = st.columns([1, 6])
             with ci_al:
                 show_img(r["img"], 55)
             with cinfo_al:
                 st.markdown(f"{sku_link_html(r['sku'])}", unsafe_allow_html=True)
-                if extra_line:
-                    st.caption(extra_line)
+                for line in (lines or []):
+                    st.caption(line)
+                if badges_html:
+                    st.markdown(badges_html, unsafe_allow_html=True)
+
+        def _extra_context_badges(r):
+            """شارات إضافية مشتركة: غير متوفر حالياً / جدولة خلال آخر 4 أيام / في انتظار اعتماد الجدولة."""
+            parts = []
+            for note in get_unavailable_ordered_note(r["sku"]):
+                color = "#dc2626" if "غير متوفر" in note else "#0891b2"
+                parts.append(f'<span style="color:{color};font-size:12px;">{note}</span>')
+            sched_entry = recent_sched_map_td.get(r["sku_up"])
+            if sched_entry:
+                parts.append(recent_schedule_badge_html(sched_entry))
+            if r["sku_up"] in pending_approval_skus_dash:
+                parts.append('<span class="status-badge-lg" style="background:#0369a1;">⏳ في انتظار اعتماد الجدولة | Pending schedule approval</span>')
+            return "<br>".join(parts)
 
         with st.expander(f"🔴 عرض منتجات معرضة لنفاد المخزون ({len(attention_rows_td):,}) | Show at-risk SKUs"):
             if attention_rows_td:
@@ -3596,34 +3627,55 @@ with tab_dash:
                     "SKU": r["sku"], "المخزون | Stock": r["stock"],
                     "متوسط يومي | Daily Avg": round(r["avg_d"], 2),
                     "أيام النفاد | Days to Stockout": r["days_to_so"],
+                    "الحالة | Status": r["status"],
                 } for r in attention_rows_td])
                 dl_btn(df_al1, "alert_stockout_risk", key="dl_alert_stockout_td")
                 for r in attention_rows_td:
-                    _render_alert_sku_row(r, f"📦 مخزون: {r['stock']:,} — ⏳ نفاد خلال {r['days_to_so']} يوم")
+                    _render_alert_sku_row(
+                        r,
+                        lines=[f"📦 مخزون: {r['stock']:,} — ⏳ نفاد خلال {r['days_to_so']} يوم", r["status"]],
+                        badges_html=_extra_context_badges(r))
             else:
                 st.caption("لا توجد أصناف معرضة لنفاد المخزون حالياً")
 
         with st.expander(f"🟡 عرض منتجات بدون مبيعات في الفترة ({zero_skus_td:,}) | Show no-sale SKUs"):
+            st.caption("ℹ️ الأصناف اللي مخزونها صفر مستبعدة من القائمة دي — طبيعي متبعش لو مفيش مخزون أصلاً | SKUs with zero stock are excluded — no stock naturally means no sales")
             if zero_rows_td:
                 df_al2 = pd.DataFrame([{
                     "SKU": r["sku"], "المخزون | Stock": r["stock"], "مبيعات الفترة | Period Sales": r["cur"],
                 } for r in zero_rows_td])
                 dl_btn(df_al2, "alert_no_sales", key="dl_alert_nosale_td")
                 for r in zero_rows_td:
-                    _render_alert_sku_row(r, f"📦 مخزون: {r['stock']:,} — لا يوجد مبيعات خلال {analysis_days_td} يوم")
+                    _render_alert_sku_row(
+                        r,
+                        lines=[f"📦 مخزون: {r['stock']:,} — لا يوجد مبيعات خلال {analysis_days_td} يوم رغم توفر المخزون"],
+                        badges_html=_extra_context_badges(r))
             else:
-                st.caption("كل الأصناف باعت خلال الفترة المحددة")
+                st.caption("كل الأصناف اللي معاها مخزون باعت خلال الفترة المحددة")
 
         with st.expander(f"🟠 عرض منتجات انخفضت مبيعاتها ({len(decline_rows_td):,}) | Show declining SKUs"):
+            st.caption("ℹ️ المخزون المعروض هنا بعد استبعاد المستودعات اللي مستبعدة من إعدادات النظام | Stock shown here already excludes warehouses excluded in settings")
             if decline_rows_td:
                 df_al3 = pd.DataFrame([{
                     "SKU": r["sku"], "الفترة الحالية | Current": r["cur"], "الفترة السابقة | Previous": r["prev"],
                     "الانخفاض | Drop %": round((r["prev"] - r["cur"]) / r["prev"] * 100, 1),
+                    "المخزون | Stock": r["stock"],
+                    "غير متوفر حالياً؟ | Unavailable now?": "نعم | Yes" if is_sku_unavailable(r["sku_up"]) else "لا | No",
                 } for r in decline_rows_td])
                 dl_btn(df_al3, "alert_declining", key="dl_alert_decline_td")
                 for r in decline_rows_td:
                     drop_pct = (r["prev"] - r["cur"]) / r["prev"] * 100
-                    _render_alert_sku_row(r, f"📉 {r['cur']:,} مقابل {r['prev']:,} (-{drop_pct:.0f}%)")
+                    if r["stock"] <= 0:
+                        reason = '<span style="color:#f87171;font-size:12px;">🔴 لا يوجد مخزون الآن — الانخفاض غالباً بسبب نفاد الكمية | No stock currently — decline is likely stockout-driven</span>'
+                    elif is_sku_unavailable(r["sku_up"]):
+                        reason = '<span style="color:#f87171;font-size:12px;">❌ مسجل حالياً "غير متوفر" — ده ممكن يكون سبب الانخفاض | Currently marked Unavailable — likely explains the decline</span>'
+                    else:
+                        reason = '<span style="color:#4ade80;font-size:12px;">✅ المخزون متاح — الانخفاض مش بسبب نقص المخزون، محتاج مراجعة (سعر/منافسة/إعلانات..) | Stock is available — decline isn\'t stock-related, worth reviewing (price/competition/ads..)</span>'
+                    badges = _extra_context_badges(r)
+                    _render_alert_sku_row(
+                        r,
+                        lines=[f"📉 {r['cur']:,} مقابل {r['prev']:,} (-{drop_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
+                        badges_html=(reason + ("<br>" + badges if badges else "")))
             else:
                 st.caption("لا توجد أصناف انخفضت مبيعاتها بنسبة 20%+ حالياً")
 
@@ -3636,7 +3688,10 @@ with tab_dash:
                 dl_btn(df_al4, "alert_rising", key="dl_alert_rise_td")
                 for r in rise_rows_td:
                     rise_pct = (r["cur"] - r["prev"]) / r["prev"] * 100
-                    _render_alert_sku_row(r, f"📈 {r['cur']:,} مقابل {r['prev']:,} (+{rise_pct:.0f}%)")
+                    _render_alert_sku_row(
+                        r,
+                        lines=[f"📈 {r['cur']:,} مقابل {r['prev']:,} (+{rise_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
+                        badges_html=_extra_context_badges(r))
             else:
                 st.caption("لا توجد أصناف ارتفعت مبيعاتها بنسبة 20%+ حالياً")
 
