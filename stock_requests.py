@@ -55,6 +55,11 @@ TABS_CONFIG = {
     # مكانه) عشان نعرض ملحوظة في تابات ثانية إن السكو ده لسه قيد الموافقة.
     "PendingApproval":   ["Store Name","Warehouse Name","ASN","Total QTY","Section","Approval",
                            "SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
+    # تاب الإعلانات — بيتحدّث يدوي من جوجل شيت، وبنعرض أداء كل SKU منه في تاب المبيعات
+    "Advertisements":    ["Campaign Name","Sku","Views","Clicks","Orders","ATC","Spends","Revenue",
+                           "CTR","ROAS","CPC","CPS","CVR"],
+    # تاب العمولة ومصاريف التوصيل — بيتحدّث يدوي، وبنستخدمه لحساب صافي سعر البيع لكل SKU
+    "COM":               ["SKU","مصاريف توصيل","العمولة"],
 }
 
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
@@ -175,6 +180,8 @@ settings_sheet       = sheets["Settings"]
 cancel_notif_sheet   = sheets["CancelNotifications"]
 tacweed_sheet        = sheets["Tacweed"]
 warehouse_stock_sheet = sheets["WarehouseStock"]
+ads_sheet             = sheets["Advertisements"]
+com_sheet             = sheets["COM"]
 
 # ══ كاش ══
 def safe_get_all_values(sheet, retries=6, delay=1):
@@ -263,6 +270,112 @@ def get_tacweed_map():
 def big_note_html(text):
     """نص ملاحظة (غير متوفر سابقاً / تم طلبه سابقاً) بخط أكبر وأسود بولد بدل الكابشن الصغير الرمادي."""
     return f'<span class="status-badge-lg" style="background:#e5e7eb;">{text}</span>'
+
+# ══ خريطة الإعلانات (SKU -> قائمة كامبينات) | Ads map (SKU -> list of campaigns) ══
+def _f2(v, default=0.0):
+    """تحويل آمن لأي قيمة نصية لرقم عشري | Safe float conversion."""
+    try:
+        s = str(v).strip().replace(",", "").replace("%", "")
+        return float(s) if s not in ("", "nan", "none") else default
+    except Exception:
+        return default
+
+@st.cache_data(ttl=300)
+def get_ads_map():
+    data = safe_get_all_values(ads_sheet)
+    if not data or len(data) < 2:
+        return {}
+    header = [h.strip() for h in data[0]]
+    idx = {h: i for i, h in enumerate(header)}
+    def col(row, *names):
+        for name in names:
+            i = idx.get(name)
+            if i is not None and i < len(row):
+                return row[i]
+        return ""
+    m = {}
+    for row in data[1:]:
+        sku_raw = col(row, "Sku", "SKU", "sku")
+        if not str(sku_raw).strip():
+            continue
+        sku_up = str(sku_raw).strip().upper()
+        entry = {
+            "campaign": col(row, "Campaign Name") or "—",
+            "views":  _f2(col(row, "Views")),
+            "clicks": _f2(col(row, "Clicks")),
+            "orders": _f2(col(row, "Orders")),
+            "atc":    _f2(col(row, "ATC")),
+            "spends": _f2(col(row, "Spends")),
+            "revenue":_f2(col(row, "Revenue")),
+            "ctr":    _f2(col(row, "CTR")),
+            "roas":   _f2(col(row, "ROAS")),
+            "cpc":    _f2(col(row, "CPC")),
+            "cps":    _f2(col(row, "CPS")),
+            "cvr":    _f2(col(row, "CVR")),
+        }
+        m.setdefault(sku_up, []).append(entry)
+    return m
+
+# ══ خريطة العمولة/التوصيل (SKU -> {delivery, commission_pct}) | Commission & delivery map ══
+@st.cache_data(ttl=300)
+def get_com_map():
+    data = safe_get_all_values(com_sheet)
+    if not data or len(data) < 2:
+        return {}
+    header = [h.strip() for h in data[0]]
+    idx = {h: i for i, h in enumerate(header)}
+    def col(row, *names):
+        for name in names:
+            i = idx.get(name)
+            if i is not None and i < len(row):
+                return row[i]
+        return ""
+    m = {}
+    for row in data[1:]:
+        sku_raw = col(row, "SKU", "Sku", "sku")
+        if not str(sku_raw).strip():
+            continue
+        sku_up = str(sku_raw).strip().upper()
+        delivery = _f2(col(row, "مصاريف توصيل"))
+        commission_pct = _f2(col(row, "العمولة"))
+        m[sku_up] = {"delivery": delivery, "commission_pct": commission_pct}
+    return m
+
+def compute_net_price_after_fees(price, com_info):
+    """يحسب صافي سعر البيع بعد خصم العمولة ومصاريف التوصيل، وبعدها بعد خصم 15% ضريبة.
+    | Computes the net selling price after commission + delivery fees, then after 15% VAT.
+    مصاريف التوصيل متوقع تكون رقم سالب في الشيت (زي -30) فبنضيفها مباشرة.
+    Delivery is expected to be a negative number in the sheet (e.g. -30), so we add it directly.
+    بيرجع (الصافي بعد العمولة والتوصيل, الصافي بعد خصم الضريبة كمان) | Returns
+    (net after commission+delivery, net after also removing 15% VAT)."""
+    if price is None or not com_info:
+        return None, None
+    commission_pct = com_info.get("commission_pct", 0.0)
+    delivery = com_info.get("delivery", 0.0)
+    commission_amount = price * commission_pct / 100.0
+    net_after_fees = price - commission_amount + delivery
+    net_after_tax = net_after_fees * 0.85  # خصم 15% ضريبة القيمة المضافة | remove 15% VAT
+    return net_after_fees, net_after_tax
+
+def get_latest_sku_price(r, ordered_dates):
+    """يرجع آخر سعر بيع مسجل لهذا الـ SKU — بيدوّر بالترتيب (الأحدث أولاً) وياخد السعر
+    اللي بيع بيه أكتر كمية في أقرب يوم فيه سعر. | Returns the most recent recorded selling
+    price for this SKU — walks the dates most-recent-first and picks the price with the
+    highest quantity on the nearest day that has a price."""
+    for d in ordered_dates:
+        day_prices_list = r["day_prices"].get(d, [])
+        vals = []
+        for item in day_prices_list:
+            p, qty = item if isinstance(item, tuple) else (item, 1)
+            if p and str(p).strip().lower() not in ("", "nan", "none"):
+                try:
+                    vals.append((float(str(p).replace(",", "")), qty))
+                except Exception:
+                    pass
+        if vals:
+            vals.sort(key=lambda x: -x[1])
+            return vals[0][0]
+    return None
 
 def tacweed_badge(sku_up):
     """يرجع HTML صغير للكود 01 لو موجود لل SKU ده، وإلا يرجع سلسلة فاضية."""
@@ -3048,6 +3161,8 @@ with tab14:
         # ══ خريطة SKUs المجدولة خلال آخر 4 أيام (لعرض ASN + الكمية لو فعلاً ليها جدولة) ══
         recent_sched_map_t14 = get_recent_schedule_rows(days_back=4)
         pending_approval_skus_t14 = get_pending_approval_skus()
+        ads_map_t14 = get_ads_map()
+        com_map_t14 = get_com_map()
 
         st.divider()
         for r in sales_tab_rows:
@@ -3059,6 +3174,48 @@ with tab14:
                 tc_badge_t14 = warehouse_available_badge(r["sku_up"])
                 if tc_badge_t14:
                     st.markdown(tc_badge_t14, unsafe_allow_html=True)
+
+                # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
+                ads_entries_t14 = ads_map_t14.get(r["sku_up"])
+                if ads_entries_t14:
+                    total_spends_t14  = sum(a["spends"] for a in ads_entries_t14)
+                    total_revenue_t14 = sum(a["revenue"] for a in ads_entries_t14)
+                    total_orders_t14  = sum(a["orders"] for a in ads_entries_t14)
+                    with st.expander(f"📢 أداء الإعلانات | Ads Performance — {len(ads_entries_t14)} حملة | campaign(s)"):
+                        st.markdown(
+                            f"💸 **إجمالي المصروف:** {total_spends_t14:,.2f} ريال &nbsp;|&nbsp; "
+                            f"💰 **إجمالي الإيراد:** {total_revenue_t14:,.2f} ريال &nbsp;|&nbsp; "
+                            f"🛒 **طلبات من الإعلان:** {total_orders_t14:,.0f}")
+                        for ad in ads_entries_t14:
+                            st.markdown(
+                                f"**{ad['campaign']}**<br>"
+                                f"👁️ ظهور: {ad['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {ad['clicks']:,.0f} &nbsp;|&nbsp; "
+                                f"🛒 طلبات: {ad['orders']:,.0f} &nbsp;|&nbsp; ➕ سلة: {ad['atc']:,.0f}<br>"
+                                f"💸 مصروف: {ad['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {ad['revenue']:,.2f} ريال<br>"
+                                f"📊 CTR: {ad['ctr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {ad['roas']:.2f} &nbsp;|&nbsp; "
+                                f"CPC: {ad['cpc']:.2f} &nbsp;|&nbsp; CPS: {ad['cps']:.2f} &nbsp;|&nbsp; CVR: {ad['cvr']:.2f}%",
+                                unsafe_allow_html=True)
+                            st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
+
+                # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة | Net price after commission,
+                #    delivery fees, and VAT ══
+                com_info_t14 = com_map_t14.get(r["sku_up"])
+                if com_info_t14:
+                    latest_price_t14 = get_latest_sku_price(r, sales_dates)
+                    if latest_price_t14 is not None:
+                        net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
+                        st.markdown(
+                            f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
+                            f'padding:8px 14px;margin:4px 0;">'
+                            f'<span style="color:#e2e8f0;font-size:13px;">💵 سعر البيع: <b>{latest_price_t14:,.2f}</b> ريال '
+                            f'&nbsp;|&nbsp; 🚚 توصيل: <b>{com_info_t14["delivery"]:,.0f}</b> '
+                            f'&nbsp;|&nbsp; 🏷️ عمولة: <b>{com_info_t14["commission_pct"]:,.0f}%</b></span><br>'
+                            f'<span style="color:#4ade80;font-size:14px;font-weight:bold;">💳 الصافي بعد خصم العمولة والتوصيل: {net_fees_t14:,.2f} ريال</span><br>'
+                            f'<span style="color:#fbbf24;font-size:14px;font-weight:bold;">🧾 الصافي بعد خصم 15% ضريبة: {net_tax_t14:,.2f} ريال</span>'
+                            f'</div>',
+                            unsafe_allow_html=True)
+                    else:
+                        st.caption("ℹ️ فيه عمولة وتوصيل مسجلين لكن مفيش سعر بيع حديث لحساب الصافي منهم | Commission & delivery are set but no recent price found to calculate the net")
 
                 # ══ أمس بارز ══
                 yesterday_t14 = sales_dates[0] if sales_dates else None
