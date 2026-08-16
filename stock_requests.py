@@ -847,6 +847,33 @@ def show_img(img, width=75):
     else:
         st.markdown("🖼️")
 
+def build_noon_link(sku: str):
+    """يبني لينك منتج نون من الـ SKU — بيشيل أي لاحقة رقمية زي -1 في الآخر (متغيّر/variant)
+    قبل ما يحطه في اللينك. | Builds a noon.com product link from a SKU — strips a trailing
+    "-<number>" variant suffix (e.g. "-1") before inserting it in the URL.
+    مثال | Example: N96556579A -> https://www.noon.com/saudi-ar/N96556579A/p/
+    مثال | Example: ZF5A935F52FB29CDD6CB9Z-1 -> https://www.noon.com/saudi-ar/ZF5A935F52FB29CDD6CB9Z/p/"""
+    if not sku:
+        return None
+    s = str(sku).strip().upper()
+    if not s:
+        return None
+    m = re.match(r'^(.*)-\d+$', s)
+    if m:
+        s = m.group(1)
+    return f"https://www.noon.com/saudi-ar/{s}/p/"
+
+def sku_link_html(sku: str, extra_style: str = ""):
+    """SKU كـ لينك قابل للضغط يودّي على صفحة المنتج على نون في تاب جديد
+    | SKU rendered as a clickable link that opens the noon.com product page in a new tab."""
+    link = build_noon_link(sku)
+    if not link:
+        return f"`{sku}`"
+    return (f'<a href="{link}" target="_blank" rel="noopener" '
+            f'style="font-family:monospace;font-weight:700;color:#3b82f6;text-decoration:none;'
+            f'background:#1e293b;border:1px solid #334155;border-radius:6px;padding:2px 10px;{extra_style}">'
+            f'{sku} 🔗</a>')
+
 def show_sku_inv(sku: str):
     info = inv_map.get(sku.strip().upper())
     if not info:
@@ -3028,7 +3055,7 @@ with tab14:
             with c_img:
                 show_img(r["img"], 70)
             with c_info:
-                st.markdown(f"**SKU:** `{r['sku']}`")
+                st.markdown(f"**SKU:** {sku_link_html(r['sku'])}", unsafe_allow_html=True)
                 tc_badge_t14 = warehouse_available_badge(r["sku_up"])
                 if tc_badge_t14:
                     st.markdown(tc_badge_t14, unsafe_allow_html=True)
@@ -3310,21 +3337,95 @@ with tab_dash:
         else:
             growth_rev_td = 100.0 if total_cur_rev_td > 0 else 0.0
 
-        # ── كروت رئيسية | Main metric cards ──
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric("📦 إجمالي المبيعات | Total Sales (Orders)", f"{total_cur_td:,}")
-        cc2.metric("📊 متوسط يومي | Daily Avg (Orders)", f"{avg_daily_td:,.1f}")
-        cc3.metric("🟢 أصناف نشطة | Active SKUs", f"{active_skus_td:,}")
-        cc4.metric("📈 نمو المبيعات | Growth (Orders)", f"{growth_td:+.2f}%")
+        # ── منتجات انخفضت/ارتفعت مبيعاتها (٪20 فأكثر) | Declining / rising SKUs (20%+) ──
+        decline_rows_td = [r for r in rows_td if r["prev"] > 0 and r["cur"] < r["prev"]
+                            and (r["prev"] - r["cur"]) / r["prev"] >= 0.20]
+        rise_rows_td = [r for r in rows_td if r["prev"] > 0 and r["cur"] > r["prev"]
+                         and (r["cur"] - r["prev"]) / r["prev"] >= 0.20]
 
-        cr1, cr2, cr3 = st.columns(3)
-        cr1.metric("💰 إجمالي الإيرادات | Total Revenue", f"{total_cur_rev_td:,.0f} ريال")
-        cr2.metric("💵 متوسط الإيراد اليومي | Daily Avg Revenue", f"{avg_daily_rev_td:,.0f} ريال")
-        cr3.metric("📈 نمو الإيرادات | Revenue Growth", f"{growth_rev_td:+.2f}%")
+        # ── أصناف تحتاج انتباه (معرضة لنفاد المخزون) — محسوبة هنا عشان تُستخدم في
+        #    شريط التنبيهات السريعة فوق، وبتتعرض بالتفصيل تحت في قسم "أصناف تحتاج انتباه" ──
+        delay_days_td = int(load_settings().get("schedule_delay_days", "3") or 3)
+        attention_rows_td = []
+        for r_td in rows_td:
+            avg_d_td = (r_td["cur"] / analysis_days_td) if analysis_days_td > 0 else 0
+            if avg_d_td <= 0:
+                continue
+            days_to_so_td = round(r_td["stock"] / avg_d_td) if avg_d_td > 0 else 9999
+            if days_to_so_td > 10:
+                continue
+            badge_text_td, badge_color_td, sched_td = schedule_coverage_badge(r_td["sku"], days_to_so_td, delay_days_td)
+            if "✅" in badge_text_td:
+                continue
+            status_td = ("⚠️ لديها جدولة — قد تنفد قبل الوصول | Scheduled — may run out before arrival"
+                         if sched_td else "🚨 محتاج جدولة الآن | Needs scheduling now")
+            attention_rows_td.append({**r_td, "days_to_so": days_to_so_td, "avg_d": avg_d_td, "status": status_td})
+        attention_rows_td.sort(key=lambda r: r["days_to_so"])
+
+        # ── كروت رئيسية (نظرة عامة) | Main overview cards ──
+        def _kpi_card_html(icon, icon_bg, label, value, delta_text=None, delta_positive=True):
+            delta_html = ""
+            if delta_text is not None:
+                arrow = "↑" if delta_positive else "↓"
+                color = "#16a34a" if delta_positive else "#dc2626"
+                delta_html = f'<div style="font-size:12px;color:{color};margin-top:6px;font-weight:600;">{arrow} {delta_text}</div>'
+            return (
+                f'<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;'
+                f'padding:14px 16px;direction:rtl;min-height:118px;box-shadow:0 1px 2px rgba(0,0,0,0.04);">'
+                f'<div style="width:34px;height:34px;border-radius:9px;background:{icon_bg}1f;'
+                f'display:flex;align-items:center;justify-content:center;font-size:16px;margin-bottom:10px;">{icon}</div>'
+                f'<div style="font-size:12px;color:#6b7280;margin-bottom:4px;">{label}</div>'
+                f'<div style="font-size:21px;font-weight:800;color:#111827;">{value}</div>'
+                f'{delta_html}</div>'
+            )
+
+        kc1, kc2, kc3, kc4, kc5 = st.columns(5)
+        with kc1:
+            st.markdown(_kpi_card_html("📦", "#2563eb", "مبيعات الفترة | Period Sales",
+                        f"{total_cur_td:,}", f"{abs(growth_td):.1f}% عن الفترة السابقة", growth_td >= 0), unsafe_allow_html=True)
+        with kc2:
+            st.markdown(_kpi_card_html("📊", "#0891b2", "متوسط يومي | Daily Avg",
+                        f"{avg_daily_td:,.1f}"), unsafe_allow_html=True)
+        with kc3:
+            st.markdown(_kpi_card_html("💰", "#16a34a", "إجمالي الإيرادات | Total Revenue",
+                        f"{total_cur_rev_td:,.0f} ريال", f"{abs(growth_rev_td):.1f}% عن الفترة السابقة", growth_rev_td >= 0), unsafe_allow_html=True)
+        with kc4:
+            st.markdown(_kpi_card_html("💵", "#9333ea", "متوسط الإيراد اليومي | Daily Avg Revenue",
+                        f"{avg_daily_rev_td:,.0f} ريال"), unsafe_allow_html=True)
+        with kc5:
+            st.markdown(_kpi_card_html("🟢", "#059669", "أصناف نشطة | Active SKUs",
+                        f"{active_skus_td:,}"), unsafe_allow_html=True)
+
         if total_cur_rev_td == 0:
             st.caption("ℹ️ لا توجد أسعار مسجلة لهذه الفترة في شيت الطلبات — الإيراد بيتحسب فقط من الصفوف اللي فيها سعر | No prices recorded for this period — revenue is computed only from rows that include a price")
 
-        st.caption(f"⚪ أصناف بدون مبيعات خلال الفترة | SKUs with no sales in period: {zero_skus_td:,}")
+        st.write("")
+
+        # ── التنبيهات السريعة | Quick alerts strip ──
+        st.markdown("##### 🔔 التنبيهات السريعة | Quick Alerts")
+        def _alert_chip_html(icon, bg, border, label, value, sub):
+            return (
+                f'<div style="background:{bg};border:1px solid {border};border-right:4px solid {border};'
+                f'border-radius:12px;padding:12px 14px;direction:rtl;min-height:92px;">'
+                f'<div style="font-size:12px;color:#374151;margin-bottom:6px;">{icon} {label}</div>'
+                f'<div style="font-size:22px;font-weight:800;color:#111827;">{value}</div>'
+                f'<div style="font-size:11px;color:#6b7280;">{sub}</div></div>'
+            )
+        ac1, ac2, ac3, ac4 = st.columns(4)
+        with ac1:
+            st.markdown(_alert_chip_html("🔴", "#fef2f2", "#ef4444", "منتجات معرضة لنفاد المخزون",
+                        f"{len(attention_rows_td):,}", "تغطية أقل من 10 أيام"), unsafe_allow_html=True)
+        with ac2:
+            st.markdown(_alert_chip_html("🟡", "#fffbeb", "#f59e0b", "منتجات بدون مبيعات في الفترة",
+                        f"{zero_skus_td:,}", f"خلال آخر {analysis_days_td} يوم"), unsafe_allow_html=True)
+        with ac3:
+            st.markdown(_alert_chip_html("🟠", "#fff7ed", "#f97316", "منتجات انخفضت مبيعاتها",
+                        f"{len(decline_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
+        with ac4:
+            st.markdown(_alert_chip_html("🟢", "#f0fdf4", "#22c55e", "منتجات ارتفعت مبيعاتها",
+                        f"{len(rise_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
+
+        st.write("")
 
         # ── كارت أعلى SKU مع صورة | Top SKU card with image ──
         if top_row_td and top_row_td["cur"] > 0:
@@ -3342,7 +3443,7 @@ with tab_dash:
 
         st.divider()
 
-        # ── رسم بياني لاتجاه المبيعات | Sales trend chart ──
+        # ── رسم بياني لاتجاه المبيعات + أهم المنتجات جنب بعض | Trend chart + top products, side by side ──
         cur_dates_sorted_td = sorted(cur_dates_td)
         daily_totals_td = {
             d: sum(cur_counts_td.get(r["sku_up"], {}).get(d, 0) for r in rows_td)
@@ -3352,21 +3453,45 @@ with tab_dash:
             "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_td],
             "المبيعات | Sales": [daily_totals_td.get(d, 0) for d in cur_dates_sorted_td],
         }).set_index("التاريخ | Date")
-        st.markdown("##### 📉 اتجاه المبيعات | Sales Trend")
-        st.line_chart(chart_df_td)
 
-        growth_icon_td = "📈" if growth_td >= 0 else "📉"
-        growth_word_td = "نمو | Growth" if growth_td >= 0 else "انخفاض | Decline"
-        st.markdown(
-            f"{growth_icon_td} **{growth_word_td} (عدد الطلبات | Orders):** {growth_td:+.2f}% "
-            f"&nbsp;|&nbsp; الحالية | Current = **{total_cur_td:,}** "
-            f"&nbsp;|&nbsp; السابقة | Previous = **{total_prev_td:,}**")
-        growth_rev_icon_td = "📈" if growth_rev_td >= 0 else "📉"
-        growth_rev_word_td = "نمو | Growth" if growth_rev_td >= 0 else "انخفاض | Decline"
-        st.markdown(
-            f"{growth_rev_icon_td} **{growth_rev_word_td} (الإيراد | Revenue):** {growth_rev_td:+.2f}% "
-            f"&nbsp;|&nbsp; الحالية | Current = **{total_cur_rev_td:,.0f} ريال** "
-            f"&nbsp;|&nbsp; السابقة | Previous = **{total_prev_rev_td:,.0f} ريال**")
+        col_chart_td, col_top_td = st.columns([1.1, 1])
+        with col_chart_td:
+            st.markdown(f"##### 📉 اتجاه المبيعات آخر {analysis_days_td} يوم | Sales Trend")
+            st.line_chart(chart_df_td)
+            growth_icon_td = "📈" if growth_td >= 0 else "📉"
+            growth_word_td = "نمو" if growth_td >= 0 else "انخفاض"
+            growth_rev_icon_td = "📈" if growth_rev_td >= 0 else "📉"
+            growth_rev_word_td = "نمو" if growth_rev_td >= 0 else "انخفاض"
+            st.caption(
+                f"{growth_icon_td} {growth_word_td} الطلبات: {growth_td:+.1f}% ({total_cur_td:,} مقابل {total_prev_td:,}) "
+                f"&nbsp;|&nbsp; {growth_rev_icon_td} {growth_rev_word_td} الإيراد: {growth_rev_td:+.1f}% "
+                f"({total_cur_rev_td:,.0f} مقابل {total_prev_rev_td:,.0f} ريال)")
+
+        with col_top_td:
+            st.markdown("##### 🏆 أهم المنتجات | Top Products")
+            top5_td = sorted(rows_td, key=lambda r: -r["cur"])[:5]
+            if top5_td and top5_td[0]["cur"] > 0:
+                rows_html_td = ""
+                for r in top5_td:
+                    if r["cur"] <= 0:
+                        continue
+                    img_src = r["img"] if r["img"] else ""
+                    img_html = (f'<img src="{img_src}" style="width:32px;height:32px;border-radius:6px;'
+                                 f'object-fit:cover;margin-left:8px;">') if img_src else "📦"
+                    rows_html_td += (
+                        '<div style="display:flex;align-items:center;justify-content:space-between;'
+                        'padding:8px 4px;border-bottom:1px solid #f1f5f9;direction:rtl;">'
+                        f'<div style="display:flex;align-items:center;font-size:12px;color:#111827;">{img_html}'
+                        f'<span style="font-family:monospace;">{r["sku"]}</span></div>'
+                        f'<div style="text-align:left;font-size:12px;color:#374151;white-space:nowrap;">'
+                        f'<b>{r["cur"]:,}</b> طلب &nbsp; <span style="color:#6b7280;">({r["cur_rev"]:,.0f} ريال)</span></div>'
+                        '</div>'
+                    )
+                st.markdown(
+                    f'<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:6px 12px;">{rows_html_td}</div>',
+                    unsafe_allow_html=True)
+            else:
+                st.caption("لا توجد بيانات مبيعات كافية | Not enough sales data")
 
         st.divider()
 
@@ -3494,27 +3619,10 @@ with tab_dash:
         st.divider()
 
         # ── أصناف تحتاج انتباه (مع صور) | Needs-attention (with images) ──
-        # يستخدم الدوال الأصلية بدون تعديل أي منطق حساب مخزون/نفاد
-        # Reuses existing helper functions — does not alter any stock/stockout logic
+        # القائمة اتحسبت فوق قبل شريط التنبيهات السريعة (attention_rows_td) — هنا بس بنعرضها بالتفصيل
+        # Already computed above (before the quick-alerts strip) — this just renders the details
         st.markdown("### 🚨 أصناف تحتاج انتباه | Needs Attention")
-        delay_days_td = int(load_settings().get("schedule_delay_days", "3") or 3)
-        attention_rows_td = []
-        for r_td in rows_td:
-            avg_d_td = (r_td["cur"] / analysis_days_td) if analysis_days_td > 0 else 0
-            if avg_d_td <= 0:
-                continue
-            days_to_so_td = round(r_td["stock"] / avg_d_td) if avg_d_td > 0 else 9999
-            if days_to_so_td > 10:
-                continue
-            badge_text_td, badge_color_td, sched_td = schedule_coverage_badge(r_td["sku"], days_to_so_td, delay_days_td)
-            if "✅" in badge_text_td:
-                continue
-            status_td = ("⚠️ لديها جدولة — قد تنفد قبل الوصول | Scheduled — may run out before arrival"
-                         if sched_td else "🚨 محتاج جدولة الآن | Needs scheduling now")
-            attention_rows_td.append({**r_td, "days_to_so": days_to_so_td, "avg_d": avg_d_td, "status": status_td})
-
         if attention_rows_td:
-            attention_rows_td.sort(key=lambda r: r["days_to_so"])
             df_att_td = pd.DataFrame([{
                 "SKU": r["sku"], "المخزون | Stock": r["stock"],
                 "متوسط يومي | Daily Avg": round(r["avg_d"], 2),
