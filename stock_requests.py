@@ -3628,10 +3628,11 @@ with tab_dash:
                 if sched_entry:
                     color_sc = "#7c3aed" if sched_entry["source"] != "Expired" else "#b45309"
                     parts.append(
-                        f'<div dir="rtl" style="background:{color_sc}22;border:1px solid {color_sc};'
-                        f'border-radius:6px;padding:4px 8px;margin-top:4px;font-size:11px;color:#e2e8f0;line-height:1.6;">'
+                        f'<div dir="rtl" style="background:{color_sc}1a;border:1px solid {color_sc};'
+                        f'border-radius:6px;padding:5px 9px;margin-top:4px;font-size:12px;'
+                        f'color:{color_sc};font-weight:700;line-height:1.7;">'
                         f'📅 مجدول بتاريخ {sched_entry["date"]} — ASN {sched_entry["asn"]} — [{sched_entry["source_label"]}]'
-                        f'<div style="font-size:10px;color:#94a3b8;margin-top:2px;">خلال آخر 4 أيام، لسه في فترة الوصول — لا تطلبه تاني</div>'
+                        f'<div style="font-size:11px;color:#374151;margin-top:2px;font-weight:500;">خلال آخر 4 أيام، لسه في فترة الوصول — لا تطلبه تاني</div>'
                         f'</div>')
                 if r["sku_up"] in pending_approval_skus_dash:
                     parts.append('<div dir="rtl" style="color:#7dd3fc;font-size:11px;margin-top:3px;">⏳ في انتظار اعتماد الجدولة | Pending schedule approval</div>')
