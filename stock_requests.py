@@ -1250,7 +1250,7 @@ def compute_stock_sales_rows(target_date, display_dates=None):
 
 def compute_missing_inventory_rows(display_dates):
     """SKUs ظهرت في الأوردرز خلال آخر كذا يوم (أمس/أول أمس/أول أول أمس) لكن مالهاش سجل في شيت Inventory
-    — يعني مخزونها انتهى بالكامل وخرجت من ملف المخزون. تظهر بنفس تفاصيل تابي المراجعة."""
+    —  مخزونها انتهى بالكامل وخرجت من ملف المخزون. تظهر بنفس تفاصيل تابي المراجعة."""
     multi_counts = build_daily_orders_counts(display_dates)
     links_map_local = get_links_map()
     rows = []
@@ -3245,7 +3245,7 @@ with tab14:
                                         'border:1px solid #dc2626;border-radius:7px;">'
                                         f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 الاعلان غير مربح: '
                                         f'اتصرف {total_spends_t14:,.2f} ريال، لكن صافي الربح من {total_orders_t14:,.0f} طلب بس {total_net_from_ads_t14:,.2f} ريال — '
-                                        f'يعني خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. يستاهل تفتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
+                                        f'يعني خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. افتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
                                         '</div>')
 
                         st.markdown(
