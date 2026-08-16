@@ -3237,7 +3237,7 @@ with tab14:
                                         'border:1px solid #16a34a;border-radius:7px;">'
                                         f'<span style="color:#4ade80;font-size:13px;font-weight:800;">🎯 الاعلان مربح: '
                                         f'عدد طلبات الاعلان {total_orders_t14:,.0f} طلب بصافي ربح إجمالي {total_net_from_ads_t14:,.2f} ريال مقابل '
-                                        f'{total_spends_t14:,.2f} ريال مدفوع — حقق <u>{net_result_t14:,.2f} ريال ربح صافي</u>  👌</span>'
+                                        f'{total_spends_t14:,.2f} ريال مدفوع — حقق <u>{net_result_t14:,.2f} ريال</u>  👌</span>'
                                         '</div>')
                                 else:
                                     ad_insight_t14 = (
