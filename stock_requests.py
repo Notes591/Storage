@@ -3236,16 +3236,16 @@ with tab14:
                                         '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#052e1655;'
                                         'border:1px solid #16a34a;border-radius:7px;">'
                                         f'<span style="color:#4ade80;font-size:13px;font-weight:800;">🎯 الاعلان مربح: '
-                                        f'جاب {total_orders_t14:,.0f} طلب بصافي ربح إجمالي {total_net_from_ads_t14:,.2f} ريال مقابل '
-                                        f'{total_spends_t14:,.2f} ريال اتصرفوا — يعني حقق <u>{net_result_t14:,.2f} ريال ربح صافي</u> فوق تكلفته 👌</span>'
+                                        f'عدد طلبات الاعلان {total_orders_t14:,.0f} طلب بصافي ربح إجمالي {total_net_from_ads_t14:,.2f} ريال مقابل '
+                                        f'{total_spends_t14:,.2f} ريال مدفوع — حقق <u>{net_result_t14:,.2f} ريال ربح صافي</u>  👌</span>'
                                         '</div>')
                                 else:
                                     ad_insight_t14 = (
                                         '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
                                         'border:1px solid #dc2626;border-radius:7px;">'
                                         f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 الاعلان غير مربح: '
-                                        f'اتصرف {total_spends_t14:,.2f} ريال، لكن صافي الربح من {total_orders_t14:,.0f} طلب بس {total_net_from_ads_t14:,.2f} ريال — '
-                                        f'يعني خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. افتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
+                                        f'مدفوع {total_spends_t14:,.2f} ريال، لكن صافي الربح من {total_orders_t14:,.0f} طلب بس {total_net_from_ads_t14:,.2f} ريال — '
+                                        f'خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. افتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
                                         '</div>')
 
                         st.markdown(
