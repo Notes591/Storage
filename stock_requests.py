@@ -246,9 +246,8 @@ def get_excluded_warehouses():
     return {w.strip().upper() for w in val.split(",") if w.strip()}
 
 # ══ links map ══
-@st.cache_data(ttl=300)
 def get_links_map():
-    data = safe_get_all_values(links_ws)
+    data = get_cached(links_ws)
     m = {}
     for row in data[1:]:
         if len(row) >= 2 and row[0].strip():
@@ -256,9 +255,8 @@ def get_links_map():
     return m
 
 # ══ tacweed map (SKU -> الكود 01) ══
-@st.cache_data(ttl=300)
 def get_tacweed_map():
-    data = safe_get_all_values(tacweed_sheet)
+    data = get_cached(tacweed_sheet)
     m = {}
     for row in data[1:]:
         if len(row) >= 2 and row[0].strip():
@@ -280,9 +278,8 @@ def _f2(v, default=0.0):
     except Exception:
         return default
 
-@st.cache_data(ttl=300)
 def get_ads_map():
-    data = safe_get_all_values(ads_sheet)
+    data = get_cached(ads_sheet)
     if not data or len(data) < 2:
         return {}
     header = [h.strip() for h in data[0]]
@@ -317,9 +314,8 @@ def get_ads_map():
     return m
 
 # ══ خريطة العمولة/التوصيل (SKU -> {delivery, commission_pct}) | Commission & delivery map ══
-@st.cache_data(ttl=300)
 def get_com_map():
-    data = safe_get_all_values(com_sheet)
+    data = get_cached(com_sheet)
     if not data or len(data) < 2:
         return {}
     header = [h.strip() for h in data[0]]
@@ -443,7 +439,6 @@ def render_tacweed_upload(key_prefix):
                         safe_delete_all(tacweed_sheet)
                     safe_batch_append(tacweed_sheet, to_add)
                     clear_cache(tacweed_sheet)
-                    get_tacweed_map.clear()
                     return len(to_add)
 
                 ca_tc, cb_tc = st.columns(2)
@@ -472,9 +467,8 @@ def render_tacweed_upload(key_prefix):
                 st.error(f"❌ {e}")
 
 # ══ warehouse stock map (Code -> Quantity) — مربوط بالكود 01 من التكويد ══
-@st.cache_data(ttl=300)
 def get_warehouse_stock_map():
-    data = safe_get_all_values(warehouse_stock_sheet)
+    data = get_cached(warehouse_stock_sheet)
     m = {}
     for row in data[1:]:
         if len(row) >= 2 and row[0].strip():
@@ -559,7 +553,6 @@ def render_warehouse_stock_upload(key_prefix):
                         safe_delete_all(warehouse_stock_sheet)
                     safe_batch_append(warehouse_stock_sheet, to_add)
                     clear_cache(warehouse_stock_sheet)
-                    get_warehouse_stock_map.clear()
                     return len(to_add)
 
                 ca_ws, cb_ws = st.columns(2)
