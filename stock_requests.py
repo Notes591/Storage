@@ -970,15 +970,23 @@ def build_noon_link(sku: str):
     return f"https://www.noon.com/saudi-ar/{s}/p/"
 
 def sku_link_html(sku: str, extra_style: str = ""):
-    """SKU كـ لينك قابل للضغط يودّي على صفحة المنتج على نون في تاب جديد
-    | SKU rendered as a clickable link that opens the noon.com product page in a new tab."""
+    """SKU كنص قابل للنسخ (تحديد/كوبي) جنبه أيقونة 🔗 صغيرة منفصلة تودّي على صفحة المنتج على نون
+    في تاب جديد — بالطريقة دي تقدر تنسخ الـ SKU من غير ما تتفتحلك صفحة نون بالغلط.
+    | SKU rendered as selectable/copyable text next to a small separate 🔗 link icon that opens
+    the noon.com product page in a new tab — keeps the SKU copyable without accidentally
+    navigating away."""
     link = build_noon_link(sku)
+    sku_span = (
+        f'<span style="font-family:monospace;font-weight:700;color:#e2e8f0;'
+        f'background:#1e293b;border:1px solid #334155;border-radius:6px;padding:2px 10px;'
+        f'user-select:all;-webkit-user-select:all;{extra_style}">{sku}</span>'
+    )
     if not link:
-        return f"`{sku}`"
-    return (f'<a href="{link}" target="_blank" rel="noopener" '
-            f'style="font-family:monospace;font-weight:700;color:#3b82f6;text-decoration:none;'
-            f'background:#1e293b;border:1px solid #334155;border-radius:6px;padding:2px 10px;{extra_style}">'
-            f'{sku} 🔗</a>')
+        return sku_span
+    return (
+        f'{sku_span} <a href="{link}" target="_blank" rel="noopener" '
+        f'style="text-decoration:none;font-size:14px;" title="فتح صفحة المنتج على نون | Open on noon.com">🔗</a>'
+    )
 
 def show_sku_inv(sku: str):
     info = inv_map.get(sku.strip().upper())
@@ -3608,18 +3616,26 @@ with tab_dash:
                 if badges_html:
                     st.markdown(badges_html, unsafe_allow_html=True)
 
-        def _extra_context_badges(r):
-            """شارات إضافية مشتركة: غير متوفر حالياً / جدولة خلال آخر 4 أيام / في انتظار اعتماد الجدولة."""
+        def _extra_context_badges(r, include_schedule=True):
+            """شارات إضافية مشتركة: غير متوفر حالياً / (لو include_schedule) جدولة خلال آخر 4 أيام
+            أو في انتظار اعتماد الجدولة."""
             parts = []
             for note in get_unavailable_ordered_note(r["sku"]):
-                color = "#dc2626" if "غير متوفر" in note else "#0891b2"
-                parts.append(f'<span style="color:{color};font-size:12px;">{note}</span>')
-            sched_entry = recent_sched_map_td.get(r["sku_up"])
-            if sched_entry:
-                parts.append(recent_schedule_badge_html(sched_entry))
-            if r["sku_up"] in pending_approval_skus_dash:
-                parts.append('<span class="status-badge-lg" style="background:#0369a1;">⏳ في انتظار اعتماد الجدولة | Pending schedule approval</span>')
-            return "<br>".join(parts)
+                color = "#f87171" if "غير متوفر" in note else "#38bdf8"
+                parts.append(f'<div dir="rtl" style="color:{color};font-size:11px;margin-top:3px;">{note}</div>')
+            if include_schedule:
+                sched_entry = recent_sched_map_td.get(r["sku_up"])
+                if sched_entry:
+                    color_sc = "#7c3aed" if sched_entry["source"] != "Expired" else "#b45309"
+                    parts.append(
+                        f'<div dir="rtl" style="background:{color_sc}22;border:1px solid {color_sc};'
+                        f'border-radius:6px;padding:4px 8px;margin-top:4px;font-size:11px;color:#e2e8f0;line-height:1.6;">'
+                        f'📅 مجدول بتاريخ {sched_entry["date"]} — ASN {sched_entry["asn"]} — [{sched_entry["source_label"]}]'
+                        f'<div style="font-size:10px;color:#94a3b8;margin-top:2px;">خلال آخر 4 أيام، لسه في فترة الوصول — لا تطلبه تاني</div>'
+                        f'</div>')
+                if r["sku_up"] in pending_approval_skus_dash:
+                    parts.append('<div dir="rtl" style="color:#7dd3fc;font-size:11px;margin-top:3px;">⏳ في انتظار اعتماد الجدولة | Pending schedule approval</div>')
+            return "".join(parts)
 
         with st.expander(f"🔴 عرض منتجات معرضة لنفاد المخزون ({len(attention_rows_td):,}) | Show at-risk SKUs"):
             if attention_rows_td:
@@ -3634,7 +3650,7 @@ with tab_dash:
                     _render_alert_sku_row(
                         r,
                         lines=[f"📦 مخزون: {r['stock']:,} — ⏳ نفاد خلال {r['days_to_so']} يوم", r["status"]],
-                        badges_html=_extra_context_badges(r))
+                        badges_html=_extra_context_badges(r, include_schedule=True))
             else:
                 st.caption("لا توجد أصناف معرضة لنفاد المخزون حالياً")
 
@@ -3649,7 +3665,7 @@ with tab_dash:
                     _render_alert_sku_row(
                         r,
                         lines=[f"📦 مخزون: {r['stock']:,} — لا يوجد مبيعات خلال {analysis_days_td} يوم رغم توفر المخزون"],
-                        badges_html=_extra_context_badges(r))
+                        badges_html=_extra_context_badges(r, include_schedule=False))
             else:
                 st.caption("كل الأصناف اللي معاها مخزون باعت خلال الفترة المحددة")
 
@@ -3665,17 +3681,19 @@ with tab_dash:
                 dl_btn(df_al3, "alert_declining", key="dl_alert_decline_td")
                 for r in decline_rows_td:
                     drop_pct = (r["prev"] - r["cur"]) / r["prev"] * 100
-                    if r["stock"] <= 0:
+                    stock_available_dec = r["stock"] > 0
+                    if not stock_available_dec:
                         reason = '<span style="color:#f87171;font-size:12px;">🔴 لا يوجد مخزون الآن — الانخفاض غالباً بسبب نفاد الكمية | No stock currently — decline is likely stockout-driven</span>'
                     elif is_sku_unavailable(r["sku_up"]):
                         reason = '<span style="color:#f87171;font-size:12px;">❌ مسجل حالياً "غير متوفر" — ده ممكن يكون سبب الانخفاض | Currently marked Unavailable — likely explains the decline</span>'
                     else:
                         reason = '<span style="color:#4ade80;font-size:12px;">✅ المخزون متاح — الانخفاض مش بسبب نقص المخزون، محتاج مراجعة (سعر/منافسة/إعلانات..) | Stock is available — decline isn\'t stock-related, worth reviewing (price/competition/ads..)</span>'
-                    badges = _extra_context_badges(r)
+                    # جدولة/انتظار اعتماد بتظهر بس لو مفيش مخزون فعلاً — لو المخزون متاح مفيش داعي نعرض جدولته
+                    badges = _extra_context_badges(r, include_schedule=not stock_available_dec)
                     _render_alert_sku_row(
                         r,
                         lines=[f"📉 {r['cur']:,} مقابل {r['prev']:,} (-{drop_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
-                        badges_html=(reason + ("<br>" + badges if badges else "")))
+                        badges_html=(reason + badges))
             else:
                 st.caption("لا توجد أصناف انخفضت مبيعاتها بنسبة 20%+ حالياً")
 
@@ -3691,7 +3709,7 @@ with tab_dash:
                     _render_alert_sku_row(
                         r,
                         lines=[f"📈 {r['cur']:,} مقابل {r['prev']:,} (+{rise_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
-                        badges_html=_extra_context_badges(r))
+                        badges_html=_extra_context_badges(r, include_schedule=True))
             else:
                 st.caption("لا توجد أصناف ارتفعت مبيعاتها بنسبة 20%+ حالياً")
 
