@@ -3637,13 +3637,33 @@ with tab_dash:
         #    مقابل إجمالي المصروف عليه) — عشان تظهر في التنبيهات السريعة تحت ──
         ads_map_dash = get_ads_map()
         com_map_dash = get_com_map()
+
+        def _td_latest_price_for_sku(sku_up):
+            """آخر سعر بيع مسجل لهذا الـ SKU من نفس خرائط الأسعار المستخدمة في الداشبورد
+            (بيدوّر في الفترة الحالية الأحدث أولاً، وبعدين الفترة السابقة لو محتاج) | Most recent
+            recorded price for this SKU, using the price maps already built for the dashboard."""
+            for dates_list, prices_map in ((cur_dates_td, cur_prices_td), (prev_dates_td, prev_prices_td)):
+                for d in dates_list:
+                    day_list = prices_map.get(sku_up, {}).get(d, [])
+                    vals = []
+                    for p, qty in day_list:
+                        if p and str(p).strip().lower() not in ("", "nan", "none"):
+                            try:
+                                vals.append((float(str(p).replace(",", "")), qty))
+                            except Exception:
+                                pass
+                    if vals:
+                        vals.sort(key=lambda x: -x[1])
+                        return vals[0][0]
+            return None
+
         ads_profit_rows_td, ads_loss_rows_td = [], []
         for r_ad in rows_td:
             ads_entries_ad = ads_map_dash.get(r_ad["sku_up"])
             com_info_ad = com_map_dash.get(r_ad["sku_up"])
             if not ads_entries_ad or not com_info_ad:
                 continue
-            latest_price_ad = get_latest_sku_price(r_ad, sales_dates)
+            latest_price_ad = _td_latest_price_for_sku(r_ad["sku_up"])
             if latest_price_ad is None:
                 continue
             _, net_tax_ad = compute_net_price_after_fees(latest_price_ad, com_info_ad)
