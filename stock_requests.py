@@ -3710,7 +3710,7 @@ with tab_dash:
                     _render_alert_sku_row(
                         r,
                         lines=[f"📈 {r['cur']:,} مقابل {r['prev']:,} (+{rise_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
-                        badges_html=_extra_context_badges(r, include_schedule=True))
+                        badges_html=_extra_context_badges(r, include_schedule=False))
             else:
                 st.caption("لا توجد أصناف ارتفعت مبيعاتها بنسبة 20%+ حالياً")
 
