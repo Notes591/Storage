@@ -3010,6 +3010,8 @@ with tab13:
         sales_review_rows.append(r)
     sales_review_rows.sort(key=lambda r: (-r["qty"], -r["sales_month"]))
 
+    pending_approval_skus_t13 = get_pending_approval_skus()
+
     if not inv_map:
         st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
     elif not sales_review_rows:
@@ -3023,8 +3025,6 @@ with tab13:
         c1,c2 = st.columns(2)
         with c1: dl_btn(df_sales,"sales_review")
         with c2: st.warning(f"📈 SKUs محتاجة مراجعة | Needs Review: {len(sales_review_rows)}")
-
-        pending_approval_skus_t13 = get_pending_approval_skus()
 
         for r in sales_review_rows:
             c_img,c_info = st.columns([1,6])
