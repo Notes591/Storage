@@ -435,7 +435,11 @@ def _f2_or_none(v):
 
 def get_live_map():
     """يرجع {SKU (upper) -> {price, sale_price, stock_xdock_net, noon_title, noon_status}}
-    من تاب LIVE (نسخة ملف Noon catalog export). المفتاح هو sku_child."""
+    من تاب LIVE (نسخة ملف Noon catalog export). المفتاح هو sku_child.
+    ملحوظة: مفتاح "price" (اللي بتعتمد عليه كل حسابات المبيعات والداشبورد) بقى مصدره
+    عمود sale_price في تاب LIVE بدل عمود price | Note: the "price" key (which all
+    Sales/Dashboard calculations rely on) is now sourced from the sale_price column
+    in the LIVE sheet instead of the price column."""
     data = get_cached(live_sheet)
     if not data or len(data) < 2:
         return {}
@@ -454,7 +458,7 @@ def get_live_map():
             continue
         sku_up = str(sku_raw).strip().upper()
         m[sku_up] = {
-            "price": _f2_or_none(col(row, "price")),
+            "price": _f2_or_none(col(row, "sale_price")),
             "sale_price": _f2_or_none(col(row, "sale_price")),
             "stock_xdock_net": _to_int(col(row, "stock_xdock_net")),
             "noon_title": col(row, "noon_title"),
@@ -463,7 +467,7 @@ def get_live_map():
     return m
 
 def get_base_price(sku_up, live_map, fallback_price=None):
-    """يرجع (السعر, من_LIVE؟) — بيدّي الأولوية لعمود price في تاب LIVE (سعر البيع الأساسي)،
+    """يرجع (السعر, من_LIVE؟) — بيدّي الأولوية لعمود sale_price في تاب LIVE (سعر البيع الأساسي)،
     ولو مش موجود بيرجع السعر البديل (سعر العرض القديم من الطلبات) لو موجود."""
     live_info = live_map.get(sku_up)
     if live_info and live_info.get("price") is not None:
@@ -3459,7 +3463,7 @@ with tab14:
 
                     # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة | Net price after commission,
                     #    delivery fees, and VAT ══
-                    # سعر البيع الأساسي بييجي من عمود price في تاب LIVE أولاً (وده اللي بتُحسب عليه
+                    # سعر البيع الأساسي بييجي من عمود sale_price في تاب LIVE أولاً (وده اللي بتُحسب عليه
                     # الخصومات والعمولة والضريبة والإعلانات)، ولو مش موجود بيرجع لسعر الطلبات القديم
                     # (بقى اسمه "سعر العرض") كبديل.
                     com_info_t14 = com_map_t14.get(r["sku_up"])
@@ -3890,9 +3894,9 @@ with tab_dash:
             com_map_dash = get_com_map()
 
             def _td_latest_price_for_sku(sku_up):
-                """السعر الأساسي لهذا الـ SKU: عمود price من تاب LIVE أولاً (سعر البيع الأساسي)،
+                """السعر الأساسي لهذا الـ SKU: عمود sale_price من تاب LIVE أولاً (سعر البيع الأساسي)،
                 ولو مش موجود بيدوّر في خرائط أسعار الطلبات (الفترة الحالية ثم السابقة) كبديل
-                (سعر العرض) | Base price for this SKU: LIVE sheet's price column first, falling
+                (سعر العرض) | Base price for this SKU: LIVE sheet's sale_price column first, falling
                 back to the order-price maps (offer price) already built for the dashboard."""
                 live_info = live_map_dash.get(sku_up)
                 if live_info and live_info.get("price") is not None:
