@@ -61,7 +61,8 @@ TABS_CONFIG = {
     # تاب العمولة ومصاريف التوصيل — بيتحدّث يدوي، وبنستخدمه لحساب صافي سعر البيع لكل SKU
     "COM":               ["SKU","مصاريف توصيل","العمولة"],
     # تاب LIVE — نسخة من ملف Noon catalog export، بيتحدّث يدوي بره البرنامج (مش من هنا).
-    # partner_sku هو الـ SKU. عمود "price" ده سعر البيع الأساسي اللي بتُحسب عليه الخصومات
+    # sku_child هو المفتاح اللي بيتربط بيه مع باقي الشيتات (زي Inventory وDailyOrders).
+    # عمود "price" ده سعر البيع الأساسي اللي بتُحسب عليه الخصومات
     # والعمولة والضريبة والإعلانات (بدل سعر الطلبات القديم، اللي بقى اسمه "سعر العرض").
     # عمود stock_xdock_net مخزون تاني منفصل عن تاب Inventory، بيتراقب لوحده في التنبيهات السريعة.
     "LIVE": ["psku_code","country_code","id_partner","partner_sku","family_code","brand_code",
@@ -362,7 +363,7 @@ def _f2_or_none(v):
 
 def get_live_map():
     """يرجع {SKU (upper) -> {price, sale_price, stock_xdock_net, noon_title, noon_status}}
-    من تاب LIVE (نسخة ملف Noon catalog export). المفتاح هو partner_sku."""
+    من تاب LIVE (نسخة ملف Noon catalog export). المفتاح هو sku_child."""
     data = get_cached(live_sheet)
     if not data or len(data) < 2:
         return {}
@@ -376,7 +377,7 @@ def get_live_map():
         return ""
     m = {}
     for row in data[1:]:
-        sku_raw = col(row, "partner_sku", "SKU", "sku")
+        sku_raw = col(row, "sku_child", "partner_sku", "SKU", "sku")
         if not str(sku_raw).strip():
             continue
         sku_up = str(sku_raw).strip().upper()
@@ -1187,10 +1188,11 @@ def family_display_name(raw_family):
         return FAMILY_LABELS[key]
     return f"📦 {str(raw_family).strip().replace('_',' ').title()}"
 
-def build_daily_orders_family_stats(dates):
+def build_daily_orders_family_stats(dates, live_map=None):
     """يرجع dict: اسم القسم -> {"orders": عدد, "revenue": إيراد} لفترة تواريخ محددة.
     لو عمود Family مش موجود في الشيت، أو الصف مالوش قيمة Family، بيتجاهله بهدوء
-    بدون ما يوقف الكود أو يأثر على أي تحليل تاني."""
+    بدون ما يوقف الكود أو يأثر على أي تحليل تاني. لو الطلب مسجل من غير سعر، بيستخدم
+    سعر البيع الأساسي من تاب LIVE (لو موجود) كتقدير للإيراد بدل ما يتجاهله."""
     data = get_cached(daily_orders_sheet)
     dates_set = set(dates)
     stats = {}
@@ -1244,6 +1246,10 @@ def build_daily_orders_family_stats(dates):
                 rev_val = float(price_val.replace(",", "")) * qty_val
             except Exception:
                 rev_val = 0.0
+        elif live_map:
+            live_info_fam = live_map.get(sku.upper())
+            if live_info_fam and live_info_fam.get("price") is not None:
+                rev_val = live_info_fam["price"] * qty_val
         if dept_name not in stats:
             stats[dept_name] = {"orders": 0, "revenue": 0.0}
         stats[dept_name]["orders"]  += 1
@@ -3603,6 +3609,7 @@ with tab_dash:
         prev_counts_td = build_daily_orders_counts(prev_dates_td)
         cur_prices_td  = build_daily_orders_prices(cur_dates_td)
         prev_prices_td = build_daily_orders_prices(prev_dates_td)
+        live_map_dash  = get_live_map()
 
         def _td_total(counts_map, sku_up, dates):
             return sum(counts_map.get(sku_up, {}).get(d, 0) for d in dates)
@@ -3613,20 +3620,31 @@ with tab_dash:
             except Exception:
                 return 0.0
 
-        def _td_revenue_total(prices_map, sku_up, dates):
+        def _td_revenue_total(prices_map, sku_up, dates, live_map=None):
+            """إجمالي الإيراد لهذا الـ SKU خلال التواريخ دي — لو الطلب مسجل من غير سعر،
+            بيستخدم سعر البيع الأساسي من تاب LIVE كتقدير بدل ما يتجاهله بالكامل | Total revenue
+            for this SKU over these dates — orders recorded without a price fall back to the
+            LIVE base price as an estimate instead of being skipped entirely."""
             total = 0.0
+            live_price = None
+            if live_map:
+                live_info = live_map.get(sku_up)
+                if live_info:
+                    live_price = live_info.get("price")
             for d in dates:
                 for p, qty in prices_map.get(sku_up, {}).get(d, []):
                     if p and str(p).strip().lower() not in ("", "nan", "none"):
                         total += _td_parse_price(p) * qty
+                    elif live_price is not None:
+                        total += live_price * qty
             return total
 
         rows_td = []
         for sku_up_td, info_td in inv_map.items():
             cur_t_td  = _td_total(cur_counts_td, sku_up_td, cur_dates_td)
             prev_t_td = _td_total(prev_counts_td, sku_up_td, prev_dates_td)
-            cur_rev_td  = _td_revenue_total(cur_prices_td, sku_up_td, cur_dates_td)
-            prev_rev_td = _td_revenue_total(prev_prices_td, sku_up_td, prev_dates_td)
+            cur_rev_td  = _td_revenue_total(cur_prices_td, sku_up_td, cur_dates_td, live_map_dash)
+            prev_rev_td = _td_revenue_total(prev_prices_td, sku_up_td, prev_dates_td, live_map_dash)
             rows_td.append({
                 "sku_up": sku_up_td, "sku": info_td.get("sku", sku_up_td), "img": info_td.get("img", ""),
                 "cur": cur_t_td, "prev": prev_t_td, "stock": info_td.get("total_stock", 0),
@@ -3722,7 +3740,7 @@ with tab_dash:
                         f"{active_skus_td:,}"), unsafe_allow_html=True)
 
         if total_cur_rev_td == 0:
-            st.caption("ℹ️ لا توجد أسعار مسجلة لهذه الفترة في شيت الطلبات — الإيراد بيتحسب فقط من الصفوف اللي فيها سعر | No prices recorded for this period — revenue is computed only from rows that include a price")
+            st.caption("ℹ️ لا توجد أسعار مسجلة لهذه الفترة (لا في شيت الطلبات ولا في LIVE) — الإيراد بيتحسب من الصفوف اللي فيها سعر، وبيستخدم سعر LIVE الأساسي كتقدير لو الطلب من غير سعر مسجل | No prices found for this period (neither in the orders sheet nor in LIVE) — revenue is computed from priced rows, falling back to the LIVE base price as an estimate for orders recorded without a price")
 
         st.write("")
 
@@ -3730,7 +3748,6 @@ with tab_dash:
         #    مقابل إجمالي المصروف عليه) — عشان تظهر في التنبيهات السريعة تحت ──
         ads_map_dash = get_ads_map()
         com_map_dash = get_com_map()
-        live_map_dash = get_live_map()
 
         def _td_latest_price_for_sku(sku_up):
             """السعر الأساسي لهذا الـ SKU: عمود price من تاب LIVE أولاً (سعر البيع الأساسي)،
@@ -3788,15 +3805,20 @@ with tab_dash:
             if xnet_x is None or xnet_x > xdock_threshold_dash:
                 continue
             inv_info_x = inv_map.get(sku_up_x, {})
+            other_stock_x = inv_info_x.get("total_stock", 0)
             xdock_low_rows_td.append({
                 "sku_up": sku_up_x,
                 "sku": inv_info_x.get("sku", sku_up_x),
                 "img": inv_info_x.get("img", ""),
                 "stock_xdock_net": xnet_x,
+                "other_stock": other_stock_x,
+                "has_other_stock": other_stock_x > 0,
                 "price": live_info_x.get("price"),
                 "noon_title": live_info_x.get("noon_title", ""),
             })
         xdock_low_rows_td.sort(key=lambda r: r["stock_xdock_net"])
+        xdock_low_with_other_td = sum(1 for r in xdock_low_rows_td if r["has_other_stock"])
+        xdock_low_without_other_td = len(xdock_low_rows_td) - xdock_low_with_other_td
 
         # ── التنبيهات السريعة | Quick alerts strip ──
         st.markdown("##### 🔔 التنبيهات السريعة | Quick Alerts")
@@ -3831,7 +3853,9 @@ with tab_dash:
                         f"{len(ads_loss_rows_td):,}", "المصروف على الإعلان أكبر من صافي الربح (أو من غير طلبات)"), unsafe_allow_html=True)
         with ac7:
             st.markdown(_alert_chip_html("🟣", "#faf5ff", "#a855f7", "مخزون Xdock قارب على النفاد",
-                        f"{len(xdock_low_rows_td):,}", f"{xdock_threshold_dash} قطعة أو أقل"), unsafe_allow_html=True)
+                        f"{len(xdock_low_rows_td):,}",
+                        f"{xdock_threshold_dash} قطعة أو أقل — منهم {xdock_low_with_other_td} عندهم مخزون تاني و {xdock_low_without_other_td} من غيره"),
+                        unsafe_allow_html=True)
 
         # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم،
         #    مع سياق كافي (غير متوفر؟ ليها جدولة حديثة؟ في انتظار اعتماد؟) عشان التحليل يكون مفهوم ──
@@ -3982,19 +4006,25 @@ with tab_dash:
             else:
                 st.caption("لا توجد أصناف خسرانة من الإعلانات حالياً 🎉")
 
-        with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,}) | Show low Xdock-stock SKUs"):
-            st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us")
+        with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,} — {xdock_low_with_other_td} عندهم مخزون تاني | {xdock_low_without_other_td} من غيره) | Show low Xdock-stock SKUs"):
+            st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا. الأصناف اللي معاها مخزون تاني (Inventory) أقل إلحاحاً من اللي مفيش عندها غير مخزون Xdock بس | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us. SKUs that also have regular Inventory stock are less urgent than ones relying on Xdock stock alone")
             if xdock_low_rows_td:
                 df_al7 = pd.DataFrame([{
                     "SKU": r["sku"], "مخزون Xdock | Xdock Stock": r["stock_xdock_net"],
+                    "مخزون تاني | Other Stock": r["other_stock"],
                     "السعر | Price": r["price"] if r["price"] is not None else "—",
                 } for r in xdock_low_rows_td])
                 dl_btn(df_al7, "alert_xdock_low", key="dl_alert_xdock_td")
                 for r in xdock_low_rows_td:
+                    if r["has_other_stock"]:
+                        other_badge = f'<span style="color:#4ade80;font-size:12px;">📦 عنده مخزون تاني (Inventory): {r["other_stock"]:,} — أقل إلحاحاً</span>'
+                    else:
+                        other_badge = '<span style="color:#f87171;font-size:12px;font-weight:700;">🚫 مفيش مخزون تاني خالص — الاعتماد على Xdock بس</span>'
                     _render_alert_sku_row(
                         r,
                         lines=[f"🟣 مخزون Xdock: {r['stock_xdock_net']:,}"
-                               + (f" — 💵 {r['price']:,.2f} ريال" if r["price"] is not None else "")])
+                               + (f" — 💵 {r['price']:,.2f} ريال" if r["price"] is not None else "")],
+                        badges_html=other_badge)
             else:
                 st.caption(f"لا توجد أصناف مخزون Xdock عندها {xdock_threshold_dash} قطعة أو أقل حالياً")
 
@@ -4072,7 +4102,7 @@ with tab_dash:
         # بيعتمد على عمود Family (اختياري) في شيت DailyOrders — لو مش موجود أو الصف مالوش
         # قيمة، الكود بيكمل عادي من غير ما يوقف وبيتجاهل هذا الصف من تحليل الأقسام بس
         st.markdown("### 📂 المبيعات حسب القسم | Sales by Department")
-        dept_stats_td = build_daily_orders_family_stats(cur_dates_td)
+        dept_stats_td = build_daily_orders_family_stats(cur_dates_td, live_map_dash)
         if not dept_stats_td:
             st.caption("لا توجد بيانات أقسام (عمود Family) لهذه الفترة — العمود اختياري ولا يؤثر على باقي التحليلات | No department (Family) data for this period — the column is optional and does not affect other analytics")
         else:
