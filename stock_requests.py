@@ -1267,8 +1267,9 @@ def family_display_name(raw_family):
 def build_daily_orders_family_stats(dates, live_map=None):
     """يرجع dict: اسم القسم -> {"orders": عدد, "revenue": إيراد} لفترة تواريخ محددة.
     لو عمود Family مش موجود في الشيت، أو الصف مالوش قيمة Family، بيتجاهله بهدوء
-    بدون ما يوقف الكود أو يأثر على أي تحليل تاني. لو الطلب مسجل من غير سعر، بيستخدم
-    سعر البيع الأساسي من تاب LIVE (لو موجود) كتقدير للإيراد بدل ما يتجاهله."""
+    بدون ما يوقف الكود أو يأثر على أي تحليل تاني. الإيراد بيتحسب دايمًا على سعر البيع
+    الأساسي من تاب LIVE (sale_price) لو متوفر لهذا الـ SKU، وبيرجع لسعر العرض المسجل
+    مع الطلب نفسه بس لو مفيش سعر بيع أساسي مسجل خالص."""
     data = get_cached(daily_orders_sheet)
     dates_set = set(dates)
     stats = {}
@@ -1317,15 +1318,15 @@ def build_daily_orders_family_stats(dates, live_map=None):
         if qty_val < 1:
             qty_val = 1
         rev_val = 0.0
-        if price_val and price_val.lower() not in ("", "nan", "none"):
+        live_info_fam = live_map.get(sku.upper()) if live_map else None
+        live_price_fam = live_info_fam.get("price") if live_info_fam else None
+        if live_price_fam is not None:
+            rev_val = live_price_fam * qty_val
+        elif price_val and price_val.lower() not in ("", "nan", "none"):
             try:
                 rev_val = float(price_val.replace(",", "")) * qty_val
             except Exception:
                 rev_val = 0.0
-        elif live_map:
-            live_info_fam = live_map.get(sku.upper())
-            if live_info_fam and live_info_fam.get("price") is not None:
-                rev_val = live_info_fam["price"] * qty_val
         if dept_name not in stats:
             stats[dept_name] = {"orders": 0, "revenue": 0.0}
         stats[dept_name]["orders"]  += 1
@@ -3507,7 +3508,7 @@ with tab14:
 
                             offer_price_line_t14 = ""
                             if offer_price_t14 is not None and (not price_from_live_t14 or round(offer_price_t14, 2) != round(latest_price_t14, 2)):
-                                offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض: <b>{offer_price_t14:,.2f}</b> ريال'
+                                offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض (معلومة فقط، غير مستخدم في الحسابات): <b>{offer_price_t14:,.2f}</b> ريال'
                             price_label_t14 = "سعر البيع الأساسي" if price_from_live_t14 else "سعر البيع (سعر العرض)"
                             st.markdown(
                                 f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
@@ -3765,10 +3766,12 @@ with tab_dash:
                     return 0.0
 
             def _td_revenue_total(prices_map, sku_up, dates, live_map=None):
-                """إجمالي الإيراد لهذا الـ SKU خلال التواريخ دي — لو الطلب مسجل من غير سعر،
-                بيستخدم سعر البيع الأساسي من تاب LIVE كتقدير بدل ما يتجاهله بالكامل | Total revenue
-                for this SKU over these dates — orders recorded without a price fall back to the
-                LIVE base price as an estimate instead of being skipped entirely."""
+                """إجمالي الإيراد لهذا الـ SKU خلال التواريخ دي — بيعتمد على سعر البيع
+                الأساسي من تاب LIVE (sale_price) لكل طلب، وبيرجع لسعر العرض المسجل مع
+                الطلب نفسه بس لو مفيش سعر بيع أساسي مسجل لهذا الـ SKU خالص | Total revenue
+                for this SKU over these dates — every order is valued at the LIVE base
+                (sale_price) price; only falls back to that order's own recorded offer
+                price when no LIVE base price exists for this SKU at all."""
                 total = 0.0
                 live_price = None
                 if live_map:
@@ -3777,10 +3780,10 @@ with tab_dash:
                         live_price = live_info.get("price")
                 for d in dates:
                     for p, qty in prices_map.get(sku_up, {}).get(d, []):
-                        if p and str(p).strip().lower() not in ("", "nan", "none"):
-                            total += _td_parse_price(p) * qty
-                        elif live_price is not None:
+                        if live_price is not None:
                             total += live_price * qty
+                        elif p and str(p).strip().lower() not in ("", "nan", "none"):
+                            total += _td_parse_price(p) * qty
                 return total
 
             rows_td = []
