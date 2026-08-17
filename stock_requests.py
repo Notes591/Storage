@@ -4151,6 +4151,29 @@ with tab_dash:
                 else:
                     st.caption("لا توجد أصناف خسرانة من الإعلانات حالياً 🎉")
 
+            with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,} — {xdock_low_with_other_td} عندهم مخزون FBN | {xdock_low_without_other_td} من غيره) | Show low Xdock-stock SKUs"):
+                st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا. الأصناف اللي معاها مخزون FBN (Inventory) أقل إلحاحاً من اللي مفيش عندها غير مخزون Xdock بس. الترتيب هنا من الأعلى مبيعاً للأقل عشان تعرف الصنف مهم ولا لأ | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us. SKUs that also have FBN (Inventory) stock are less urgent than ones relying on Xdock stock alone. Sorted by monthly sales (highest → lowest) so you can tell if it actually matters")
+                if xdock_low_rows_td:
+                    df_al7 = pd.DataFrame([{
+                        "SKU": r["sku"], "مخزون Xdock | Xdock Stock": r["stock_xdock_net"],
+                        "مخزون FBN | FBN Stock": r["other_stock"],
+                        "مبيع شهري | Monthly Sales": r["sales_month"],
+                        "السعر | Price": r["price"] if r["price"] is not None else "—",
+                    } for r in xdock_low_rows_td])
+                    dl_btn(df_al7, "alert_xdock_low", key="dl_alert_xdock_td")
+                    for r in xdock_low_rows_td:
+                        if r["has_other_stock"]:
+                            other_badge = f'<span style="color:#4ade80;font-size:12px;">📦 عنده مخزون FBN (Inventory): {r["other_stock"]:,} — أقل إلحاحاً</span>'
+                        else:
+                            other_badge = '<span style="color:#f87171;font-size:12px;font-weight:700;">🚫 لا يوجد مخزون FBN — الاعتماد على Xdock بس</span>'
+                        _render_alert_sku_row(
+                            r,
+                            lines=[f"🟣 مخزون Xdock: {r['stock_xdock_net']:,} — 📈 مبيع شهري: {r['sales_month']:,}"
+                                   + (f" — 💵 {r['price']:,.2f} ريال" if r["price"] is not None else "")],
+                            badges_html=other_badge)
+                else:
+                    st.caption(f"لا توجد أصناف مخزون Xdock عندها {xdock_threshold_dash} قطعة أو أقل حالياً")
+
             # ══════════════════════════════════════════════════════════════════════
             # 📢 تحليل أداء الإعلانات | Ads Performance Analysis
             # قسم جديد ومنفصل تمامًا عن القسم اللي فوق (ads_profit_rows_td/ads_loss_rows_td) —
@@ -4207,6 +4230,21 @@ with tab_dash:
                 _agg["ad_result"] = _agg["revenue"] - _agg["spends"]
 
             campaigns_list_apa = list(campaigns_apa.values())
+
+            def _apa_render_related_skus(sku_up_set, max_show=6):
+                """يعرض الأصناف (SKU) المرتبطة بالحملة مع صورها | Renders the SKUs linked
+                to this campaign, each with its product image."""
+                sku_list_r = sorted(sku_up_set)
+                shown_r = sku_list_r[:max_show]
+                for sku_up_r in shown_r:
+                    inv_info_r = inv_map.get(sku_up_r, {})
+                    ci_r, cinfo_r = st.columns([1, 6])
+                    with ci_r:
+                        show_img(inv_info_r.get("img", ""), 45)
+                    with cinfo_r:
+                        st.markdown(sku_link_html(inv_info_r.get("sku", sku_up_r)), unsafe_allow_html=True)
+                if len(sku_list_r) > max_show:
+                    st.caption(f"+ {len(sku_list_r) - max_show} SKU إضافي | more SKUs")
 
             if not campaigns_list_apa:
                 st.info("لا توجد بيانات إعلانات مرفوعة حالياً | No ad data uploaded yet")
@@ -4350,6 +4388,8 @@ with tab_dash:
                         if best_c_apa:
                             st.markdown(_kpi_card_html(icon_s, "#2563eb", label_s, best_c_apa["campaign"]), unsafe_allow_html=True)
                             st.caption(fmt_s(best_c_apa))
+                            with st.expander(f"🏷️ الأصناف | SKUs ({best_c_apa['sku_count']})"):
+                                _apa_render_related_skus(best_c_apa["skus"])
                         else:
                             st.markdown(_kpi_card_html(icon_s, "#6b7280", label_s, "—"), unsafe_allow_html=True)
 
@@ -4378,6 +4418,8 @@ with tab_dash:
                             f"📉 نتيجة الإعلان بعد الإنفاق الإعلاني | Ad Result After Ad Spend: <b>{c_apa['ad_result']:,.2f} ريال</b>")
                         st.markdown(f"🏷️ التصنيف | Classification: **{icon_c} {label_c}**")
                         st.markdown(f"✅ التوصية | Recommendation: **{rec_c}**")
+                        st.markdown("🏷️ **الأصناف المرتبطة | Related SKUs**")
+                        _apa_render_related_skus(c_apa["skus"])
 
                 st.caption(
                     "ℹ️ مقارنة الفترة الحالية بالفترة السابقة (📈/📉 Revenue, Orders, Ad Spend, ROAS, CPA, CTR, CVR, "
@@ -4386,29 +4428,6 @@ with tab_dash:
                     "تحديث في شيت الإعلانات | Current-vs-previous-period comparison isn't available yet because the "
                     "Advertisements sheet only stores each campaign's live cumulative totals, with no daily date "
                     "history to compare against. Enabling it would require snapshotting the ads sheet with dates.")
-
-            with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,} — {xdock_low_with_other_td} عندهم مخزون FBN | {xdock_low_without_other_td} من غيره) | Show low Xdock-stock SKUs"):
-                st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا. الأصناف اللي معاها مخزون FBN (Inventory) أقل إلحاحاً من اللي مفيش عندها غير مخزون Xdock بس. الترتيب هنا من الأعلى مبيعاً للأقل عشان تعرف الصنف مهم ولا لأ | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us. SKUs that also have FBN (Inventory) stock are less urgent than ones relying on Xdock stock alone. Sorted by monthly sales (highest → lowest) so you can tell if it actually matters")
-                if xdock_low_rows_td:
-                    df_al7 = pd.DataFrame([{
-                        "SKU": r["sku"], "مخزون Xdock | Xdock Stock": r["stock_xdock_net"],
-                        "مخزون FBN | FBN Stock": r["other_stock"],
-                        "مبيع شهري | Monthly Sales": r["sales_month"],
-                        "السعر | Price": r["price"] if r["price"] is not None else "—",
-                    } for r in xdock_low_rows_td])
-                    dl_btn(df_al7, "alert_xdock_low", key="dl_alert_xdock_td")
-                    for r in xdock_low_rows_td:
-                        if r["has_other_stock"]:
-                            other_badge = f'<span style="color:#4ade80;font-size:12px;">📦 عنده مخزون FBN (Inventory): {r["other_stock"]:,} — أقل إلحاحاً</span>'
-                        else:
-                            other_badge = '<span style="color:#f87171;font-size:12px;font-weight:700;">🚫 لا يوجد مخزون FBN — الاعتماد على Xdock بس</span>'
-                        _render_alert_sku_row(
-                            r,
-                            lines=[f"🟣 مخزون Xdock: {r['stock_xdock_net']:,} — 📈 مبيع شهري: {r['sales_month']:,}"
-                                   + (f" — 💵 {r['price']:,.2f} ريال" if r["price"] is not None else "")],
-                            badges_html=other_badge)
-                else:
-                    st.caption(f"لا توجد أصناف مخزون Xdock عندها {xdock_threshold_dash} قطعة أو أقل حالياً")
 
             st.write("")
 
