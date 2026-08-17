@@ -64,7 +64,7 @@ TABS_CONFIG = {
     # sku_child هو المفتاح اللي بيتربط بيه مع باقي الشيتات (زي Inventory وDailyOrders).
     # عمود "price" ده سعر البيع الأساسي اللي بتُحسب عليه الخصومات
     # والعمولة والضريبة والإعلانات (بدل سعر الطلبات القديم، اللي بقى اسمه "سعر العرض").
-    # عمود stock_xdock_net مخزون تاني منفصل عن تاب Inventory، بيتراقب لوحده في التنبيهات السريعة.
+    # عمود stock_xdock_net مخزون منفصل عن تاب Inventory (بنسميه في الواجهة "مخزون FBN" لما نقارنه)، بيتراقب لوحده في التنبيهات السريعة.
     "LIVE": ["psku_code","country_code","id_partner","partner_sku","family_code","brand_code",
              "partner_barcodes","sku_child","noon_title","noon_brand","active_price","msrp",
              "price","sale_price","noon_price_min","noon_price_max","seller_price_min",
@@ -3999,7 +3999,7 @@ with tab_dash:
             with ac7:
                 st.markdown(_alert_chip_html("🟣", "#faf5ff", "#a855f7", "مخزون Xdock قارب على النفاد",
                             f"{len(xdock_low_rows_td):,}",
-                            f"{xdock_threshold_dash} قطعة أو أقل — منهم {xdock_low_with_other_td} عندهم مخزون تاني و {xdock_low_without_other_td} من غيره"),
+                            f"{xdock_threshold_dash} قطعة أو أقل — منهم {xdock_low_with_other_td} عندهم مخزون FBN و {xdock_low_without_other_td} من غيره"),
                             unsafe_allow_html=True)
 
             # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم،
@@ -4151,23 +4151,260 @@ with tab_dash:
                 else:
                     st.caption("لا توجد أصناف خسرانة من الإعلانات حالياً 🎉")
 
-            with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,} — {xdock_low_with_other_td} عندهم مخزون تاني | {xdock_low_without_other_td} من غيره) | Show low Xdock-stock SKUs"):
-                st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا. الأصناف اللي معاها مخزون تاني (Inventory) أقل إلحاحاً من اللي مفيش عندها غير مخزون Xdock بس | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us. SKUs that also have regular Inventory stock are less urgent than ones relying on Xdock stock alone")
+            # ══════════════════════════════════════════════════════════════════════
+            # 📢 تحليل أداء الإعلانات | Ads Performance Analysis
+            # قسم جديد ومنفصل تمامًا عن القسم اللي فوق (ads_profit_rows_td/ads_loss_rows_td) —
+            # ده معتمد بس على بيانات الإعلانات الموجودة فعليًا (Views/Clicks/Orders/ATC/
+            # Spends/Revenue) من غير أي افتراض لتكلفة المنتج أو هامش ربح حقيقي. كل حساب هنا
+            # بيتجمّع من *كل* الحملات/الصفوف الخاصة بالـ SKU أو الحملة قبل ما يتحسب —
+            # مش بياخد رقم من صف واحد بس لو فيه أكتر من حملة | A new, fully separate
+            # section from the block above — based only on ad data that actually exists,
+            # no product-cost or profit-margin assumptions. Every number here is summed
+            # across *all* matching campaign rows before any ratio is computed — never
+            # taken from a single row when more than one campaign exists.
+            st.markdown("---")
+            st.markdown("## 📢 تحليل أداء الإعلانات | Ads Performance Analysis")
+            st.caption("مبني فقط على بيانات الإعلانات الموجودة في النظام حاليًا — بدون أي افتراض لتكلفة المنتج أو هامش الربح | Based only on ad data currently in the system — no product cost or profit margin assumptions")
+
+            def _apa_ratios(views, clicks, atc, orders, spends, revenue):
+                """يعيد حساب كل النسب من الأرقام الخام المجمّعة (مش من عمود جاهز في صف واحد)
+                عشان أي SKU/حملة ليها أكتر من صف تتحسب صح | Recomputes every ratio from the
+                summed raw totals (never from a single pre-computed column), so multi-row
+                SKUs/campaigns are calculated correctly."""
+                ctr = (clicks / views * 100) if views > 0 else 0.0
+                cpc = (spends / clicks) if clicks > 0 else 0.0
+                cpa = (spends / orders) if orders > 0 else 0.0
+                cvr = (orders / clicks * 100) if clicks > 0 else 0.0
+                roas = (revenue / spends) if spends > 0 else 0.0
+                click_to_atc = (atc / clicks * 100) if clicks > 0 else 0.0
+                atc_to_order = (orders / atc * 100) if atc > 0 else 0.0
+                return {"ctr": ctr, "cpc": cpc, "cpa": cpa, "cvr": cvr, "roas": roas,
+                        "click_to_atc": click_to_atc, "atc_to_order": atc_to_order}
+
+            # ── تجميع كل صفوف الإعلانات (Sku × Campaign) على مستوى الحملة نفسها —
+            #    عشان أي حملة بتستهدف أكتر من SKU تتحسب مجمّعة صح ومتاخدش من صف واحد ──
+            campaigns_apa = {}
+            for sku_up_c, entries_c in ads_map_dash.items():
+                for e in entries_c:
+                    cname_c = e["campaign"] or "—"
+                    agg_c = campaigns_apa.setdefault(cname_c, {
+                        "campaign": cname_c, "views": 0.0, "clicks": 0.0, "orders": 0.0,
+                        "atc": 0.0, "spends": 0.0, "revenue": 0.0, "skus": set(),
+                    })
+                    agg_c["views"]   += e["views"]
+                    agg_c["clicks"]  += e["clicks"]
+                    agg_c["orders"]  += e["orders"]
+                    agg_c["atc"]     += e["atc"]
+                    agg_c["spends"]  += e["spends"]
+                    agg_c["revenue"] += e["revenue"]
+                    agg_c["skus"].add(sku_up_c)
+
+            for _cname, _agg in campaigns_apa.items():
+                _agg.update(_apa_ratios(_agg["views"], _agg["clicks"], _agg["atc"], _agg["orders"], _agg["spends"], _agg["revenue"]))
+                _agg["sku_count"] = len(_agg["skus"])
+                # نتيجة الإعلان بعد الإنفاق الإعلاني فقط — مش ربح حقيقي (مفيش تكلفة منتج) |
+                # Ad result after ad spend only — not real profit (no product cost known)
+                _agg["ad_result"] = _agg["revenue"] - _agg["spends"]
+
+            campaigns_list_apa = list(campaigns_apa.values())
+
+            if not campaigns_list_apa:
+                st.info("لا توجد بيانات إعلانات مرفوعة حالياً | No ad data uploaded yet")
+            else:
+                # ── 1) مؤشرات أداء الإعلانات | Ad Performance Metrics (إجمالي كل الحملات) ──
+                tot_views_apa   = sum(c["views"] for c in campaigns_list_apa)
+                tot_clicks_apa  = sum(c["clicks"] for c in campaigns_list_apa)
+                tot_atc_apa     = sum(c["atc"] for c in campaigns_list_apa)
+                tot_orders_apa  = sum(c["orders"] for c in campaigns_list_apa)
+                tot_spends_apa  = sum(c["spends"] for c in campaigns_list_apa)
+                tot_revenue_apa = sum(c["revenue"] for c in campaigns_list_apa)
+                tot_ratios_apa  = _apa_ratios(tot_views_apa, tot_clicks_apa, tot_atc_apa, tot_orders_apa, tot_spends_apa, tot_revenue_apa)
+
+                st.markdown("#### 📊 مؤشرات أداء الإعلانات | Ad Performance Metrics")
+                st.caption("ℹ️ كل النسب (CTR/CPC/CPS/CVR/ROAS) بتتحسب من إجمالي الأرقام الخام لكل الحملات مجمّعة — مش من عمود جاهز في صف واحد | All ratios are computed from the raw totals across every campaign combined — never from a single pre-computed column")
+                mrow1 = st.columns(4)
+                with mrow1[0]:
+                    st.markdown(_kpi_card_html("🛒", "#2563eb", "الطلبات | Orders", f"{tot_orders_apa:,.0f}"), unsafe_allow_html=True)
+                with mrow1[1]:
+                    st.markdown(_kpi_card_html("👁️", "#0891b2", "مرات الظهور | Impressions", f"{tot_views_apa:,.0f}"), unsafe_allow_html=True)
+                with mrow1[2]:
+                    st.markdown(_kpi_card_html("🖱️", "#7c3aed", "النقرات | Clicks", f"{tot_clicks_apa:,.0f}"), unsafe_allow_html=True)
+                with mrow1[3]:
+                    st.markdown(_kpi_card_html("➕", "#059669", "الإضافة إلى السلة | Add to Cart", f"{tot_atc_apa:,.0f}"), unsafe_allow_html=True)
+                mrow2 = st.columns(4)
+                with mrow2[0]:
+                    st.markdown(_kpi_card_html("📈", "#0891b2", "معدل النقر | CTR", f"{tot_ratios_apa['ctr']:.2f}%"), unsafe_allow_html=True)
+                with mrow2[1]:
+                    st.markdown(_kpi_card_html("💵", "#f59e0b", "تكلفة النقرة | CPC", f"{tot_ratios_apa['cpc']:.2f} ريال"), unsafe_allow_html=True)
+                with mrow2[2]:
+                    st.markdown(_kpi_card_html("🎯", "#dc2626", "تكلفة الطلب | CPS / CPA", f"{tot_ratios_apa['cpa']:.2f} ريال"), unsafe_allow_html=True)
+                with mrow2[3]:
+                    st.markdown(_kpi_card_html("📊", "#9333ea", "معدل التحويل | CVR", f"{tot_ratios_apa['cvr']:.2f}%"), unsafe_allow_html=True)
+                mrow3 = st.columns(3)
+                with mrow3[0]:
+                    st.markdown(_kpi_card_html("🎯", "#16a34a", "العائد على الإنفاق الإعلاني | ROAS", f"{tot_ratios_apa['roas']:.2f}"), unsafe_allow_html=True)
+                with mrow3[1]:
+                    st.markdown(_kpi_card_html("💰", "#16a34a", "الإيراد | Revenue", f"{tot_revenue_apa:,.2f} ريال"), unsafe_allow_html=True)
+                with mrow3[2]:
+                    st.markdown(_kpi_card_html("💸", "#dc2626", "الإنفاق الإعلاني | Ad Spend", f"{tot_spends_apa:,.2f} ريال"), unsafe_allow_html=True)
+
+                st.write("")
+
+                # ── 2) تحليل مسار الإعلان | Advertising Funnel ──
+                st.markdown("#### 🔻 تحليل مسار الإعلان | Advertising Funnel")
+                st.caption("عشان تعرف أين يحدث انخفاض الأداء في مسار الإعلان | See exactly where performance drops along the funnel")
+                fcols_apa = st.columns(4)
+                funnel_stages_apa = [
+                    ("👁️ مرات الظهور | Impressions", tot_views_apa, None),
+                    ("🖱️ النقرات | Clicks", tot_clicks_apa, tot_ratios_apa["ctr"]),
+                    ("➕ الإضافة إلى السلة | Add to Cart", tot_atc_apa, tot_ratios_apa["click_to_atc"]),
+                    ("🛒 الطلبات | Orders", tot_orders_apa, tot_ratios_apa["atc_to_order"]),
+                ]
+                for fc_apa, (label_f, val_f, rate_f) in zip(fcols_apa, funnel_stages_apa):
+                    with fc_apa:
+                        rate_html_f = (f'<div style="font-size:11px;color:#f59e0b;margin-top:4px;">↓ {rate_f:.1f}%</div>'
+                                       if rate_f is not None else "")
+                        st.markdown(
+                            f'<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;'
+                            f'padding:12px 10px;text-align:center;">'
+                            f'<div style="font-size:11px;color:#94a3b8;">{label_f}</div>'
+                            f'<div style="font-size:20px;font-weight:800;color:#e2e8f0;">{val_f:,.0f}</div>'
+                            f'{rate_html_f}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="margin-top:8px;font-size:12px;color:#94a3b8;">'
+                    f'📈 معدل النقر | CTR: <b style="color:#e2e8f0;">{tot_ratios_apa["ctr"]:.2f}%</b> &nbsp;|&nbsp; '
+                    f'النقر → السلة | Click → Cart: <b style="color:#e2e8f0;">{tot_ratios_apa["click_to_atc"]:.1f}%</b> &nbsp;|&nbsp; '
+                    f'السلة → الطلب | Cart → Order: <b style="color:#e2e8f0;">{tot_ratios_apa["atc_to_order"]:.1f}%</b> &nbsp;|&nbsp; '
+                    f'معدل التحويل الكلي | CVR: <b style="color:#e2e8f0;">{tot_ratios_apa["cvr"]:.2f}%</b>'
+                    f'</div>', unsafe_allow_html=True)
+
+                st.write("")
+
+                # ── دوال التحليل التلقائي / التصنيف / التوصية — مبنية على أكتر من مؤشر مع
+                #    بعض (ROAS+CPA+CVR+CTR+CPC+Orders+Spend+Revenue) مش مؤشر واحد بس ──
+                def _apa_insight(c):
+                    if c["orders"] <= 0:
+                        return ("🔴", "أداء ضعيف | Poor Performance",
+                                f"اتصرف {c['spends']:,.2f} ريال على الحملة ولسه ما جابتش أي طلبات فعلية.")
+                    score_c = 0
+                    if c["roas"] >= 3: score_c += 2
+                    elif c["roas"] >= 1.5: score_c += 1
+                    elif c["roas"] < 1: score_c -= 2
+                    if c["cvr"] >= 3: score_c += 1
+                    elif c["cvr"] < 1: score_c -= 1
+                    if c["ctr"] >= 1: score_c += 1
+                    elif c["ctr"] < 0.3: score_c -= 1
+                    if c["spends"] > 0 and c["revenue"] < c["spends"]:
+                        score_c -= 2
+                    if score_c >= 3:
+                        return ("🟢", "أداء جيد | Good Performance",
+                                f"الحملة تحقق ROAS {c['roas']:.2f} مع معدل تحويل {c['cvr']:.2f}% جيد.")
+                    elif score_c >= 0:
+                        return ("🟡", "يحتاج إلى تحسين | Needs Improvement",
+                                f"الحملة بتاخد نقرات معقولة (CTR {c['ctr']:.2f}%)، لكن التحويل للطلبات ({c['cvr']:.2f}%) أو الـ ROAS ({c['roas']:.2f}) لسه محتاج تحسين.")
+                    else:
+                        return ("🔴", "أداء ضعيف | Poor Performance",
+                                f"تكلفة الطلب {c['cpa']:,.2f} ريال مرتفعة مقارنة بعدد الطلبات ({c['orders']:,.0f}) والـ ROAS {c['roas']:.2f}.")
+
+                def _apa_classification(c):
+                    icon_i, _t, _d = _apa_insight(c)
+                    if c["orders"] <= 0:
+                        return "🔴", "أداء ضعيف | Poor Performance"
+                    if icon_i == "🟢":
+                        return "🟢", "أداء قوي | Strong Performance"
+                    if icon_i == "🟡":
+                        if c["roas"] < 1.5 and c["cvr"] < 2:
+                            return "🟠", "يحتاج إلى تحسين | Needs Improvement"
+                        return "🟡", "يحتاج إلى مراقبة | Needs Monitoring"
+                    return "🔴", "أداء ضعيف | Poor Performance"
+
+                def _apa_recommendation(c):
+                    cls_icon_c, _l = _apa_classification(c)
+                    if c["orders"] <= 0 and c["spends"] > 0:
+                        return "قلل الإنفاق | Reduce Spend"
+                    if cls_icon_c == "🟢":
+                        return "استمر | Continue"
+                    if cls_icon_c == "🟡":
+                        return "راقب | Monitor"
+                    if cls_icon_c == "🟠":
+                        return "حسّن الحملة | Optimize"
+                    return "راجع الحملة | Review"
+
+                # ── 5) مقارنة الحملات | Campaign Comparison (قبل التفاصيل عشان تبان الأهم فوق) ──
+                st.markdown("#### 🏆 مقارنة الحملات | Campaign Comparison")
+                camps_with_orders_apa = [c for c in campaigns_list_apa if c["orders"] > 0]
+                camps_with_clicks_apa = [c for c in campaigns_list_apa if c["clicks"] > 0]
+                comp_specs_apa = [
+                    ("🏆", "أفضل حملة حسب ROAS | Best by ROAS", camps_with_orders_apa, lambda c: c["roas"], lambda c: f"ROAS {c['roas']:.2f}"),
+                    ("💰", "أعلى إيراد | Highest Revenue", campaigns_list_apa, lambda c: c["revenue"], lambda c: f"{c['revenue']:,.2f} ريال"),
+                    ("🛒", "أكثر طلبات | Most Orders", campaigns_list_apa, lambda c: c["orders"], lambda c: f"{c['orders']:,.0f} طلب"),
+                    ("💸", "أعلى إنفاق إعلاني | Highest Ad Spend", campaigns_list_apa, lambda c: c["spends"], lambda c: f"{c['spends']:,.2f} ريال"),
+                    ("🎯", "أفضل تكلفة طلب | Best CPA", camps_with_orders_apa, lambda c: -c["cpa"], lambda c: f"{c['cpa']:.2f} ريال"),
+                    ("📈", "أفضل معدل تحويل | Best CVR", camps_with_clicks_apa, lambda c: c["cvr"], lambda c: f"{c['cvr']:.2f}%"),
+                    ("👁️", "أفضل معدل نقر | Best CTR", campaigns_list_apa, lambda c: c["ctr"], lambda c: f"{c['ctr']:.2f}%"),
+                ]
+                comp_cols_apa = st.columns(2)
+                for i_apa, (icon_s, label_s, pool_s, key_s, fmt_s) in enumerate(comp_specs_apa):
+                    best_c_apa = max(pool_s, key=key_s, default=None)
+                    with comp_cols_apa[i_apa % 2]:
+                        if best_c_apa:
+                            st.markdown(_kpi_card_html(icon_s, "#2563eb", label_s, best_c_apa["campaign"]), unsafe_allow_html=True)
+                            st.caption(fmt_s(best_c_apa))
+                        else:
+                            st.markdown(_kpi_card_html(icon_s, "#6b7280", label_s, "—"), unsafe_allow_html=True)
+
+                st.write("")
+
+                # ── 3+6+7) التحليل التلقائي + التصنيف + التوصية لكل حملة | Automatic
+                #    insight + classification + recommendation per campaign ──
+                st.markdown("#### 🔎 تحليل كل حملة | Per-Campaign Analysis")
+                for c_apa in sorted(campaigns_list_apa, key=lambda x: -x["spends"]):
+                    icon_i, title_i, desc_i = _apa_insight(c_apa)
+                    icon_c, label_c = _apa_classification(c_apa)
+                    rec_c = _apa_recommendation(c_apa)
+                    bg_i = {"🟢": "#052e1655", "🟡": "#78350f33", "🔴": "#4c051655"}[icon_i]
+                    border_i = {"🟢": "#16a34a", "🟡": "#f59e0b", "🔴": "#dc2626"}[icon_i]
+                    with st.expander(f"{icon_i} {c_apa['campaign']} — {c_apa['sku_count']} SKU | {c_apa['orders']:,.0f} طلب"):
+                        st.markdown(
+                            f'<div dir="rtl" style="background:{bg_i};border:1px solid {border_i};border-radius:8px;padding:8px 12px;margin-bottom:8px;">'
+                            f'<b>{icon_i} {title_i}</b><br><span style="font-size:13px;">{desc_i}</span>'
+                            f'</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f"👁️ ظهور: {c_apa['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {c_apa['clicks']:,.0f} &nbsp;|&nbsp; "
+                            f"➕ سلة: {c_apa['atc']:,.0f} &nbsp;|&nbsp; 🛒 طلبات: {c_apa['orders']:,.0f}<br>"
+                            f"📊 CTR: {c_apa['ctr']:.2f}% &nbsp;|&nbsp; 💵 CPC: {c_apa['cpc']:.2f} &nbsp;|&nbsp; "
+                            f"🎯 CPS/CPA: {c_apa['cpa']:.2f} &nbsp;|&nbsp; 📈 CVR: {c_apa['cvr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {c_apa['roas']:.2f}<br>"
+                            f"💸 إنفاق: {c_apa['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {c_apa['revenue']:,.2f} ريال &nbsp;|&nbsp; "
+                            f"📉 نتيجة الإعلان بعد الإنفاق الإعلاني | Ad Result After Ad Spend: <b>{c_apa['ad_result']:,.2f} ريال</b>")
+                        st.markdown(f"🏷️ التصنيف | Classification: **{icon_c} {label_c}**")
+                        st.markdown(f"✅ التوصية | Recommendation: **{rec_c}**")
+
+                st.caption(
+                    "ℹ️ مقارنة الفترة الحالية بالفترة السابقة (📈/📉 Revenue, Orders, Ad Spend, ROAS, CPA, CTR, CVR, "
+                    "Clicks, Add to Cart) مش متاحة هنا لسه — لأن تاب الإعلانات بيحفظ إجمالي كل حملة لحظيًا من غير "
+                    "تاريخ يومي، فمفيش فترة سابقة نقارن بيها. لو حبينا نفعّلها، محتاجين نبدأ نسجّل نسخة/تاريخ لكل "
+                    "تحديث في شيت الإعلانات | Current-vs-previous-period comparison isn't available yet because the "
+                    "Advertisements sheet only stores each campaign's live cumulative totals, with no daily date "
+                    "history to compare against. Enabling it would require snapshotting the ads sheet with dates.")
+
+            with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,} — {xdock_low_with_other_td} عندهم مخزون FBN | {xdock_low_without_other_td} من غيره) | Show low Xdock-stock SKUs"):
+                st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا. الأصناف اللي معاها مخزون FBN (Inventory) أقل إلحاحاً من اللي مفيش عندها غير مخزون Xdock بس. الترتيب هنا من الأعلى مبيعاً للأقل عشان تعرف الصنف مهم ولا لأ | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us. SKUs that also have FBN (Inventory) stock are less urgent than ones relying on Xdock stock alone. Sorted by monthly sales (highest → lowest) so you can tell if it actually matters")
                 if xdock_low_rows_td:
                     df_al7 = pd.DataFrame([{
                         "SKU": r["sku"], "مخزون Xdock | Xdock Stock": r["stock_xdock_net"],
-                        "مخزون تاني | Other Stock": r["other_stock"],
+                        "مخزون FBN | FBN Stock": r["other_stock"],
+                        "مبيع شهري | Monthly Sales": r["sales_month"],
                         "السعر | Price": r["price"] if r["price"] is not None else "—",
                     } for r in xdock_low_rows_td])
                     dl_btn(df_al7, "alert_xdock_low", key="dl_alert_xdock_td")
                     for r in xdock_low_rows_td:
                         if r["has_other_stock"]:
-                            other_badge = f'<span style="color:#4ade80;font-size:12px;">📦 عنده مخزون تاني (Inventory): {r["other_stock"]:,} — أقل إلحاحاً</span>'
+                            other_badge = f'<span style="color:#4ade80;font-size:12px;">📦 عنده مخزون FBN (Inventory): {r["other_stock"]:,} — أقل إلحاحاً</span>'
                         else:
-                            other_badge = '<span style="color:#f87171;font-size:12px;font-weight:700;">🚫 مفيش مخزون تاني خالص — الاعتماد على Xdock بس</span>'
+                            other_badge = '<span style="color:#f87171;font-size:12px;font-weight:700;">🚫 لا يوجد مخزون FBN — الاعتماد على Xdock بس</span>'
                         _render_alert_sku_row(
                             r,
-                            lines=[f"🟣 مخزون Xdock: {r['stock_xdock_net']:,}"
+                            lines=[f"🟣 مخزون Xdock: {r['stock_xdock_net']:,} — 📈 مبيع شهري: {r['sales_month']:,}"
                                    + (f" — 💵 {r['price']:,.2f} ريال" if r["price"] is not None else "")],
                             badges_html=other_badge)
                 else:
