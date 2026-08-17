@@ -60,6 +60,16 @@ TABS_CONFIG = {
                            "CTR","ROAS","CPC","CPS","CVR"],
     # تاب العمولة ومصاريف التوصيل — بيتحدّث يدوي، وبنستخدمه لحساب صافي سعر البيع لكل SKU
     "COM":               ["SKU","مصاريف توصيل","العمولة"],
+    # تاب LIVE — نسخة من ملف Noon catalog export، بيتحدّث يدوي بره البرنامج (مش من هنا).
+    # partner_sku هو الـ SKU. عمود "price" ده سعر البيع الأساسي اللي بتُحسب عليه الخصومات
+    # والعمولة والضريبة والإعلانات (بدل سعر الطلبات القديم، اللي بقى اسمه "سعر العرض").
+    # عمود stock_xdock_net مخزون تاني منفصل عن تاب Inventory، بيتراقب لوحده في التنبيهات السريعة.
+    "LIVE": ["psku_code","country_code","id_partner","partner_sku","family_code","brand_code",
+             "partner_barcodes","sku_child","noon_title","noon_brand","active_price","msrp",
+             "price","sale_price","noon_price_min","noon_price_max","seller_price_min",
+             "seller_price_max","price_engine_min","price_engine_max","sale_start_date",
+             "sale_end_date","is_active","warranty","stock_fbn_net","stock_xdock_gross",
+             "stock_xdock_net","mp_code","noon_status"],
 }
 
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
@@ -182,6 +192,7 @@ tacweed_sheet        = sheets["Tacweed"]
 warehouse_stock_sheet = sheets["WarehouseStock"]
 ads_sheet             = sheets["Advertisements"]
 com_sheet             = sheets["COM"]
+live_sheet            = sheets["LIVE"]
 
 # ══ كاش ══
 def safe_get_all_values(sheet, retries=6, delay=1):
@@ -336,6 +347,55 @@ def get_com_map():
         commission_pct = _f2(col(row, "العمولة"))
         m[sku_up] = {"delivery": delivery, "commission_pct": commission_pct}
     return m
+
+# ══ خريطة LIVE (SKU -> سعر أساسي/سعر عرض/مخزون xdock من ملف Noon catalog export) ══
+def _f2_or_none(v):
+    """زي _f2 بس بترجع None لو الخلية فاضية/مش رقم بدل ما ترجع صفر — عشان صفر حقيقي (سعر=0)
+    ميتلخبطش مع "مفيش سعر مسجل"."""
+    s = str(v).strip().replace(",", "")
+    if s == "" or s.lower() in ("nan", "none"):
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+def get_live_map():
+    """يرجع {SKU (upper) -> {price, sale_price, stock_xdock_net, noon_title, noon_status}}
+    من تاب LIVE (نسخة ملف Noon catalog export). المفتاح هو partner_sku."""
+    data = get_cached(live_sheet)
+    if not data or len(data) < 2:
+        return {}
+    header = [h.strip() for h in data[0]]
+    idx = {h: i for i, h in enumerate(header)}
+    def col(row, *names):
+        for name in names:
+            i = idx.get(name)
+            if i is not None and i < len(row):
+                return row[i]
+        return ""
+    m = {}
+    for row in data[1:]:
+        sku_raw = col(row, "partner_sku", "SKU", "sku")
+        if not str(sku_raw).strip():
+            continue
+        sku_up = str(sku_raw).strip().upper()
+        m[sku_up] = {
+            "price": _f2_or_none(col(row, "price")),
+            "sale_price": _f2_or_none(col(row, "sale_price")),
+            "stock_xdock_net": _to_int(col(row, "stock_xdock_net")),
+            "noon_title": col(row, "noon_title"),
+            "noon_status": col(row, "noon_status"),
+        }
+    return m
+
+def get_base_price(sku_up, live_map, fallback_price=None):
+    """يرجع (السعر, من_LIVE؟) — بيدّي الأولوية لعمود price في تاب LIVE (سعر البيع الأساسي)،
+    ولو مش موجود بيرجع السعر البديل (سعر العرض القديم من الطلبات) لو موجود."""
+    live_info = live_map.get(sku_up)
+    if live_info and live_info.get("price") is not None:
+        return live_info["price"], True
+    return fallback_price, False
 
 def compute_net_price_after_fees(price, com_info):
     """يحسب صافي سعر البيع بعد خصم العمولة ومصاريف التوصيل، وبعدها بعد خصم 15% ضريبة.
@@ -2970,6 +3030,16 @@ with tab12:
         st.success("✅ تم الحفظ | Saved")
         st.rerun()
 
+    st.divider()
+    st.markdown("### 🟣 حد تنبيه مخزون Xdock | Xdock Low-Stock Alert Threshold")
+    st.caption("لو مخزون Xdock (عمود stock_xdock_net في تاب LIVE) وصل للرقم ده أو أقل، يظهر في التنبيهات السريعة بالداشبورد وتاب المبيعات كمحتاج تزويد | If Xdock stock (stock_xdock_net in the LIVE sheet) reaches this number or less, it shows up in the Dashboard/Sales quick alerts as needing restock")
+    current_xdock_th = int(current_settings.get("xdock_low_stock_threshold","10") or 10)
+    new_xdock_th = st.number_input("الحد | Threshold", min_value=0, max_value=1000, value=current_xdock_th, step=1, key="xdock_th_input")
+    if st.button("💾 حفظ الحد | Save Threshold", key="save_xdock_th"):
+        save_setting("xdock_low_stock_threshold", str(new_xdock_th))
+        st.success("✅ تم الحفظ | Saved")
+        st.rerun()
+
 # ══ TAB 13 — مراجعة المبيعات ══
 with tab13:
     st.subheader("📈 مراجعة المبيعات | Sales Review")
@@ -3194,6 +3264,8 @@ with tab14:
         pending_approval_skus_t14 = get_pending_approval_skus()
         ads_map_t14 = get_ads_map()
         com_map_t14 = get_com_map()
+        live_map_t14 = get_live_map()
+        xdock_threshold_t14 = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
 
         st.divider()
         for r in sales_tab_rows:
@@ -3228,11 +3300,27 @@ with tab14:
                                 unsafe_allow_html=True)
                             st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
 
+                # ══ مخزون Xdock (من تاب LIVE) — مخزون منفصل عن Inventory، لو قرب يخلص محتاج تزويد ══
+                live_info_t14 = live_map_t14.get(r["sku_up"])
+                if live_info_t14 is not None:
+                    xnet_t14 = live_info_t14.get("stock_xdock_net", 0)
+                    xlow_t14 = xnet_t14 <= xdock_threshold_t14
+                    st.markdown(
+                        f'<span class="wh-badge" style="background:{"#7f1d1d" if xlow_t14 else "#3b0764"};'
+                        f'color:{"#fca5a5" if xlow_t14 else "#e9d5ff"};">'
+                        f'{"🔴" if xlow_t14 else "🟣"} مخزون Xdock: {xnet_t14:,}'
+                        f'{" — قارب على النفاد" if xlow_t14 else ""}</span>',
+                        unsafe_allow_html=True)
+
                 # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة | Net price after commission,
                 #    delivery fees, and VAT ══
+                # سعر البيع الأساسي بييجي من عمود price في تاب LIVE أولاً (وده اللي بتُحسب عليه
+                # الخصومات والعمولة والضريبة والإعلانات)، ولو مش موجود بيرجع لسعر الطلبات القديم
+                # (بقى اسمه "سعر العرض") كبديل.
                 com_info_t14 = com_map_t14.get(r["sku_up"])
                 if com_info_t14:
-                    latest_price_t14 = get_latest_sku_price(r, sales_dates)
+                    offer_price_t14 = get_latest_sku_price(r, sales_dates)
+                    latest_price_t14, price_from_live_t14 = get_base_price(r["sku_up"], live_map_t14, offer_price_t14)
                     if latest_price_t14 is not None:
                         net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
 
@@ -3268,10 +3356,15 @@ with tab14:
                                         f'خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. افتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
                                         '</div>')
 
+                        offer_price_line_t14 = ""
+                        if offer_price_t14 is not None and (not price_from_live_t14 or round(offer_price_t14, 2) != round(latest_price_t14, 2)):
+                            offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض: <b>{offer_price_t14:,.2f}</b> ريال'
+                        price_label_t14 = "سعر البيع الأساسي" if price_from_live_t14 else "سعر البيع (سعر العرض)"
                         st.markdown(
                             f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
                             f'padding:8px 14px;margin:4px 0;">'
-                            f'<span style="color:#e2e8f0;font-size:13px;">💵 سعر البيع: <b>{latest_price_t14:,.2f}</b> ريال '
+                            f'<span style="color:#e2e8f0;font-size:13px;">💵 {price_label_t14}: <b>{latest_price_t14:,.2f}</b> ريال'
+                            f'{offer_price_line_t14}'
                             f'&nbsp;|&nbsp; 🚚 توصيل: <b>{com_info_t14["delivery"]:,.0f}</b> '
                             f'&nbsp;|&nbsp; 🏷️ عمولة: <b>{com_info_t14["commission_pct"]:,.0f}%</b></span><br>'
                             f'<span style="color:#4ade80;font-size:14px;font-weight:bold;">💳 الصافي بعد خصم العمولة والتوصيل: {net_fees_t14:,.2f} ريال</span><br>'
@@ -3280,7 +3373,7 @@ with tab14:
                             f'</div>',
                             unsafe_allow_html=True)
                     else:
-                        st.caption("ℹ️ فيه عمولة وتوصيل مسجلين لكن مفيش سعر بيع حديث لحساب الصافي منهم | Commission & delivery are set but no recent price found to calculate the net")
+                        st.caption("ℹ️ فيه عمولة وتوصيل مسجلين لكن مفيش سعر بيع حديث (لا في LIVE ولا في الطلبات) لحساب الصافي منهم | Commission & delivery are set but no price found (neither in LIVE nor in orders) to calculate the net")
 
                 # ══ أمس بارز ══
                 yesterday_t14 = sales_dates[0] if sales_dates else None
@@ -3637,11 +3730,16 @@ with tab_dash:
         #    مقابل إجمالي المصروف عليه) — عشان تظهر في التنبيهات السريعة تحت ──
         ads_map_dash = get_ads_map()
         com_map_dash = get_com_map()
+        live_map_dash = get_live_map()
 
         def _td_latest_price_for_sku(sku_up):
-            """آخر سعر بيع مسجل لهذا الـ SKU من نفس خرائط الأسعار المستخدمة في الداشبورد
-            (بيدوّر في الفترة الحالية الأحدث أولاً، وبعدين الفترة السابقة لو محتاج) | Most recent
-            recorded price for this SKU, using the price maps already built for the dashboard."""
+            """السعر الأساسي لهذا الـ SKU: عمود price من تاب LIVE أولاً (سعر البيع الأساسي)،
+            ولو مش موجود بيدوّر في خرائط أسعار الطلبات (الفترة الحالية ثم السابقة) كبديل
+            (سعر العرض) | Base price for this SKU: LIVE sheet's price column first, falling
+            back to the order-price maps (offer price) already built for the dashboard."""
+            live_info = live_map_dash.get(sku_up)
+            if live_info and live_info.get("price") is not None:
+                return live_info["price"]
             for dates_list, prices_map in ((cur_dates_td, cur_prices_td), (prev_dates_td, prev_prices_td)):
                 for d in dates_list:
                     day_list = prices_map.get(sku_up, {}).get(d, [])
@@ -3680,6 +3778,26 @@ with tab_dash:
         ads_profit_rows_td.sort(key=lambda r: -r["result"])
         ads_loss_rows_td.sort(key=lambda r: r["result"])  # الأكثر خسارة أولاً
 
+        # ── مخزون Xdock قارب على النفاد (من تاب LIVE) — مخزون منفصل عن Inventory، محتاج تزويد
+        #    لو قرب يخلص، مش جدولة | Xdock stock running low (from LIVE sheet) — a separate
+        #    stock pool from Inventory; low means it needs restocking, not scheduling ──
+        xdock_threshold_dash = int(load_settings().get("xdock_low_stock_threshold", "10") or 10)
+        xdock_low_rows_td = []
+        for sku_up_x, live_info_x in live_map_dash.items():
+            xnet_x = live_info_x.get("stock_xdock_net")
+            if xnet_x is None or xnet_x > xdock_threshold_dash:
+                continue
+            inv_info_x = inv_map.get(sku_up_x, {})
+            xdock_low_rows_td.append({
+                "sku_up": sku_up_x,
+                "sku": inv_info_x.get("sku", sku_up_x),
+                "img": inv_info_x.get("img", ""),
+                "stock_xdock_net": xnet_x,
+                "price": live_info_x.get("price"),
+                "noon_title": live_info_x.get("noon_title", ""),
+            })
+        xdock_low_rows_td.sort(key=lambda r: r["stock_xdock_net"])
+
         # ── التنبيهات السريعة | Quick alerts strip ──
         st.markdown("##### 🔔 التنبيهات السريعة | Quick Alerts")
         def _alert_chip_html(icon, bg, border, label, value, sub):
@@ -3704,13 +3822,16 @@ with tab_dash:
             st.markdown(_alert_chip_html("🟢", "#f0fdf4", "#22c55e", "منتجات ارتفعت مبيعاتها",
                         f"{len(rise_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
 
-        ac5, ac6 = st.columns(2)
+        ac5, ac6, ac7 = st.columns(3)
         with ac5:
             st.markdown(_alert_chip_html("🎯", "#f0fdf4", "#22c55e", "منتجات ربحانة من الإعلانات",
                         f"{len(ads_profit_rows_td):,}", "صافي ربح الطلبات > المصروف على الإعلان"), unsafe_allow_html=True)
         with ac6:
             st.markdown(_alert_chip_html("🚨", "#fef2f2", "#ef4444", "منتجات خسرانة من الإعلانات",
                         f"{len(ads_loss_rows_td):,}", "المصروف على الإعلان أكبر من صافي الربح (أو من غير طلبات)"), unsafe_allow_html=True)
+        with ac7:
+            st.markdown(_alert_chip_html("🟣", "#faf5ff", "#a855f7", "مخزون Xdock قارب على النفاد",
+                        f"{len(xdock_low_rows_td):,}", f"{xdock_threshold_dash} قطعة أو أقل"), unsafe_allow_html=True)
 
         # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم،
         #    مع سياق كافي (غير متوفر؟ ليها جدولة حديثة؟ في انتظار اعتماد؟) عشان التحليل يكون مفهوم ──
@@ -3860,6 +3981,22 @@ with tab_dash:
                     _render_alert_sku_row(r, badges_html=_ads_insight_html(r))
             else:
                 st.caption("لا توجد أصناف خسرانة من الإعلانات حالياً 🎉")
+
+        with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,}) | Show low Xdock-stock SKUs"):
+            st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us")
+            if xdock_low_rows_td:
+                df_al7 = pd.DataFrame([{
+                    "SKU": r["sku"], "مخزون Xdock | Xdock Stock": r["stock_xdock_net"],
+                    "السعر | Price": r["price"] if r["price"] is not None else "—",
+                } for r in xdock_low_rows_td])
+                dl_btn(df_al7, "alert_xdock_low", key="dl_alert_xdock_td")
+                for r in xdock_low_rows_td:
+                    _render_alert_sku_row(
+                        r,
+                        lines=[f"🟣 مخزون Xdock: {r['stock_xdock_net']:,}"
+                               + (f" — 💵 {r['price']:,.2f} ريال" if r["price"] is not None else "")])
+            else:
+                st.caption(f"لا توجد أصناف مخزون Xdock عندها {xdock_threshold_dash} قطعة أو أقل حالياً")
 
         st.write("")
 
