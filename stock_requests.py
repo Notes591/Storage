@@ -11,6 +11,36 @@ import gspread.exceptions
 
 st.set_page_config(page_title="📦 Stock Requests | طلبات المخزون", page_icon="📦", layout="wide")
 
+# ══ قفل القايمة الجانبية تلقائياً على الموبايل لما تدوس على أي حاجة برا | Auto-close
+#    the sidebar on mobile when tapping outside it, instead of only via the toggle
+#    button ══
+st.components.v1.html("""
+<script>
+(function() {
+    const doc = window.parent.document;
+    if (doc.__sidebarOutsideCloseBound) return;
+    doc.__sidebarOutsideCloseBound = true;
+
+    doc.addEventListener('click', function(e) {
+        if (window.parent.innerWidth >= 768) return;  // موبايل بس | mobile only
+
+        const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+        if (!sidebar) return;
+
+        const expanded = sidebar.getAttribute('aria-expanded');
+        const isOpen = (expanded === null) ? sidebar.offsetWidth > 0 : expanded === 'true';
+        if (!isOpen) return;
+
+        const openToggle = doc.querySelector('[data-testid="stSidebarCollapseButton"] button')
+                         || doc.querySelector('[data-testid="baseButton-headerNoPadding"]');
+        if (sidebar.contains(e.target) || (openToggle && openToggle.contains(e.target))) return;
+
+        if (openToggle) openToggle.click();
+    }, true);
+})();
+</script>
+""", height=0)
+
 # ══ اتصال ══
 scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
