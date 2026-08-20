@@ -3912,8 +3912,18 @@ with tab_dash:
         if not inv_map:
             st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
         else:
-            _dash_fbn_subtab_td, _dash_fbb_subtab_td = st.tabs(
-                ["🅽 مبيعات نون FBN | Noon FBN Sales", "🅱 مبيعات نون FBB | Noon FBB Sales"])
+            _dash_all_subtab_td, _dash_fbn_subtab_td, _dash_fbb_subtab_td = st.tabs(
+                ["🔷 الكل (FBN+FBB) | All Combined",
+                 "🅽 مبيعات نون FBN | Noon FBN Sales",
+                 "🅱 مبيعات نون FBB | Noon FBB Sales"])
+            with _dash_all_subtab_td:
+                # ── الكل مع بعض: كل الطلبات (FBN + FBB) من غير أي فلترة على نوع
+                #    التنفيذ — عشان في النهاية هو متجر نون واحد ومبيعات واحدة | All
+                #    orders combined (FBN + FBB) with no fulfillment-type filter —
+                #    it's one Noon store and one combined sales figure.
+                _render_sales_dashboard_body(
+                    build_daily_orders_counts, build_daily_orders_prices,
+                    build_daily_orders_family_stats, "all")
             with _dash_fbn_subtab_td:
                 _render_sales_dashboard_body(
                     build_daily_orders_counts, build_daily_orders_prices,
