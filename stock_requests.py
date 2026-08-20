@@ -300,24 +300,34 @@ def set_tab_lock(tab_key, password):
 def _tab_gate(tab_key, tab_label):
     """لو التاب ده عليه كلمة سر ومحدش دخلها صح لسه في الجلسة دي، بيعرض فورم كلمة
     السر ويرجّع False (يعني منوع من عرض باقي محتوى التاب). لو مفيش كلمة سر عليه،
-    أو المستخدم دخلها صح قبل كده في نفس الجلسة، بيرجّع True | If this tab has a
-    password and it hasn't been entered correctly yet this session, shows a
+    أو المستخدم دخلها صح قبل كده (لأي تاب) في نفس الجلسة، بيرجّع True | If this tab
+    has a password and it hasn't been entered correctly yet this session, shows a
     password form and returns False (blocking the rest of the tab's content).
-    Returns True when the tab is unlocked (no password set, or already entered
-    correctly this session)."""
+    Returns True when the tab is unlocked (no password set, or a password for
+    ANY locked tab was already entered correctly this session).
+
+    ── الباسورد بيتكتب مرة واحدة بس لكل الجلسة | Enter once, unlocks every locked
+    tab: أول ما المستخدم يدخل كلمة سر صح لأي تاب محمي، بنحفظ فلاج عام
+    (_all_tabs_unlocked) في الجلسة، وأي تاب تاني عليه كلمة سر بيتفتح تلقائي من
+    غير ما يُطلب يدخلها تاني | The first time the user enters any locked tab's
+    password correctly, we set a single session-wide flag; every other locked
+    tab then opens automatically without asking again this session."""
     locks = get_tab_lock_map()
     pw = locks.get(tab_key, "")
     if not pw:
+        return True
+    if st.session_state.get("_all_tabs_unlocked"):
         return True
     unlocked_flag = f"_tab_unlocked_{tab_key}"
     if st.session_state.get(unlocked_flag):
         return True
     st.subheader(f"🔒 {tab_label}")
-    st.info("🔐 هذا القسم محمي بكلمة سر — اكتبها للدخول | This section is password-protected — enter the password to continue")
+    st.info("🔐 هذا القسم محمي بكلمة سر — اكتبها للدخول (هتفتح كل الأقسام المحمية بعد كده لنفس الجلسة) | This section is password-protected — enter the password to continue (unlocks every protected section for the rest of this session)")
     entered_pw = st.text_input("🔑 كلمة السر | Password", type="password", key=f"_tab_pw_input_{tab_key}")
     if st.button("دخول | Unlock", key=f"_tab_pw_btn_{tab_key}"):
         if entered_pw == pw:
             st.session_state[unlocked_flag] = True
+            st.session_state["_all_tabs_unlocked"] = True
             st.rerun()
         else:
             st.error("❌ كلمة السر غلط | Wrong password")
@@ -1417,6 +1427,81 @@ def build_daily_orders_family_stats(dates, live_map=None):
         fam_raw = row[family_col_idx].strip() if len(row) > family_col_idx else ""
         if not fam_raw or fam_raw.lower() in ("nan", "none"):
             continue  # لا يوجد قسم لهذا الصف — يتجاهل من تحليل الأقسام فقط
+        dept_name = family_display_name(fam_raw)
+        if not dept_name:
+            continue
+        price_val = ""
+        if price_col_idx is not None and len(row) > price_col_idx:
+            price_val = str(row[price_col_idx]).strip()
+        qty_val = 1
+        if qty_col_idx is not None and len(row) > qty_col_idx:
+            try:
+                qty_val = int(float(str(row[qty_col_idx]).strip()))
+            except Exception:
+                qty_val = 1
+        if qty_val < 1:
+            qty_val = 1
+        rev_val = 0.0
+        live_info_fam = live_map.get(sku.upper()) if live_map else None
+        live_price_fam = live_info_fam.get("price") if live_info_fam else None
+        if live_price_fam is not None:
+            rev_val = live_price_fam * qty_val
+        elif price_val and price_val.lower() not in ("", "nan", "none"):
+            try:
+                rev_val = float(price_val.replace(",", "")) * qty_val
+            except Exception:
+                rev_val = 0.0
+        if dept_name not in stats:
+            stats[dept_name] = {"orders": 0, "revenue": 0.0}
+        stats[dept_name]["orders"]  += 1
+        stats[dept_name]["revenue"] += rev_val
+    return stats
+
+def build_daily_orders_family_stats_fbb(dates, live_map=None):
+    """نفس منطق build_daily_orders_family_stats بالظبط، لكن بيقتصر بس على صفوف FBB
+    (Fulfillment Model = Fulfilled by Partner / FBP، والـ Status = Processing) —
+    نسخة منفصلة تمامًا زي build_daily_orders_counts_fbb/build_daily_orders_prices_fbb
+    فوق، من غير أي تعديل على الدالة الأصلية | Same logic as
+    build_daily_orders_family_stats exactly, restricted to FBB rows only. A fully
+    separate copy — mirrors build_daily_orders_counts_fbb / build_daily_orders_prices_fbb
+    above — the original function is left completely untouched."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    stats = {}
+    if len(data) <= 1:
+        return stats
+    hdr = data[0] if data else []
+    fulfillment_col_idx = _find_fulfillment_col_idx(hdr)
+    status_col_idx = _find_status_col_idx(hdr)
+    family_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("family", "القسم", "قسم", "department", "category"):
+            family_col_idx = ci; break
+    if family_col_idx is None:
+        return stats
+    price_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price"):
+            price_col_idx = ci; break
+    qty_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("quantity","qty","كمية","الكمية","count"):
+            qty_col_idx = ci; break
+    for row in data[1:]:
+        while len(row) <= family_col_idx:
+            row.append("")
+        sku = row[0].strip() if len(row) > 0 else ""
+        ts  = row[1].strip() if len(row) > 1 else ""
+        if not sku or not ts:
+            continue
+        if not _row_is_fbb(row, fulfillment_col_idx, status_col_idx):
+            continue
+        d = parse_excel_date(ts)
+        if not d or d.date() not in dates_set:
+            continue
+        fam_raw = row[family_col_idx].strip() if len(row) > family_col_idx else ""
+        if not fam_raw or fam_raw.lower() in ("nan", "none"):
+            continue
         dept_name = family_display_name(fam_raw)
         if not dept_name:
             continue
@@ -2886,6 +2971,939 @@ with tab14:
 
     # ══ TAB DASHBOARD — داشبورد تحليلات المبيعات (تاب جديدة منفصلة) ══
     # ══ TAB DASHBOARD — داشبورد تحليلات المبيعات (تاب جديدة منفصلة) ══
+def _render_sales_dashboard_body(counts_fn, prices_fn, family_stats_fn, key_suffix):
+    """يعرض كل محتوى داشبورد المبيعات (KPIs + تنبيهات سريعة + تحليل إعلانات + رسوم
+    بيانية + أعلى/أبطأ الأصناف + تحليل SKU فردي) — بيتفعّل مرتين: مرة بأرقام FBN
+    (counts_fn/prices_fn/family_stats_fn = النسخة الأصلية غير المفلترة) ومرة بأرقام
+    FBB (النسخة المفلترة _fbb) — نفس الكود بالظبط في الحالتين، غير بس مصدر البيانات
+    و key_suffix (عشان مفاتيح عناصر Streamlit متتكررش) | Renders the entire sales
+    dashboard content — called twice: once with the original (FBN) data-builder
+    functions, once with the _fbb-filtered ones. Identical code both times; only the
+    data source and the widget key_suffix differ."""
+    analysis_period_map_td = {
+        "آخر 7 أيام | Last 7 days": 7,
+        "آخر 15 يوم | Last 15 days": 15,
+        "آخر 30 يوم | Last 30 days": 30,
+        "آخر 60 يوم | Last 60 days": 60,
+        "آخر 90 يوم | Last 90 days": 90,
+    }
+    analysis_period_label_td = st.selectbox(
+        "🗓️ فترة التحليل | Analysis Period",
+        list(analysis_period_map_td.keys()),
+        index=2,
+        key=f"dash_period_td_{key_suffix}")
+    analysis_days_td = analysis_period_map_td[analysis_period_label_td]
+
+    today_td  = datetime.now().date()
+    cur_dates_td  = [today_td - timedelta(days=i) for i in range(1, analysis_days_td + 1)]
+    prev_dates_td = [today_td - timedelta(days=i) for i in range(analysis_days_td + 1, analysis_days_td * 2 + 1)]
+
+    cur_counts_td  = counts_fn(cur_dates_td)
+    prev_counts_td = counts_fn(prev_dates_td)
+    cur_prices_td  = prices_fn(cur_dates_td)
+    prev_prices_td = prices_fn(prev_dates_td)
+    live_map_dash  = get_live_map()
+
+    def _td_total(counts_map, sku_up, dates):
+        return sum(counts_map.get(sku_up, {}).get(d, 0) for d in dates)
+
+    def _td_parse_price(p):
+        try:
+            return float(str(p).replace(",", "").strip())
+        except Exception:
+            return 0.0
+
+    def _td_revenue_total(prices_map, sku_up, dates, live_map=None):
+        """إجمالي الإيراد لهذا الـ SKU خلال التواريخ دي — بيعتمد على سعر البيع
+        الأساسي من تاب LIVE (sale_price) لكل طلب، وبيرجع لسعر العرض المسجل مع
+        الطلب نفسه بس لو مفيش سعر بيع أساسي مسجل لهذا الـ SKU خالص | Total revenue
+        for this SKU over these dates — every order is valued at the LIVE base
+        (sale_price) price; only falls back to that order's own recorded offer
+        price when no LIVE base price exists for this SKU at all."""
+        total = 0.0
+        live_price = None
+        if live_map:
+            live_info = live_map.get(sku_up)
+            if live_info:
+                live_price = live_info.get("price")
+        for d in dates:
+            for p, qty in prices_map.get(sku_up, {}).get(d, []):
+                if live_price is not None:
+                    total += live_price * qty
+                elif p and str(p).strip().lower() not in ("", "nan", "none"):
+                    total += _td_parse_price(p) * qty
+        return total
+
+    rows_td = []
+    for sku_up_td, info_td in inv_map.items():
+        cur_t_td  = _td_total(cur_counts_td, sku_up_td, cur_dates_td)
+        prev_t_td = _td_total(prev_counts_td, sku_up_td, prev_dates_td)
+        cur_rev_td  = _td_revenue_total(cur_prices_td, sku_up_td, cur_dates_td, live_map_dash)
+        prev_rev_td = _td_revenue_total(prev_prices_td, sku_up_td, prev_dates_td, live_map_dash)
+        rows_td.append({
+            "sku_up": sku_up_td, "sku": info_td.get("sku", sku_up_td), "img": info_td.get("img", ""),
+            "cur": cur_t_td, "prev": prev_t_td, "stock": info_td.get("total_stock", 0),
+            "cur_rev": cur_rev_td, "prev_rev": prev_rev_td,
+        })
+
+    total_cur_td  = sum(r["cur"] for r in rows_td)
+    total_prev_td = sum(r["prev"] for r in rows_td)
+    avg_daily_td  = (total_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
+    active_skus_td = sum(1 for r in rows_td if r["cur"] > 0)
+    # أصناف بدون مبيعات، لكن استبعدنا اللي مخزونها صفر (طبيعي متبعش لو مفيش مخزون أصلاً — مش تنبيه مفيد)
+    zero_rows_td   = sorted([r for r in rows_td if r["cur"] == 0 and r["stock"] > 0], key=lambda r: -r["stock"])
+    zero_skus_td   = len(zero_rows_td)
+    top_row_td = max(rows_td, key=lambda r: r["cur"], default=None)
+    if total_prev_td > 0:
+        growth_td = (total_cur_td - total_prev_td) / total_prev_td * 100
+    else:
+        growth_td = 100.0 if total_cur_td > 0 else 0.0
+
+    total_cur_rev_td  = sum(r["cur_rev"] for r in rows_td)
+    total_prev_rev_td = sum(r["prev_rev"] for r in rows_td)
+    avg_daily_rev_td  = (total_cur_rev_td / analysis_days_td) if analysis_days_td > 0 else 0
+    if total_prev_rev_td > 0:
+        growth_rev_td = (total_cur_rev_td - total_prev_rev_td) / total_prev_rev_td * 100
+    else:
+        growth_rev_td = 100.0 if total_cur_rev_td > 0 else 0.0
+
+    # ── منتجات انخفضت/ارتفعت مبيعاتها (٪20 فأكثر) | Declining / rising SKUs (20%+) ──
+    decline_rows_td = sorted(
+        [r for r in rows_td if r["prev"] > 0 and r["cur"] < r["prev"]
+         and (r["prev"] - r["cur"]) / r["prev"] >= 0.20],
+        key=lambda r: -((r["prev"] - r["cur"]) / r["prev"]))
+    rise_rows_td = sorted(
+        [r for r in rows_td if r["prev"] > 0 and r["cur"] > r["prev"]
+         and (r["cur"] - r["prev"]) / r["prev"] >= 0.20],
+        key=lambda r: -((r["cur"] - r["prev"]) / r["prev"]))
+
+    # ── أصناف تحتاج انتباه (معرضة لنفاد المخزون) — محسوبة هنا عشان تُستخدم في
+    #    شريط التنبيهات السريعة فوق، وبتتعرض بالتفصيل تحت في قسم "أصناف تحتاج انتباه" ──
+    delay_days_td = int(load_settings().get("schedule_delay_days", "3") or 3)
+    attention_rows_td = []
+    for r_td in rows_td:
+        avg_d_td = (r_td["cur"] / analysis_days_td) if analysis_days_td > 0 else 0
+        if avg_d_td <= 0:
+            continue
+        days_to_so_td = round(r_td["stock"] / avg_d_td) if avg_d_td > 0 else 9999
+        if days_to_so_td > 10:
+            continue
+        badge_text_td, badge_color_td, sched_td = schedule_coverage_badge(r_td["sku"], days_to_so_td, delay_days_td)
+        if "✅" in badge_text_td:
+            continue
+        status_td = ("⚠️ لديها جدولة — قد تنفد قبل الوصول | Scheduled — may run out before arrival"
+                     if sched_td else "🚨 محتاج جدولة الآن | Needs scheduling now")
+        attention_rows_td.append({**r_td, "days_to_so": days_to_so_td, "avg_d": avg_d_td, "status": status_td})
+    attention_rows_td.sort(key=lambda r: r["days_to_so"])
+
+    # ── بيانات مساعدة لعرض تفاصيل أوضح تحت كل تنبيه (جدولة حديثة / غير متوفر / اعتماد معلّق) ──
+    recent_sched_map_td = get_recent_schedule_rows(days_back=4)
+    pending_approval_skus_dash = get_pending_approval_skus()
+
+    # ── كروت رئيسية (نظرة عامة) | Main overview cards ──
+    def _kpi_card_html(icon, icon_bg, label, value, delta_text=None, delta_positive=True):
+        delta_html = ""
+        if delta_text is not None:
+            arrow = "↑" if delta_positive else "↓"
+            color = "#16a34a" if delta_positive else "#dc2626"
+            delta_html = f'<div style="font-size:12px;color:{color};margin-top:6px;font-weight:600;">{arrow} {delta_text}</div>'
+        return (
+            f'<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;'
+            f'padding:14px 16px;direction:rtl;min-height:118px;box-shadow:0 1px 2px rgba(0,0,0,0.04);">'
+            f'<div style="width:34px;height:34px;border-radius:9px;background:{icon_bg}1f;'
+            f'display:flex;align-items:center;justify-content:center;font-size:16px;margin-bottom:10px;">{icon}</div>'
+            f'<div style="font-size:12px;color:#6b7280;margin-bottom:4px;">{label}</div>'
+            f'<div style="font-size:21px;font-weight:800;color:#111827;">{value}</div>'
+            f'{delta_html}</div>'
+        )
+
+    kc1, kc2, kc3, kc4, kc5 = st.columns(5)
+    with kc1:
+        st.markdown(_kpi_card_html("📦", "#2563eb", "مبيعات الفترة | Period Sales",
+                    f"{total_cur_td:,}", f"{abs(growth_td):.1f}% عن الفترة السابقة", growth_td >= 0), unsafe_allow_html=True)
+    with kc2:
+        st.markdown(_kpi_card_html("📊", "#0891b2", "متوسط يومي | Daily Avg",
+                    f"{avg_daily_td:,.1f}"), unsafe_allow_html=True)
+    with kc3:
+        st.markdown(_kpi_card_html("💰", "#16a34a", "إجمالي الإيرادات | Total Revenue",
+                    f"{total_cur_rev_td:,.0f} ريال", f"{abs(growth_rev_td):.1f}% عن الفترة السابقة", growth_rev_td >= 0), unsafe_allow_html=True)
+    with kc4:
+        st.markdown(_kpi_card_html("💵", "#9333ea", "متوسط الإيراد اليومي | Daily Avg Revenue",
+                    f"{avg_daily_rev_td:,.0f} ريال"), unsafe_allow_html=True)
+    with kc5:
+        st.markdown(_kpi_card_html("🟢", "#059669", "أصناف نشطة | Active SKUs",
+                    f"{active_skus_td:,}"), unsafe_allow_html=True)
+
+    if total_cur_rev_td == 0:
+        st.caption("ℹ️ لا توجد أسعار مسجلة لهذه الفترة (لا في شيت الطلبات ولا في LIVE) — الإيراد بيتحسب من الصفوف اللي فيها سعر، وبيستخدم سعر LIVE الأساسي كتقدير لو الطلب من غير سعر مسجل | No prices found for this period (neither in the orders sheet nor in LIVE) — revenue is computed from priced rows, falling back to the LIVE base price as an estimate for orders recorded without a price")
+
+    st.write("")
+
+    # ── ربحية الإعلانات لكل SKU (نفس منطق تاب المبيعات: صافي الربح الكلي من طلبات الإعلان
+    #    مقابل إجمالي المصروف عليه) — عشان تظهر في التنبيهات السريعة تحت ──
+    ads_map_dash = get_ads_map()
+    com_map_dash = get_com_map()
+
+    def _td_latest_price_for_sku(sku_up):
+        """السعر الأساسي لهذا الـ SKU: عمود sale_price من تاب LIVE أولاً (سعر البيع الأساسي)،
+        ولو مش موجود بيدوّر في خرائط أسعار الطلبات (الفترة الحالية ثم السابقة) كبديل
+        (سعر العرض) | Base price for this SKU: LIVE sheet's sale_price column first, falling
+        back to the order-price maps (offer price) already built for the dashboard."""
+        live_info = live_map_dash.get(sku_up)
+        if live_info and live_info.get("price") is not None:
+            return live_info["price"]
+        for dates_list, prices_map in ((cur_dates_td, cur_prices_td), (prev_dates_td, prev_prices_td)):
+            for d in dates_list:
+                day_list = prices_map.get(sku_up, {}).get(d, [])
+                vals = []
+                for p, qty in day_list:
+                    if p and str(p).strip().lower() not in ("", "nan", "none"):
+                        try:
+                            vals.append((float(str(p).replace(",", "")), qty))
+                        except Exception:
+                            pass
+                if vals:
+                    vals.sort(key=lambda x: -x[1])
+                    return vals[0][0]
+        return None
+
+    ads_profit_rows_td, ads_loss_rows_td = [], []
+    for r_ad in rows_td:
+        ads_entries_ad = ads_map_dash.get(r_ad["sku_up"])
+        com_info_ad = com_map_dash.get(r_ad["sku_up"])
+        if not ads_entries_ad or not com_info_ad:
+            continue
+        latest_price_ad = _td_latest_price_for_sku(r_ad["sku_up"])
+        if latest_price_ad is None:
+            continue
+        _, net_tax_ad = compute_net_price_after_fees(latest_price_ad, com_info_ad)
+        total_spends_ad = sum(a["spends"] for a in ads_entries_ad)
+        total_orders_ad = sum(a["orders"] for a in ads_entries_ad)
+        total_net_ad = total_orders_ad * net_tax_ad
+        result_ad = total_net_ad - total_spends_ad
+        entry_ad = {**r_ad, "spends": total_spends_ad, "orders": total_orders_ad,
+                    "net_total": total_net_ad, "result": result_ad}
+        if total_orders_ad <= 0 or result_ad < 0:
+            ads_loss_rows_td.append(entry_ad)
+        else:
+            ads_profit_rows_td.append(entry_ad)
+    ads_profit_rows_td.sort(key=lambda r: -r["result"])
+    ads_loss_rows_td.sort(key=lambda r: r["result"])  # الأكثر خسارة أولاً
+
+    # ── مخزون Xdock قارب على النفاد (من تاب LIVE) — مخزون منفصل عن Inventory، محتاج تزويد
+    #    لو قرب يخلص، مش جدولة | Xdock stock running low (from LIVE sheet) — a separate
+    #    stock pool from Inventory; low means it needs restocking, not scheduling ──
+    xdock_threshold_dash = int(load_settings().get("xdock_low_stock_threshold", "10") or 10)
+    xdock_low_rows_td = []
+    for sku_up_x, live_info_x in live_map_dash.items():
+        xnet_x = live_info_x.get("stock_xdock_net")
+        if xnet_x is None or xnet_x > xdock_threshold_dash:
+            continue
+        inv_info_x = inv_map.get(sku_up_x, {})
+        other_stock_x = inv_info_x.get("total_stock", 0)
+        sales_month_x = inv_info_x.get("sales", 0)
+        xdock_low_rows_td.append({
+            "sku_up": sku_up_x,
+            "sku": inv_info_x.get("sku", sku_up_x),
+            "img": inv_info_x.get("img", ""),
+            "stock_xdock_net": xnet_x,
+            "other_stock": other_stock_x,
+            "has_other_stock": other_stock_x > 0,
+            "sales_month": sales_month_x,
+            "price": live_info_x.get("price"),
+            "noon_title": live_info_x.get("noon_title", ""),
+        })
+    # ترتيب من الأعلى مبيعاً للأقل — عشان نعرف الصنف مهم (بيتباع كتير) ولا لأ
+    # قبل ما نقرر مدى إلحاح تزويد مخزون Xdock بتاعه | Sort by monthly sales
+    # (highest → lowest) so it's clear which low-Xdock-stock SKUs actually matter
+    xdock_low_rows_td.sort(key=lambda r: -r["sales_month"])
+    xdock_low_with_other_td = sum(1 for r in xdock_low_rows_td if r["has_other_stock"])
+    xdock_low_without_other_td = len(xdock_low_rows_td) - xdock_low_with_other_td
+
+    # ── التنبيهات السريعة | Quick alerts strip ──
+    st.markdown("##### 🔔 التنبيهات السريعة | Quick Alerts")
+    def _alert_chip_html(icon, bg, border, label, value, sub):
+        return (
+            f'<div style="background:{bg};border:1px solid {border};border-right:4px solid {border};'
+            f'border-radius:12px;padding:12px 14px;direction:rtl;min-height:92px;">'
+            f'<div style="font-size:12px;color:#374151;margin-bottom:6px;">{icon} {label}</div>'
+            f'<div style="font-size:22px;font-weight:800;color:#111827;">{value}</div>'
+            f'<div style="font-size:11px;color:#6b7280;">{sub}</div></div>'
+        )
+    ac1, ac2, ac3, ac4 = st.columns(4)
+    with ac1:
+        st.markdown(_alert_chip_html("🔴", "#fef2f2", "#ef4444", "منتجات معرضة لنفاد المخزون",
+                    f"{len(attention_rows_td):,}", "تغطية أقل من 10 أيام"), unsafe_allow_html=True)
+    with ac2:
+        st.markdown(_alert_chip_html("🟡", "#fffbeb", "#f59e0b", "منتجات بدون مبيعات في الفترة",
+                    f"{zero_skus_td:,}", f"خلال آخر {analysis_days_td} يوم"), unsafe_allow_html=True)
+    with ac3:
+        st.markdown(_alert_chip_html("🟠", "#fff7ed", "#f97316", "منتجات انخفضت مبيعاتها",
+                    f"{len(decline_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
+    with ac4:
+        st.markdown(_alert_chip_html("🟢", "#f0fdf4", "#22c55e", "منتجات ارتفعت مبيعاتها",
+                    f"{len(rise_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
+
+    ac5, ac6, ac7 = st.columns(3)
+    with ac5:
+        st.markdown(_alert_chip_html("🎯", "#f0fdf4", "#22c55e", "منتجات ربحانة من الإعلانات",
+                    f"{len(ads_profit_rows_td):,}", "صافي ربح الطلبات > المصروف على الإعلان"), unsafe_allow_html=True)
+    with ac6:
+        st.markdown(_alert_chip_html("🚨", "#fef2f2", "#ef4444", "منتجات خسرانة من الإعلانات",
+                    f"{len(ads_loss_rows_td):,}", "المصروف على الإعلان أكبر من صافي الربح (أو من غير طلبات)"), unsafe_allow_html=True)
+    with ac7:
+        st.markdown(_alert_chip_html("🟣", "#faf5ff", "#a855f7", "مخزون Xdock قارب على النفاد",
+                    f"{len(xdock_low_rows_td):,}",
+                    f"{xdock_threshold_dash} قطعة أو أقل — منهم {xdock_low_with_other_td} عندهم مخزون FBN و {xdock_low_without_other_td} من غيره"),
+                    unsafe_allow_html=True)
+
+    # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم،
+    #    مع سياق كافي (غير متوفر؟ ليها جدولة حديثة؟ في انتظار اعتماد؟) عشان التحليل يكون مفهوم ──
+    def _render_alert_sku_row(r, lines=None, badges_html=""):
+        ci_al, cinfo_al = st.columns([1, 6])
+        with ci_al:
+            show_img(r["img"], 55)
+        with cinfo_al:
+            st.markdown(f"{sku_link_html(r['sku'])}", unsafe_allow_html=True)
+            for line in (lines or []):
+                st.caption(line)
+            if badges_html:
+                st.markdown(badges_html, unsafe_allow_html=True)
+
+    def _extra_context_badges(r, include_schedule=True):
+        """شارات إضافية مشتركة: غير متوفر حالياً / (لو include_schedule) جدولة خلال آخر 4 أيام
+        أو في انتظار اعتماد الجدولة."""
+        parts = []
+        for note in get_unavailable_ordered_note(r["sku"]):
+            color = "#f87171" if "غير متوفر" in note else "#38bdf8"
+            parts.append(f'<div dir="rtl" style="color:{color};font-size:11px;margin-top:3px;">{note}</div>')
+        if include_schedule:
+            sched_entry = recent_sched_map_td.get(r["sku_up"])
+            if sched_entry:
+                color_sc = "#7c3aed" if sched_entry["source"] != "Expired" else "#b45309"
+                parts.append(
+                    f'<div dir="rtl" style="background:{color_sc}1a;border:1px solid {color_sc};'
+                    f'border-radius:6px;padding:5px 9px;margin-top:4px;font-size:12px;'
+                    f'color:{color_sc};font-weight:700;line-height:1.7;">'
+                    f'📅 مجدول بتاريخ {sched_entry["date"]} — ASN {sched_entry["asn"]} — [{sched_entry["source_label"]}]'
+                    f'<div style="font-size:11px;color:#374151;margin-top:2px;font-weight:500;">خلال آخر 4 أيام، لسه في فترة الوصول — لا تطلبه تاني</div>'
+                    f'</div>')
+            if r["sku_up"] in pending_approval_skus_dash:
+                parts.append('<div dir="rtl" style="color:#7dd3fc;font-size:11px;margin-top:3px;">⏳ في انتظار اعتماد الجدولة | Pending schedule approval</div>')
+        return "".join(parts)
+
+    with st.expander(f"🔴 عرض منتجات معرضة لنفاد المخزون ({len(attention_rows_td):,}) | Show at-risk SKUs"):
+        if attention_rows_td:
+            df_al1 = pd.DataFrame([{
+                "SKU": r["sku"], "المخزون | Stock": r["stock"],
+                "متوسط يومي | Daily Avg": round(r["avg_d"], 2),
+                "أيام النفاد | Days to Stockout": r["days_to_so"],
+                "الحالة | Status": r["status"],
+            } for r in attention_rows_td])
+            dl_btn(df_al1, "alert_stockout_risk", key=f"dl_alert_stockout_td_{key_suffix}")
+            for r in attention_rows_td:
+                _render_alert_sku_row(
+                    r,
+                    lines=[f"📦 مخزون: {r['stock']:,} — ⏳ نفاد خلال {r['days_to_so']} يوم", r["status"]],
+                    badges_html=_extra_context_badges(r, include_schedule=True))
+        else:
+            st.caption("لا توجد أصناف معرضة لنفاد المخزون حالياً")
+
+    with st.expander(f"🟡 عرض منتجات بدون مبيعات في الفترة ({zero_skus_td:,}) | Show no-sale SKUs"):
+        st.caption("ℹ️ الأصناف اللي مخزونها صفر مستبعدة من القائمة دي — طبيعي متبعش لو مفيش مخزون أصلاً | SKUs with zero stock are excluded — no stock naturally means no sales")
+        if zero_rows_td:
+            df_al2 = pd.DataFrame([{
+                "SKU": r["sku"], "المخزون | Stock": r["stock"], "مبيعات الفترة | Period Sales": r["cur"],
+            } for r in zero_rows_td])
+            dl_btn(df_al2, "alert_no_sales", key=f"dl_alert_nosale_td_{key_suffix}")
+            for r in zero_rows_td:
+                _render_alert_sku_row(
+                    r,
+                    lines=[f"📦 مخزون: {r['stock']:,} — لا يوجد مبيعات خلال {analysis_days_td} يوم رغم توفر المخزون"],
+                    badges_html=_extra_context_badges(r, include_schedule=False))
+        else:
+            st.caption("كل الأصناف اللي معاها مخزون باعت خلال الفترة المحددة")
+
+    with st.expander(f"🟠 عرض منتجات انخفضت مبيعاتها ({len(decline_rows_td):,}) | Show declining SKUs"):
+        st.caption("ℹ️ المخزون المعروض هنا بعد استبعاد المستودعات اللي مستبعدة من إعدادات النظام | Stock shown here already excludes warehouses excluded in settings")
+        if decline_rows_td:
+            df_al3 = pd.DataFrame([{
+                "SKU": r["sku"], "الفترة الحالية | Current": r["cur"], "الفترة السابقة | Previous": r["prev"],
+                "الانخفاض | Drop %": round((r["prev"] - r["cur"]) / r["prev"] * 100, 1),
+                "المخزون | Stock": r["stock"],
+                "غير متوفر حالياً؟ | Unavailable now?": "نعم | Yes" if is_sku_unavailable(r["sku_up"]) else "لا | No",
+            } for r in decline_rows_td])
+            dl_btn(df_al3, "alert_declining", key=f"dl_alert_decline_td_{key_suffix}")
+            for r in decline_rows_td:
+                drop_pct = (r["prev"] - r["cur"]) / r["prev"] * 100
+                stock_available_dec = r["stock"] > 0
+                if not stock_available_dec:
+                    reason = '<span style="color:#f87171;font-size:12px;">🔴 لا يوجد مخزون الآن — الانخفاض غالباً بسبب نفاد الكمية | No stock currently — decline is likely stockout-driven</span>'
+                elif is_sku_unavailable(r["sku_up"]):
+                    reason = '<span style="color:#f87171;font-size:12px;">❌ مسجل حالياً "غير متوفر" — ده ممكن يكون سبب الانخفاض | Currently marked Unavailable — likely explains the decline</span>'
+                else:
+                    reason = '<span style="color:#4ade80;font-size:12px;">✅ المخزون متاح — الانخفاض مش بسبب نقص المخزون، محتاج مراجعة (سعر/منافسة/إعلانات..) | Stock is available — decline isn\'t stock-related, worth reviewing (price/competition/ads..)</span>'
+                # جدولة/انتظار اعتماد بتظهر بس لو مفيش مخزون فعلاً — لو المخزون متاح مفيش داعي نعرض جدولته
+                badges = _extra_context_badges(r, include_schedule=not stock_available_dec)
+                _render_alert_sku_row(
+                    r,
+                    lines=[f"📉 {r['cur']:,} مقابل {r['prev']:,} (-{drop_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
+                    badges_html=(reason + badges))
+        else:
+            st.caption("لا توجد أصناف انخفضت مبيعاتها بنسبة 20%+ حالياً")
+
+    with st.expander(f"🟢 عرض منتجات ارتفعت مبيعاتها ({len(rise_rows_td):,}) | Show rising SKUs"):
+        if rise_rows_td:
+            df_al4 = pd.DataFrame([{
+                "SKU": r["sku"], "الفترة الحالية | Current": r["cur"], "الفترة السابقة | Previous": r["prev"],
+                "الارتفاع | Rise %": round((r["cur"] - r["prev"]) / r["prev"] * 100, 1),
+            } for r in rise_rows_td])
+            dl_btn(df_al4, "alert_rising", key=f"dl_alert_rise_td_{key_suffix}")
+            for r in rise_rows_td:
+                rise_pct = (r["cur"] - r["prev"]) / r["prev"] * 100
+                _render_alert_sku_row(
+                    r,
+                    lines=[f"📈 {r['cur']:,} مقابل {r['prev']:,} (+{rise_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
+                    badges_html=_extra_context_badges(r, include_schedule=False))
+        else:
+            st.caption("لا توجد أصناف ارتفعت مبيعاتها بنسبة 20%+ حالياً")
+
+    def _ads_insight_html(r):
+        if r["orders"] <= 0:
+            return (f'<span style="color:#f87171;font-size:12px;font-weight:700;">🚨 مفدتش لحد دلوقتي: '
+                    f'اتصرف {r["spends"]:,.2f} ريال ولسه ما جابش أي طلبات فعلية</span>')
+        if r["result"] >= 0:
+            return (f'<span style="color:#4ade80;font-size:12px;font-weight:700;">🎯 الاعلان مربح: '
+                    f'عدد طلبات الاعلان {r["orders"]:,.0f} طلب بصافي ربح إجمالي {r["net_total"]:,.2f} ريال مقابل '
+                    f'{r["spends"]:,.2f} ريال مدفوع — حقق {r["result"]:,.2f} ريال 👌</span>')
+        return (f'<span style="color:#f87171;font-size:12px;font-weight:700;">🚨 الاعلان غير مربح: '
+                f'مدفوع {r["spends"]:,.2f} ريال، لكن صافي الربح من {r["orders"]:,.0f} طلب بس {r["net_total"]:,.2f} ريال — '
+                f'خسران {abs(r["result"]):,.2f} ريال إجمالي</span>')
+
+    with st.expander(f"🎯 عرض منتجات ربحانة من الإعلانات ({len(ads_profit_rows_td):,}) | Show profitable-ads SKUs"):
+        if ads_profit_rows_td:
+            df_al5 = pd.DataFrame([{
+                "SKU": r["sku"], "طلبات الإعلان | Ad Orders": r["orders"],
+                "المصروف | Spends": round(r["spends"], 2), "صافي الربح | Net Total": round(r["net_total"], 2),
+                "النتيجة | Result": round(r["result"], 2),
+            } for r in ads_profit_rows_td])
+            dl_btn(df_al5, "alert_ads_profit", key=f"dl_alert_ads_profit_td_{key_suffix}")
+            for r in ads_profit_rows_td:
+                _render_alert_sku_row(r, badges_html=_ads_insight_html(r))
+        else:
+            st.caption("لا توجد أصناف ربحانة من الإعلانات حالياً")
+
+    with st.expander(f"🚨 عرض منتجات خسرانة من الإعلانات ({len(ads_loss_rows_td):,}) | Show losing-ads SKUs"):
+        if ads_loss_rows_td:
+            df_al6 = pd.DataFrame([{
+                "SKU": r["sku"], "طلبات الإعلان | Ad Orders": r["orders"],
+                "المصروف | Spends": round(r["spends"], 2), "صافي الربح | Net Total": round(r["net_total"], 2),
+                "النتيجة | Result": round(r["result"], 2),
+            } for r in ads_loss_rows_td])
+            dl_btn(df_al6, "alert_ads_loss", key=f"dl_alert_ads_loss_td_{key_suffix}")
+            for r in ads_loss_rows_td:
+                _render_alert_sku_row(r, badges_html=_ads_insight_html(r))
+        else:
+            st.caption("لا توجد أصناف خسرانة من الإعلانات حالياً 🎉")
+
+    with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,} — {xdock_low_with_other_td} عندهم مخزون FBN | {xdock_low_without_other_td} من غيره) | Show low Xdock-stock SKUs"):
+        st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا. الأصناف اللي معاها مخزون FBN (Inventory) أقل إلحاحاً من اللي مفيش عندها غير مخزون Xdock بس. الترتيب هنا من الأعلى مبيعاً للأقل عشان تعرف الصنف مهم ولا لأ | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us. SKUs that also have FBN (Inventory) stock are less urgent than ones relying on Xdock stock alone. Sorted by monthly sales (highest → lowest) so you can tell if it actually matters")
+        if xdock_low_rows_td:
+            df_al7 = pd.DataFrame([{
+                "SKU": r["sku"], "مخزون Xdock | Xdock Stock": r["stock_xdock_net"],
+                "مخزون FBN | FBN Stock": r["other_stock"],
+                "مبيع شهري | Monthly Sales": r["sales_month"],
+                "السعر | Price": r["price"] if r["price"] is not None else "—",
+            } for r in xdock_low_rows_td])
+            dl_btn(df_al7, "alert_xdock_low", key=f"dl_alert_xdock_td_{key_suffix}")
+            for r in xdock_low_rows_td:
+                if r["has_other_stock"]:
+                    other_badge = f'<span style="color:#4ade80;font-size:12px;">📦 عنده مخزون FBN (Inventory): {r["other_stock"]:,} — أقل إلحاحاً</span>'
+                else:
+                    other_badge = '<span style="color:#f87171;font-size:12px;font-weight:700;">🚫 لا يوجد مخزون FBN — الاعتماد على Xdock بس</span>'
+                _render_alert_sku_row(
+                    r,
+                    lines=[f"🟣 مخزون Xdock: {r['stock_xdock_net']:,} — 📈 مبيع شهري: {r['sales_month']:,}"
+                           + (f" — 💵 {r['price']:,.2f} ريال" if r["price"] is not None else "")],
+                    badges_html=other_badge)
+        else:
+            st.caption(f"لا توجد أصناف مخزون Xdock عندها {xdock_threshold_dash} قطعة أو أقل حالياً")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 📢 تحليل أداء الإعلانات | Ads Performance Analysis
+    # قسم جديد ومنفصل تمامًا عن القسم اللي فوق (ads_profit_rows_td/ads_loss_rows_td) —
+    # ده معتمد بس على بيانات الإعلانات الموجودة فعليًا (Views/Clicks/Orders/ATC/
+    # Spends/Revenue) من غير أي افتراض لتكلفة المنتج أو هامش ربح حقيقي. كل حساب هنا
+    # بيتجمّع من *كل* الحملات/الصفوف الخاصة بالـ SKU أو الحملة قبل ما يتحسب —
+    # مش بياخد رقم من صف واحد بس لو فيه أكتر من حملة | A new, fully separate
+    # section from the block above — based only on ad data that actually exists,
+    # no product-cost or profit-margin assumptions. Every number here is summed
+    # across *all* matching campaign rows before any ratio is computed — never
+    # taken from a single row when more than one campaign exists.
+    st.markdown("---")
+    st.markdown("## 📢 تحليل أداء الإعلانات | Ads Performance Analysis")
+    st.caption("مبني فقط على بيانات الإعلانات الموجودة في النظام حاليًا — بدون أي افتراض لتكلفة المنتج أو هامش الربح | Based only on ad data currently in the system — no product cost or profit margin assumptions")
+
+    def _apa_ratios(views, clicks, atc, orders, spends, revenue):
+        """يعيد حساب كل النسب من الأرقام الخام المجمّعة (مش من عمود جاهز في صف واحد)
+        عشان أي SKU/حملة ليها أكتر من صف تتحسب صح | Recomputes every ratio from the
+        summed raw totals (never from a single pre-computed column), so multi-row
+        SKUs/campaigns are calculated correctly."""
+        ctr = (clicks / views * 100) if views > 0 else 0.0
+        cpc = (spends / clicks) if clicks > 0 else 0.0
+        cpa = (spends / orders) if orders > 0 else 0.0
+        cvr = (orders / clicks * 100) if clicks > 0 else 0.0
+        roas = (revenue / spends) if spends > 0 else 0.0
+        click_to_atc = (atc / clicks * 100) if clicks > 0 else 0.0
+        atc_to_order = (orders / atc * 100) if atc > 0 else 0.0
+        return {"ctr": ctr, "cpc": cpc, "cpa": cpa, "cvr": cvr, "roas": roas,
+                "click_to_atc": click_to_atc, "atc_to_order": atc_to_order}
+
+    # ── تجميع كل صفوف الإعلانات (Sku × Campaign) على مستوى الحملة نفسها —
+    #    عشان أي حملة بتستهدف أكتر من SKU تتحسب مجمّعة صح ومتاخدش من صف واحد ──
+    campaigns_apa = {}
+    for sku_up_c, entries_c in ads_map_dash.items():
+        for e in entries_c:
+            cname_c = e["campaign"] or "—"
+            agg_c = campaigns_apa.setdefault(cname_c, {
+                "campaign": cname_c, "views": 0.0, "clicks": 0.0, "orders": 0.0,
+                "atc": 0.0, "spends": 0.0, "revenue": 0.0, "skus": set(),
+            })
+            agg_c["views"]   += e["views"]
+            agg_c["clicks"]  += e["clicks"]
+            agg_c["orders"]  += e["orders"]
+            agg_c["atc"]     += e["atc"]
+            agg_c["spends"]  += e["spends"]
+            agg_c["revenue"] += e["revenue"]
+            agg_c["skus"].add(sku_up_c)
+
+    for _cname, _agg in campaigns_apa.items():
+        _agg.update(_apa_ratios(_agg["views"], _agg["clicks"], _agg["atc"], _agg["orders"], _agg["spends"], _agg["revenue"]))
+        _agg["sku_count"] = len(_agg["skus"])
+        # نتيجة الإعلان بعد الإنفاق الإعلاني فقط — مش ربح حقيقي (مفيش تكلفة منتج) |
+        # Ad result after ad spend only — not real profit (no product cost known)
+        _agg["ad_result"] = _agg["revenue"] - _agg["spends"]
+
+    campaigns_list_apa = list(campaigns_apa.values())
+
+    def _apa_render_related_skus(sku_up_set, max_show=6):
+        """يعرض الأصناف (SKU) المرتبطة بالحملة مع صورها | Renders the SKUs linked
+        to this campaign, each with its product image."""
+        sku_list_r = sorted(sku_up_set)
+        shown_r = sku_list_r[:max_show]
+        for sku_up_r in shown_r:
+            inv_info_r = inv_map.get(sku_up_r, {})
+            ci_r, cinfo_r = st.columns([1, 6])
+            with ci_r:
+                show_img(inv_info_r.get("img", ""), 45)
+            with cinfo_r:
+                st.markdown(sku_link_html(inv_info_r.get("sku", sku_up_r)), unsafe_allow_html=True)
+        if len(sku_list_r) > max_show:
+            st.caption(f"+ {len(sku_list_r) - max_show} SKU إضافي | more SKUs")
+
+    if not campaigns_list_apa:
+        st.info("لا توجد بيانات إعلانات مرفوعة حالياً | No ad data uploaded yet")
+    else:
+        # ── 1) مؤشرات أداء الإعلانات | Ad Performance Metrics (إجمالي كل الحملات) ──
+        tot_views_apa   = sum(c["views"] for c in campaigns_list_apa)
+        tot_clicks_apa  = sum(c["clicks"] for c in campaigns_list_apa)
+        tot_atc_apa     = sum(c["atc"] for c in campaigns_list_apa)
+        tot_orders_apa  = sum(c["orders"] for c in campaigns_list_apa)
+        tot_spends_apa  = sum(c["spends"] for c in campaigns_list_apa)
+        tot_revenue_apa = sum(c["revenue"] for c in campaigns_list_apa)
+        tot_ratios_apa  = _apa_ratios(tot_views_apa, tot_clicks_apa, tot_atc_apa, tot_orders_apa, tot_spends_apa, tot_revenue_apa)
+
+        st.markdown("#### 📊 مؤشرات أداء الإعلانات | Ad Performance Metrics")
+        st.caption("ℹ️ كل النسب (CTR/CPC/CPS/CVR/ROAS) بتتحسب من إجمالي الأرقام الخام لكل الحملات مجمّعة — مش من عمود جاهز في صف واحد | All ratios are computed from the raw totals across every campaign combined — never from a single pre-computed column")
+        mrow1 = st.columns(4)
+        with mrow1[0]:
+            st.markdown(_kpi_card_html("🛒", "#2563eb", "الطلبات | Orders", f"{tot_orders_apa:,.0f}"), unsafe_allow_html=True)
+        with mrow1[1]:
+            st.markdown(_kpi_card_html("👁️", "#0891b2", "مرات الظهور | Impressions", f"{tot_views_apa:,.0f}"), unsafe_allow_html=True)
+        with mrow1[2]:
+            st.markdown(_kpi_card_html("🖱️", "#7c3aed", "النقرات | Clicks", f"{tot_clicks_apa:,.0f}"), unsafe_allow_html=True)
+        with mrow1[3]:
+            st.markdown(_kpi_card_html("➕", "#059669", "الإضافة إلى السلة | Add to Cart", f"{tot_atc_apa:,.0f}"), unsafe_allow_html=True)
+        mrow2 = st.columns(4)
+        with mrow2[0]:
+            st.markdown(_kpi_card_html("📈", "#0891b2", "معدل النقر | CTR", f"{tot_ratios_apa['ctr']:.2f}%"), unsafe_allow_html=True)
+        with mrow2[1]:
+            st.markdown(_kpi_card_html("💵", "#f59e0b", "تكلفة النقرة | CPC", f"{tot_ratios_apa['cpc']:.2f} ريال"), unsafe_allow_html=True)
+        with mrow2[2]:
+            st.markdown(_kpi_card_html("🎯", "#dc2626", "تكلفة الطلب | CPS / CPA", f"{tot_ratios_apa['cpa']:.2f} ريال"), unsafe_allow_html=True)
+        with mrow2[3]:
+            st.markdown(_kpi_card_html("📊", "#9333ea", "معدل التحويل | CVR", f"{tot_ratios_apa['cvr']:.2f}%"), unsafe_allow_html=True)
+        mrow3 = st.columns(3)
+        with mrow3[0]:
+            st.markdown(_kpi_card_html("🎯", "#16a34a", "العائد على الإنفاق الإعلاني | ROAS", f"{tot_ratios_apa['roas']:.2f}"), unsafe_allow_html=True)
+        with mrow3[1]:
+            st.markdown(_kpi_card_html("💰", "#16a34a", "الإيراد | Revenue", f"{tot_revenue_apa:,.2f} ريال"), unsafe_allow_html=True)
+        with mrow3[2]:
+            st.markdown(_kpi_card_html("💸", "#dc2626", "الإنفاق الإعلاني | Ad Spend", f"{tot_spends_apa:,.2f} ريال"), unsafe_allow_html=True)
+
+        st.write("")
+
+        # ── 2) تحليل مسار الإعلان | Advertising Funnel ──
+        st.markdown("#### 🔻 تحليل مسار الإعلان | Advertising Funnel")
+        st.caption("عشان تعرف أين يحدث انخفاض الأداء في مسار الإعلان | See exactly where performance drops along the funnel")
+        fcols_apa = st.columns(4)
+        funnel_stages_apa = [
+            ("👁️ مرات الظهور | Impressions", tot_views_apa, None),
+            ("🖱️ النقرات | Clicks", tot_clicks_apa, tot_ratios_apa["ctr"]),
+            ("➕ الإضافة إلى السلة | Add to Cart", tot_atc_apa, tot_ratios_apa["click_to_atc"]),
+            ("🛒 الطلبات | Orders", tot_orders_apa, tot_ratios_apa["atc_to_order"]),
+        ]
+        for fc_apa, (label_f, val_f, rate_f) in zip(fcols_apa, funnel_stages_apa):
+            with fc_apa:
+                rate_html_f = (f'<div style="font-size:11px;color:#f59e0b;margin-top:4px;">↓ {rate_f:.1f}%</div>'
+                               if rate_f is not None else "")
+                st.markdown(
+                    f'<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;'
+                    f'padding:12px 10px;text-align:center;">'
+                    f'<div style="font-size:11px;color:#94a3b8;">{label_f}</div>'
+                    f'<div style="font-size:20px;font-weight:800;color:#e2e8f0;">{val_f:,.0f}</div>'
+                    f'{rate_html_f}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="margin-top:8px;font-size:12px;color:#94a3b8;">'
+            f'📈 معدل النقر | CTR: <b style="color:#e2e8f0;">{tot_ratios_apa["ctr"]:.2f}%</b> &nbsp;|&nbsp; '
+            f'النقر → السلة | Click → Cart: <b style="color:#e2e8f0;">{tot_ratios_apa["click_to_atc"]:.1f}%</b> &nbsp;|&nbsp; '
+            f'السلة → الطلب | Cart → Order: <b style="color:#e2e8f0;">{tot_ratios_apa["atc_to_order"]:.1f}%</b> &nbsp;|&nbsp; '
+            f'معدل التحويل الكلي | CVR: <b style="color:#e2e8f0;">{tot_ratios_apa["cvr"]:.2f}%</b>'
+            f'</div>', unsafe_allow_html=True)
+
+        st.write("")
+
+        # ── دوال التحليل التلقائي / التصنيف / التوصية — مبنية على أكتر من مؤشر مع
+        #    بعض (ROAS+CPA+CVR+CTR+CPC+Orders+Spend+Revenue) مش مؤشر واحد بس ──
+        def _apa_insight(c):
+            if c["orders"] <= 0:
+                return ("🔴", "أداء ضعيف | Poor Performance",
+                        f"اتصرف {c['spends']:,.2f} ريال على الحملة ولسه ما جابتش أي طلبات فعلية.")
+            score_c = 0
+            if c["roas"] >= 3: score_c += 2
+            elif c["roas"] >= 1.5: score_c += 1
+            elif c["roas"] < 1: score_c -= 2
+            if c["cvr"] >= 3: score_c += 1
+            elif c["cvr"] < 1: score_c -= 1
+            if c["ctr"] >= 1: score_c += 1
+            elif c["ctr"] < 0.3: score_c -= 1
+            if c["spends"] > 0 and c["revenue"] < c["spends"]:
+                score_c -= 2
+            if score_c >= 3:
+                return ("🟢", "أداء جيد | Good Performance",
+                        f"الحملة تحقق ROAS {c['roas']:.2f} مع معدل تحويل {c['cvr']:.2f}% جيد.")
+            elif score_c >= 0:
+                return ("🟡", "يحتاج إلى تحسين | Needs Improvement",
+                        f"الحملة بتاخد نقرات معقولة (CTR {c['ctr']:.2f}%)، لكن التحويل للطلبات ({c['cvr']:.2f}%) أو الـ ROAS ({c['roas']:.2f}) لسه محتاج تحسين.")
+            else:
+                return ("🔴", "أداء ضعيف | Poor Performance",
+                        f"تكلفة الطلب {c['cpa']:,.2f} ريال مرتفعة مقارنة بعدد الطلبات ({c['orders']:,.0f}) والـ ROAS {c['roas']:.2f}.")
+
+        def _apa_classification(c):
+            icon_i, _t, _d = _apa_insight(c)
+            if c["orders"] <= 0:
+                return "🔴", "أداء ضعيف | Poor Performance"
+            if icon_i == "🟢":
+                return "🟢", "أداء قوي | Strong Performance"
+            if icon_i == "🟡":
+                if c["roas"] < 1.5 and c["cvr"] < 2:
+                    return "🟠", "يحتاج إلى تحسين | Needs Improvement"
+                return "🟡", "يحتاج إلى مراقبة | Needs Monitoring"
+            return "🔴", "أداء ضعيف | Poor Performance"
+
+        def _apa_recommendation(c):
+            cls_icon_c, _l = _apa_classification(c)
+            if c["orders"] <= 0 and c["spends"] > 0:
+                return "قلل الإنفاق | Reduce Spend"
+            if cls_icon_c == "🟢":
+                return "استمر | Continue"
+            if cls_icon_c == "🟡":
+                return "راقب | Monitor"
+            if cls_icon_c == "🟠":
+                return "حسّن الحملة | Optimize"
+            return "راجع الحملة | Review"
+
+        # ── 5) مقارنة الحملات | Campaign Comparison (قبل التفاصيل عشان تبان الأهم فوق) ──
+        st.markdown("#### 🏆 مقارنة الحملات | Campaign Comparison")
+        camps_with_orders_apa = [c for c in campaigns_list_apa if c["orders"] > 0]
+        camps_with_clicks_apa = [c for c in campaigns_list_apa if c["clicks"] > 0]
+        comp_specs_apa = [
+            ("🏆", "أفضل حملة حسب ROAS | Best by ROAS", camps_with_orders_apa, lambda c: c["roas"], lambda c: f"ROAS {c['roas']:.2f}"),
+            ("💰", "أعلى إيراد | Highest Revenue", campaigns_list_apa, lambda c: c["revenue"], lambda c: f"{c['revenue']:,.2f} ريال"),
+            ("🛒", "أكثر طلبات | Most Orders", campaigns_list_apa, lambda c: c["orders"], lambda c: f"{c['orders']:,.0f} طلب"),
+            ("💸", "أعلى إنفاق إعلاني | Highest Ad Spend", campaigns_list_apa, lambda c: c["spends"], lambda c: f"{c['spends']:,.2f} ريال"),
+            ("🎯", "أفضل تكلفة طلب | Best CPA", camps_with_orders_apa, lambda c: -c["cpa"], lambda c: f"{c['cpa']:.2f} ريال"),
+            ("📈", "أفضل معدل تحويل | Best CVR", camps_with_clicks_apa, lambda c: c["cvr"], lambda c: f"{c['cvr']:.2f}%"),
+            ("👁️", "أفضل معدل نقر | Best CTR", campaigns_list_apa, lambda c: c["ctr"], lambda c: f"{c['ctr']:.2f}%"),
+        ]
+        comp_cols_apa = st.columns(2)
+        for i_apa, (icon_s, label_s, pool_s, key_s, fmt_s) in enumerate(comp_specs_apa):
+            best_c_apa = max(pool_s, key=key_s, default=None)
+            with comp_cols_apa[i_apa % 2]:
+                if best_c_apa:
+                    st.markdown(_kpi_card_html(icon_s, "#2563eb", label_s, best_c_apa["campaign"]), unsafe_allow_html=True)
+                    st.caption(fmt_s(best_c_apa))
+                    with st.expander(f"🏷️ الأصناف | SKUs ({best_c_apa['sku_count']})"):
+                        _apa_render_related_skus(best_c_apa["skus"])
+                else:
+                    st.markdown(_kpi_card_html(icon_s, "#6b7280", label_s, "—"), unsafe_allow_html=True)
+
+        st.write("")
+
+        # ── 3+6+7) التحليل التلقائي + التصنيف + التوصية لكل حملة | Automatic
+        #    insight + classification + recommendation per campaign ──
+        st.markdown("#### 🔎 تحليل كل حملة | Per-Campaign Analysis")
+        for c_apa in sorted(campaigns_list_apa, key=lambda x: -x["spends"]):
+            icon_i, title_i, desc_i = _apa_insight(c_apa)
+            icon_c, label_c = _apa_classification(c_apa)
+            rec_c = _apa_recommendation(c_apa)
+            bg_i = {"🟢": "#052e1655", "🟡": "#78350f33", "🔴": "#4c051655"}[icon_i]
+            border_i = {"🟢": "#16a34a", "🟡": "#f59e0b", "🔴": "#dc2626"}[icon_i]
+            with st.expander(f"{icon_i} {c_apa['campaign']} — {c_apa['sku_count']} SKU | {c_apa['orders']:,.0f} طلب"):
+                st.markdown(
+                    f'<div dir="rtl" style="background:{bg_i};border:1px solid {border_i};border-radius:8px;padding:8px 12px;margin-bottom:8px;">'
+                    f'<b>{icon_i} {title_i}</b><br><span style="font-size:13px;">{desc_i}</span>'
+                    f'</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f"👁️ ظهور: {c_apa['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {c_apa['clicks']:,.0f} &nbsp;|&nbsp; "
+                    f"➕ سلة: {c_apa['atc']:,.0f} &nbsp;|&nbsp; 🛒 طلبات: {c_apa['orders']:,.0f}<br>"
+                    f"📊 CTR: {c_apa['ctr']:.2f}% &nbsp;|&nbsp; 💵 CPC: {c_apa['cpc']:.2f} &nbsp;|&nbsp; "
+                    f"🎯 CPS/CPA: {c_apa['cpa']:.2f} &nbsp;|&nbsp; 📈 CVR: {c_apa['cvr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {c_apa['roas']:.2f}<br>"
+                    f"💸 إنفاق: {c_apa['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {c_apa['revenue']:,.2f} ريال &nbsp;|&nbsp; "
+                    f"📉 نتيجة الإعلان بعد الإنفاق الإعلاني | Ad Result After Ad Spend: <b>{c_apa['ad_result']:,.2f} ريال</b>")
+                st.markdown(f"🏷️ التصنيف | Classification: **{icon_c} {label_c}**")
+                st.markdown(f"✅ التوصية | Recommendation: **{rec_c}**")
+                st.markdown("🏷️ **الأصناف المرتبطة | Related SKUs**")
+                _apa_render_related_skus(c_apa["skus"])
+
+        st.caption(
+            "ℹ️ مقارنة الفترة الحالية بالفترة السابقة (📈/📉 Revenue, Orders, Ad Spend, ROAS, CPA, CTR, CVR, "
+            "Clicks, Add to Cart) مش متاحة هنا لسه — لأن تاب الإعلانات بيحفظ إجمالي كل حملة لحظيًا من غير "
+            "تاريخ يومي، فمفيش فترة سابقة نقارن بيها. لو حبينا نفعّلها، محتاجين نبدأ نسجّل نسخة/تاريخ لكل "
+            "تحديث في شيت الإعلانات | Current-vs-previous-period comparison isn't available yet because the "
+            "Advertisements sheet only stores each campaign's live cumulative totals, with no daily date "
+            "history to compare against. Enabling it would require snapshotting the ads sheet with dates.")
+
+    st.write("")
+
+    # ── كارت أعلى SKU مع صورة | Top SKU card with image ──
+    if top_row_td and top_row_td["cur"] > 0:
+        st.markdown("##### 🔥 أعلى SKU مبيعًا | Top-Selling SKU")
+        ci_top, cinfo_top = st.columns([1, 6])
+        with ci_top:
+            show_img(top_row_td["img"], 90)
+        with cinfo_top:
+            st.markdown(f"**`{top_row_td['sku']}`**")
+            st.markdown(
+                f"📦 **مبيعات الفترة | Period Sales:** {top_row_td['cur']:,} &nbsp;|&nbsp; "
+                f"📊 **متوسط يومي | Daily Avg:** {(top_row_td['cur']/analysis_days_td):,.1f} &nbsp;|&nbsp; "
+                f"📦 **مخزون | Stock:** {top_row_td['stock']:,}")
+            st.markdown(f"💰 **إيراد الفترة | Period Revenue:** {top_row_td['cur_rev']:,.0f} ريال")
+
+    st.divider()
+
+    # ── رسم بياني لاتجاه المبيعات + أهم المنتجات جنب بعض | Trend chart + top products, side by side ──
+    cur_dates_sorted_td = sorted(cur_dates_td)
+    daily_totals_td = {
+        d: sum(cur_counts_td.get(r["sku_up"], {}).get(d, 0) for r in rows_td)
+        for d in cur_dates_sorted_td
+    }
+    chart_df_td = pd.DataFrame({
+        "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_td],
+        "المبيعات | Sales": [daily_totals_td.get(d, 0) for d in cur_dates_sorted_td],
+    }).set_index("التاريخ | Date")
+
+    col_chart_td, col_top_td = st.columns([1.1, 1])
+    with col_chart_td:
+        st.markdown(f"##### 📉 اتجاه المبيعات آخر {analysis_days_td} يوم | Sales Trend")
+        st.line_chart(chart_df_td)
+        growth_icon_td = "📈" if growth_td >= 0 else "📉"
+        growth_word_td = "نمو" if growth_td >= 0 else "انخفاض"
+        growth_rev_icon_td = "📈" if growth_rev_td >= 0 else "📉"
+        growth_rev_word_td = "نمو" if growth_rev_td >= 0 else "انخفاض"
+        st.caption(
+            f"{growth_icon_td} {growth_word_td} الطلبات: {growth_td:+.1f}% ({total_cur_td:,} مقابل {total_prev_td:,}) "
+            f"&nbsp;|&nbsp; {growth_rev_icon_td} {growth_rev_word_td} الإيراد: {growth_rev_td:+.1f}% "
+            f"({total_cur_rev_td:,.0f} مقابل {total_prev_rev_td:,.0f} ريال)")
+
+    with col_top_td:
+        st.markdown("##### 🏆 أهم المنتجات | Top Products")
+        top5_td = sorted(rows_td, key=lambda r: -r["cur"])[:5]
+        if top5_td and top5_td[0]["cur"] > 0:
+            rows_html_td = ""
+            for r in top5_td:
+                if r["cur"] <= 0:
+                    continue
+                img_src = r["img"] if r["img"] else ""
+                img_html = (f'<img src="{img_src}" style="width:32px;height:32px;border-radius:6px;'
+                             f'object-fit:cover;margin-left:8px;">') if img_src else "📦"
+                rows_html_td += (
+                    '<div style="display:flex;align-items:center;justify-content:space-between;'
+                    'padding:8px 4px;border-bottom:1px solid #f1f5f9;direction:rtl;">'
+                    f'<div style="display:flex;align-items:center;font-size:12px;color:#111827;">{img_html}'
+                    f'<span style="font-family:monospace;">{r["sku"]}</span></div>'
+                    f'<div style="text-align:left;font-size:12px;color:#374151;white-space:nowrap;">'
+                    f'<b>{r["cur"]:,}</b> طلب &nbsp; <span style="color:#6b7280;">({r["cur_rev"]:,.0f} ريال)</span></div>'
+                    '</div>'
+                )
+            st.markdown(
+                f'<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:6px 12px;">{rows_html_td}</div>',
+                unsafe_allow_html=True)
+        else:
+            st.caption("لا توجد بيانات مبيعات كافية | Not enough sales data")
+
+    st.divider()
+
+    # ── المبيعات حسب القسم (فلوس وعدد) | Sales by Department (revenue & orders) ──
+    # بيعتمد على عمود Family (اختياري) في شيت DailyOrders — لو مش موجود أو الصف مالوش
+    # قيمة، الكود بيكمل عادي من غير ما يوقف وبيتجاهل هذا الصف من تحليل الأقسام بس
+    st.markdown("### 📂 المبيعات حسب القسم | Sales by Department")
+    dept_stats_td = family_stats_fn(cur_dates_td, live_map_dash)
+    if not dept_stats_td:
+        st.caption("لا توجد بيانات أقسام (عمود Family) لهذه الفترة — العمود اختياري ولا يؤثر على باقي التحليلات | No department (Family) data for this period — the column is optional and does not affect other analytics")
+    else:
+        dept_sorted_td = sorted(dept_stats_td.items(), key=lambda x: -x[1]["revenue"])
+        df_dept_td = pd.DataFrame([{
+            "القسم | Department": dept,
+            "عدد الطلبات | Orders": v["orders"],
+            "الإيراد | Revenue (ريال)": round(v["revenue"], 2),
+        } for dept, v in dept_sorted_td])
+        dl_btn(df_dept_td, "sales_by_department", key=f"dl_dept_td_{key_suffix}")
+        st.dataframe(df_dept_td, use_container_width=True, hide_index=True)
+        st.bar_chart(df_dept_td.set_index("القسم | Department")[["الإيراد | Revenue (ريال)"]])
+
+    st.divider()
+
+    # ── أعلى 10 أصناف مبيعًا (مع صور) | Top 10 best sellers (with images) ──
+    st.markdown("### 🔥 أعلى 10 أصناف مبيعًا | Top 10 Best Sellers")
+    top10_td = sorted([r for r in rows_td if r["cur"] > 0], key=lambda r: -r["cur"])[:10]
+    if top10_td:
+        df_top10_td = pd.DataFrame([{
+            "الترتيب | #": i + 1, "SKU": r["sku"], "المبيعات | Sales": r["cur"],
+            "متوسط يومي | Daily Avg": round(r["cur"] / analysis_days_td, 2), "المخزون | Stock": r["stock"],
+            "الإيراد | Revenue (ريال)": round(r["cur_rev"], 2),
+        } for i, r in enumerate(top10_td)])
+        dl_btn(df_top10_td, "top_sellers", key=f"dl_top10_td_{key_suffix}")
+        for i, r in enumerate(top10_td):
+            ci_t, cinfo_t = st.columns([1, 6])
+            with ci_t:
+                show_img(r["img"], 70)
+            with cinfo_t:
+                st.markdown(f"**#{i+1} — `{r['sku']}`**")
+                st.markdown(
+                    f"📦 مبيعات | Sales: **{r['cur']:,}** &nbsp;|&nbsp; "
+                    f"📊 يومي | Daily: **{r['cur']/analysis_days_td:.1f}** &nbsp;|&nbsp; "
+                    f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
+                    f"💰 إيراد | Revenue: **{r['cur_rev']:,.0f} ريال**")
+            st.divider()
+    else:
+        st.caption("لا توجد بيانات مبيعات كافية | Not enough sales data")
+
+    # ── الأصناف البطيئة (مع صور) | Slow moving items (with images) ──
+    st.markdown("### 🐌 الأصناف البطيئة | Slow Moving (Bottom 10)")
+    slow10_td = sorted(rows_td, key=lambda r: r["cur"])[:10]
+    if slow10_td:
+        df_slow10_td = pd.DataFrame([{
+            "SKU": r["sku"], "المبيعات | Sales": r["cur"],
+            "متوسط يومي | Daily Avg": round(r["cur"] / analysis_days_td, 2), "المخزون | Stock": r["stock"],
+            "الإيراد | Revenue (ريال)": round(r["cur_rev"], 2),
+        } for r in slow10_td])
+        dl_btn(df_slow10_td, "slow_movers", key=f"dl_slow10_td_{key_suffix}")
+        for r in slow10_td:
+            ci_s, cinfo_s = st.columns([1, 6])
+            with ci_s:
+                show_img(r["img"], 70)
+            with cinfo_s:
+                st.markdown(f"**`{r['sku']}`**")
+                st.markdown(
+                    f"📦 مبيعات | Sales: **{r['cur']:,}** &nbsp;|&nbsp; "
+                    f"📊 يومي | Daily: **{r['cur']/analysis_days_td:.1f}** &nbsp;|&nbsp; "
+                    f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
+                    f"💰 إيراد | Revenue: **{r['cur_rev']:,.0f} ريال**")
+            st.divider()
+
+    # ── تحليل اتجاه SKU فردي (مع صورة) | Per-SKU trend (with image) ──
+    st.markdown("### 🔎 تحليل اتجاه SKU | SKU Trend Analysis")
+    sku_options_td = sorted({r["sku"] for r in rows_td})
+    selected_sku_td = st.selectbox("اختر SKU للتحليل | Select SKU", ["—"] + sku_options_td, key=f"dash_sku_td_{key_suffix}")
+    if selected_sku_td and selected_sku_td != "—":
+        sel_row_td = next((r for r in rows_td if r["sku"] == selected_sku_td), None)
+        if sel_row_td:
+            sel_daily_td = {d: cur_counts_td.get(sel_row_td["sku_up"], {}).get(d, 0) for d in cur_dates_sorted_td}
+            sel_cur_td, sel_prev_td = sel_row_td["cur"], sel_row_td["prev"]
+            sel_cur_rev_td, sel_prev_rev_td = sel_row_td["cur_rev"], sel_row_td["prev_rev"]
+            sel_avg_td = (sel_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
+            if sel_prev_td > 0:
+                sel_growth_td = (sel_cur_td - sel_prev_td) / sel_prev_td * 100
+            else:
+                sel_growth_td = 100.0 if sel_cur_td > 0 else 0.0
+            if sel_prev_rev_td > 0:
+                sel_growth_rev_td = (sel_cur_rev_td - sel_prev_rev_td) / sel_prev_rev_td * 100
+            else:
+                sel_growth_rev_td = 100.0 if sel_cur_rev_td > 0 else 0.0
+            max_day_td = max(sel_daily_td.items(), key=lambda x: x[1], default=(None, 0))
+            min_day_td = min(sel_daily_td.items(), key=lambda x: x[1], default=(None, 0))
+
+            ci_sel, cinfo_sel = st.columns([1, 6])
+            with ci_sel:
+                show_img(sel_row_td["img"], 90)
+            with cinfo_sel:
+                st.markdown(f"**`{sel_row_td['sku']}`** &nbsp;|&nbsp; 📦 مخزون | Stock: **{sel_row_td['stock']:,}**")
+
+            m1_td, m2_td, m3_td = st.columns(3)
+            m1_td.metric("مبيعات الفترة | Period Sales", f"{sel_cur_td:,}")
+            m2_td.metric("متوسط يومي | Daily Avg", f"{sel_avg_td:,.1f}")
+            m3_td.metric("النمو | Growth", f"{sel_growth_td:+.2f}%")
+            st.caption(f"مبيعات الفترة السابقة | Previous period sales: **{sel_prev_td:,}**")
+
+            mr1_td, mr2_td, mr3_td = st.columns(3)
+            mr1_td.metric("إيراد الفترة | Period Revenue", f"{sel_cur_rev_td:,.0f} ريال")
+            mr2_td.metric("متوسط إيراد يومي | Daily Avg Revenue", f"{(sel_cur_rev_td/analysis_days_td if analysis_days_td>0 else 0):,.0f} ريال")
+            mr3_td.metric("نمو الإيراد | Revenue Growth", f"{sel_growth_rev_td:+.2f}%")
+            st.caption(f"إيراد الفترة السابقة | Previous period revenue: **{sel_prev_rev_td:,.0f} ريال**")
+
+            m4_td, m5_td = st.columns(2)
+            with m4_td:
+                st.markdown(f"📈 **أعلى يوم مبيعات | Best Day:** "
+                            f"{max_day_td[0].strftime('%Y-%m-%d') if max_day_td[0] else '—'} ({max_day_td[1]})")
+            with m5_td:
+                st.markdown(f"📉 **أقل يوم مبيعات | Worst Day:** "
+                            f"{min_day_td[0].strftime('%Y-%m-%d') if min_day_td[0] else '—'} ({min_day_td[1]})")
+            sku_chart_df_td = pd.DataFrame({
+                "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_td],
+                "المبيعات | Sales": [sel_daily_td.get(d, 0) for d in cur_dates_sorted_td],
+            }).set_index("التاريخ | Date")
+            st.line_chart(sku_chart_df_td)
+
+    st.divider()
+
+    # ── أصناف تحتاج انتباه (مع صور) | Needs-attention (with images) ──
+    # القائمة اتحسبت فوق قبل شريط التنبيهات السريعة (attention_rows_td) — هنا بس بنعرضها بالتفصيل
+    # Already computed above (before the quick-alerts strip) — this just renders the details
+    st.markdown("### 🚨 أصناف تحتاج انتباه | Needs Attention")
+    if attention_rows_td:
+        df_att_td = pd.DataFrame([{
+            "SKU": r["sku"], "المخزون | Stock": r["stock"],
+            "متوسط يومي | Daily Avg": round(r["avg_d"], 2),
+            "أيام النفاد المتوقعة | Days to Stockout": r["days_to_so"],
+            "الحالة | Status": r["status"],
+        } for r in attention_rows_td])
+        dl_btn(df_att_td, "needs_attention", key=f"dl_attention_td_{key_suffix}")
+        for r in attention_rows_td:
+            ci_a, cinfo_a = st.columns([1, 6])
+            with ci_a:
+                show_img(r["img"], 70)
+            with cinfo_a:
+                st.markdown(f"**`{r['sku']}`**")
+                st.markdown(
+                    f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
+                    f"📊 يومي | Daily Avg: **{r['avg_d']:.1f}** &nbsp;|&nbsp; "
+                    f"⏳ نفاد خلال | Stockout in: **{r['days_to_so']}** يوم")
+                st.markdown(r["status"])
+            st.divider()
+    else:
+        st.success("✅ لا توجد أصناف محتاجة انتباه حالياً | No items currently need attention")
+
 with tab_dash:
     if _tab_gate("tab_dash", "📊 داشبورد المبيعات | Sales Dashboard"):
         st.header("📊 داشبورد المبيعات | Sales Dashboard")
@@ -2894,929 +3912,16 @@ with tab_dash:
         if not inv_map:
             st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
         else:
-            analysis_period_map_td = {
-                "آخر 7 أيام | Last 7 days": 7,
-                "آخر 15 يوم | Last 15 days": 15,
-                "آخر 30 يوم | Last 30 days": 30,
-                "آخر 60 يوم | Last 60 days": 60,
-                "آخر 90 يوم | Last 90 days": 90,
-            }
-            analysis_period_label_td = st.selectbox(
-                "🗓️ فترة التحليل | Analysis Period",
-                list(analysis_period_map_td.keys()),
-                index=2,
-                key="dash_period_td")
-            analysis_days_td = analysis_period_map_td[analysis_period_label_td]
-
-            today_td  = datetime.now().date()
-            cur_dates_td  = [today_td - timedelta(days=i) for i in range(1, analysis_days_td + 1)]
-            prev_dates_td = [today_td - timedelta(days=i) for i in range(analysis_days_td + 1, analysis_days_td * 2 + 1)]
-
-            cur_counts_td  = build_daily_orders_counts(cur_dates_td)
-            prev_counts_td = build_daily_orders_counts(prev_dates_td)
-            cur_prices_td  = build_daily_orders_prices(cur_dates_td)
-            prev_prices_td = build_daily_orders_prices(prev_dates_td)
-            live_map_dash  = get_live_map()
-
-            def _td_total(counts_map, sku_up, dates):
-                return sum(counts_map.get(sku_up, {}).get(d, 0) for d in dates)
-
-            def _td_parse_price(p):
-                try:
-                    return float(str(p).replace(",", "").strip())
-                except Exception:
-                    return 0.0
-
-            def _td_revenue_total(prices_map, sku_up, dates, live_map=None):
-                """إجمالي الإيراد لهذا الـ SKU خلال التواريخ دي — بيعتمد على سعر البيع
-                الأساسي من تاب LIVE (sale_price) لكل طلب، وبيرجع لسعر العرض المسجل مع
-                الطلب نفسه بس لو مفيش سعر بيع أساسي مسجل لهذا الـ SKU خالص | Total revenue
-                for this SKU over these dates — every order is valued at the LIVE base
-                (sale_price) price; only falls back to that order's own recorded offer
-                price when no LIVE base price exists for this SKU at all."""
-                total = 0.0
-                live_price = None
-                if live_map:
-                    live_info = live_map.get(sku_up)
-                    if live_info:
-                        live_price = live_info.get("price")
-                for d in dates:
-                    for p, qty in prices_map.get(sku_up, {}).get(d, []):
-                        if live_price is not None:
-                            total += live_price * qty
-                        elif p and str(p).strip().lower() not in ("", "nan", "none"):
-                            total += _td_parse_price(p) * qty
-                return total
-
-            rows_td = []
-            for sku_up_td, info_td in inv_map.items():
-                cur_t_td  = _td_total(cur_counts_td, sku_up_td, cur_dates_td)
-                prev_t_td = _td_total(prev_counts_td, sku_up_td, prev_dates_td)
-                cur_rev_td  = _td_revenue_total(cur_prices_td, sku_up_td, cur_dates_td, live_map_dash)
-                prev_rev_td = _td_revenue_total(prev_prices_td, sku_up_td, prev_dates_td, live_map_dash)
-                rows_td.append({
-                    "sku_up": sku_up_td, "sku": info_td.get("sku", sku_up_td), "img": info_td.get("img", ""),
-                    "cur": cur_t_td, "prev": prev_t_td, "stock": info_td.get("total_stock", 0),
-                    "cur_rev": cur_rev_td, "prev_rev": prev_rev_td,
-                })
-
-            total_cur_td  = sum(r["cur"] for r in rows_td)
-            total_prev_td = sum(r["prev"] for r in rows_td)
-            avg_daily_td  = (total_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
-            active_skus_td = sum(1 for r in rows_td if r["cur"] > 0)
-            # أصناف بدون مبيعات، لكن استبعدنا اللي مخزونها صفر (طبيعي متبعش لو مفيش مخزون أصلاً — مش تنبيه مفيد)
-            zero_rows_td   = sorted([r for r in rows_td if r["cur"] == 0 and r["stock"] > 0], key=lambda r: -r["stock"])
-            zero_skus_td   = len(zero_rows_td)
-            top_row_td = max(rows_td, key=lambda r: r["cur"], default=None)
-            if total_prev_td > 0:
-                growth_td = (total_cur_td - total_prev_td) / total_prev_td * 100
-            else:
-                growth_td = 100.0 if total_cur_td > 0 else 0.0
-
-            total_cur_rev_td  = sum(r["cur_rev"] for r in rows_td)
-            total_prev_rev_td = sum(r["prev_rev"] for r in rows_td)
-            avg_daily_rev_td  = (total_cur_rev_td / analysis_days_td) if analysis_days_td > 0 else 0
-            if total_prev_rev_td > 0:
-                growth_rev_td = (total_cur_rev_td - total_prev_rev_td) / total_prev_rev_td * 100
-            else:
-                growth_rev_td = 100.0 if total_cur_rev_td > 0 else 0.0
-
-            # ── منتجات انخفضت/ارتفعت مبيعاتها (٪20 فأكثر) | Declining / rising SKUs (20%+) ──
-            decline_rows_td = sorted(
-                [r for r in rows_td if r["prev"] > 0 and r["cur"] < r["prev"]
-                 and (r["prev"] - r["cur"]) / r["prev"] >= 0.20],
-                key=lambda r: -((r["prev"] - r["cur"]) / r["prev"]))
-            rise_rows_td = sorted(
-                [r for r in rows_td if r["prev"] > 0 and r["cur"] > r["prev"]
-                 and (r["cur"] - r["prev"]) / r["prev"] >= 0.20],
-                key=lambda r: -((r["cur"] - r["prev"]) / r["prev"]))
-
-            # ── أصناف تحتاج انتباه (معرضة لنفاد المخزون) — محسوبة هنا عشان تُستخدم في
-            #    شريط التنبيهات السريعة فوق، وبتتعرض بالتفصيل تحت في قسم "أصناف تحتاج انتباه" ──
-            delay_days_td = int(load_settings().get("schedule_delay_days", "3") or 3)
-            attention_rows_td = []
-            for r_td in rows_td:
-                avg_d_td = (r_td["cur"] / analysis_days_td) if analysis_days_td > 0 else 0
-                if avg_d_td <= 0:
-                    continue
-                days_to_so_td = round(r_td["stock"] / avg_d_td) if avg_d_td > 0 else 9999
-                if days_to_so_td > 10:
-                    continue
-                badge_text_td, badge_color_td, sched_td = schedule_coverage_badge(r_td["sku"], days_to_so_td, delay_days_td)
-                if "✅" in badge_text_td:
-                    continue
-                status_td = ("⚠️ لديها جدولة — قد تنفد قبل الوصول | Scheduled — may run out before arrival"
-                             if sched_td else "🚨 محتاج جدولة الآن | Needs scheduling now")
-                attention_rows_td.append({**r_td, "days_to_so": days_to_so_td, "avg_d": avg_d_td, "status": status_td})
-            attention_rows_td.sort(key=lambda r: r["days_to_so"])
-
-            # ── بيانات مساعدة لعرض تفاصيل أوضح تحت كل تنبيه (جدولة حديثة / غير متوفر / اعتماد معلّق) ──
-            recent_sched_map_td = get_recent_schedule_rows(days_back=4)
-            pending_approval_skus_dash = get_pending_approval_skus()
-
-            # ── كروت رئيسية (نظرة عامة) | Main overview cards ──
-            def _kpi_card_html(icon, icon_bg, label, value, delta_text=None, delta_positive=True):
-                delta_html = ""
-                if delta_text is not None:
-                    arrow = "↑" if delta_positive else "↓"
-                    color = "#16a34a" if delta_positive else "#dc2626"
-                    delta_html = f'<div style="font-size:12px;color:{color};margin-top:6px;font-weight:600;">{arrow} {delta_text}</div>'
-                return (
-                    f'<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;'
-                    f'padding:14px 16px;direction:rtl;min-height:118px;box-shadow:0 1px 2px rgba(0,0,0,0.04);">'
-                    f'<div style="width:34px;height:34px;border-radius:9px;background:{icon_bg}1f;'
-                    f'display:flex;align-items:center;justify-content:center;font-size:16px;margin-bottom:10px;">{icon}</div>'
-                    f'<div style="font-size:12px;color:#6b7280;margin-bottom:4px;">{label}</div>'
-                    f'<div style="font-size:21px;font-weight:800;color:#111827;">{value}</div>'
-                    f'{delta_html}</div>'
-                )
-
-            kc1, kc2, kc3, kc4, kc5 = st.columns(5)
-            with kc1:
-                st.markdown(_kpi_card_html("📦", "#2563eb", "مبيعات الفترة | Period Sales",
-                            f"{total_cur_td:,}", f"{abs(growth_td):.1f}% عن الفترة السابقة", growth_td >= 0), unsafe_allow_html=True)
-            with kc2:
-                st.markdown(_kpi_card_html("📊", "#0891b2", "متوسط يومي | Daily Avg",
-                            f"{avg_daily_td:,.1f}"), unsafe_allow_html=True)
-            with kc3:
-                st.markdown(_kpi_card_html("💰", "#16a34a", "إجمالي الإيرادات | Total Revenue",
-                            f"{total_cur_rev_td:,.0f} ريال", f"{abs(growth_rev_td):.1f}% عن الفترة السابقة", growth_rev_td >= 0), unsafe_allow_html=True)
-            with kc4:
-                st.markdown(_kpi_card_html("💵", "#9333ea", "متوسط الإيراد اليومي | Daily Avg Revenue",
-                            f"{avg_daily_rev_td:,.0f} ريال"), unsafe_allow_html=True)
-            with kc5:
-                st.markdown(_kpi_card_html("🟢", "#059669", "أصناف نشطة | Active SKUs",
-                            f"{active_skus_td:,}"), unsafe_allow_html=True)
-
-            if total_cur_rev_td == 0:
-                st.caption("ℹ️ لا توجد أسعار مسجلة لهذه الفترة (لا في شيت الطلبات ولا في LIVE) — الإيراد بيتحسب من الصفوف اللي فيها سعر، وبيستخدم سعر LIVE الأساسي كتقدير لو الطلب من غير سعر مسجل | No prices found for this period (neither in the orders sheet nor in LIVE) — revenue is computed from priced rows, falling back to the LIVE base price as an estimate for orders recorded without a price")
-
-            st.write("")
-
-            # ── ربحية الإعلانات لكل SKU (نفس منطق تاب المبيعات: صافي الربح الكلي من طلبات الإعلان
-            #    مقابل إجمالي المصروف عليه) — عشان تظهر في التنبيهات السريعة تحت ──
-            ads_map_dash = get_ads_map()
-            com_map_dash = get_com_map()
-
-            def _td_latest_price_for_sku(sku_up):
-                """السعر الأساسي لهذا الـ SKU: عمود sale_price من تاب LIVE أولاً (سعر البيع الأساسي)،
-                ولو مش موجود بيدوّر في خرائط أسعار الطلبات (الفترة الحالية ثم السابقة) كبديل
-                (سعر العرض) | Base price for this SKU: LIVE sheet's sale_price column first, falling
-                back to the order-price maps (offer price) already built for the dashboard."""
-                live_info = live_map_dash.get(sku_up)
-                if live_info and live_info.get("price") is not None:
-                    return live_info["price"]
-                for dates_list, prices_map in ((cur_dates_td, cur_prices_td), (prev_dates_td, prev_prices_td)):
-                    for d in dates_list:
-                        day_list = prices_map.get(sku_up, {}).get(d, [])
-                        vals = []
-                        for p, qty in day_list:
-                            if p and str(p).strip().lower() not in ("", "nan", "none"):
-                                try:
-                                    vals.append((float(str(p).replace(",", "")), qty))
-                                except Exception:
-                                    pass
-                        if vals:
-                            vals.sort(key=lambda x: -x[1])
-                            return vals[0][0]
-                return None
-
-            ads_profit_rows_td, ads_loss_rows_td = [], []
-            for r_ad in rows_td:
-                ads_entries_ad = ads_map_dash.get(r_ad["sku_up"])
-                com_info_ad = com_map_dash.get(r_ad["sku_up"])
-                if not ads_entries_ad or not com_info_ad:
-                    continue
-                latest_price_ad = _td_latest_price_for_sku(r_ad["sku_up"])
-                if latest_price_ad is None:
-                    continue
-                _, net_tax_ad = compute_net_price_after_fees(latest_price_ad, com_info_ad)
-                total_spends_ad = sum(a["spends"] for a in ads_entries_ad)
-                total_orders_ad = sum(a["orders"] for a in ads_entries_ad)
-                total_net_ad = total_orders_ad * net_tax_ad
-                result_ad = total_net_ad - total_spends_ad
-                entry_ad = {**r_ad, "spends": total_spends_ad, "orders": total_orders_ad,
-                            "net_total": total_net_ad, "result": result_ad}
-                if total_orders_ad <= 0 or result_ad < 0:
-                    ads_loss_rows_td.append(entry_ad)
-                else:
-                    ads_profit_rows_td.append(entry_ad)
-            ads_profit_rows_td.sort(key=lambda r: -r["result"])
-            ads_loss_rows_td.sort(key=lambda r: r["result"])  # الأكثر خسارة أولاً
-
-            # ── مخزون Xdock قارب على النفاد (من تاب LIVE) — مخزون منفصل عن Inventory، محتاج تزويد
-            #    لو قرب يخلص، مش جدولة | Xdock stock running low (from LIVE sheet) — a separate
-            #    stock pool from Inventory; low means it needs restocking, not scheduling ──
-            xdock_threshold_dash = int(load_settings().get("xdock_low_stock_threshold", "10") or 10)
-            xdock_low_rows_td = []
-            for sku_up_x, live_info_x in live_map_dash.items():
-                xnet_x = live_info_x.get("stock_xdock_net")
-                if xnet_x is None or xnet_x > xdock_threshold_dash:
-                    continue
-                inv_info_x = inv_map.get(sku_up_x, {})
-                other_stock_x = inv_info_x.get("total_stock", 0)
-                sales_month_x = inv_info_x.get("sales", 0)
-                xdock_low_rows_td.append({
-                    "sku_up": sku_up_x,
-                    "sku": inv_info_x.get("sku", sku_up_x),
-                    "img": inv_info_x.get("img", ""),
-                    "stock_xdock_net": xnet_x,
-                    "other_stock": other_stock_x,
-                    "has_other_stock": other_stock_x > 0,
-                    "sales_month": sales_month_x,
-                    "price": live_info_x.get("price"),
-                    "noon_title": live_info_x.get("noon_title", ""),
-                })
-            # ترتيب من الأعلى مبيعاً للأقل — عشان نعرف الصنف مهم (بيتباع كتير) ولا لأ
-            # قبل ما نقرر مدى إلحاح تزويد مخزون Xdock بتاعه | Sort by monthly sales
-            # (highest → lowest) so it's clear which low-Xdock-stock SKUs actually matter
-            xdock_low_rows_td.sort(key=lambda r: -r["sales_month"])
-            xdock_low_with_other_td = sum(1 for r in xdock_low_rows_td if r["has_other_stock"])
-            xdock_low_without_other_td = len(xdock_low_rows_td) - xdock_low_with_other_td
-
-            # ── التنبيهات السريعة | Quick alerts strip ──
-            st.markdown("##### 🔔 التنبيهات السريعة | Quick Alerts")
-            def _alert_chip_html(icon, bg, border, label, value, sub):
-                return (
-                    f'<div style="background:{bg};border:1px solid {border};border-right:4px solid {border};'
-                    f'border-radius:12px;padding:12px 14px;direction:rtl;min-height:92px;">'
-                    f'<div style="font-size:12px;color:#374151;margin-bottom:6px;">{icon} {label}</div>'
-                    f'<div style="font-size:22px;font-weight:800;color:#111827;">{value}</div>'
-                    f'<div style="font-size:11px;color:#6b7280;">{sub}</div></div>'
-                )
-            ac1, ac2, ac3, ac4 = st.columns(4)
-            with ac1:
-                st.markdown(_alert_chip_html("🔴", "#fef2f2", "#ef4444", "منتجات معرضة لنفاد المخزون",
-                            f"{len(attention_rows_td):,}", "تغطية أقل من 10 أيام"), unsafe_allow_html=True)
-            with ac2:
-                st.markdown(_alert_chip_html("🟡", "#fffbeb", "#f59e0b", "منتجات بدون مبيعات في الفترة",
-                            f"{zero_skus_td:,}", f"خلال آخر {analysis_days_td} يوم"), unsafe_allow_html=True)
-            with ac3:
-                st.markdown(_alert_chip_html("🟠", "#fff7ed", "#f97316", "منتجات انخفضت مبيعاتها",
-                            f"{len(decline_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
-            with ac4:
-                st.markdown(_alert_chip_html("🟢", "#f0fdf4", "#22c55e", "منتجات ارتفعت مبيعاتها",
-                            f"{len(rise_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
-
-            ac5, ac6, ac7 = st.columns(3)
-            with ac5:
-                st.markdown(_alert_chip_html("🎯", "#f0fdf4", "#22c55e", "منتجات ربحانة من الإعلانات",
-                            f"{len(ads_profit_rows_td):,}", "صافي ربح الطلبات > المصروف على الإعلان"), unsafe_allow_html=True)
-            with ac6:
-                st.markdown(_alert_chip_html("🚨", "#fef2f2", "#ef4444", "منتجات خسرانة من الإعلانات",
-                            f"{len(ads_loss_rows_td):,}", "المصروف على الإعلان أكبر من صافي الربح (أو من غير طلبات)"), unsafe_allow_html=True)
-            with ac7:
-                st.markdown(_alert_chip_html("🟣", "#faf5ff", "#a855f7", "مخزون Xdock قارب على النفاد",
-                            f"{len(xdock_low_rows_td):,}",
-                            f"{xdock_threshold_dash} قطعة أو أقل — منهم {xdock_low_with_other_td} عندهم مخزون FBN و {xdock_low_without_other_td} من غيره"),
-                            unsafe_allow_html=True)
-
-            # ── تفاصيل الأصناف تحت كل تنبيه — عشان تبان الـ SKUs نفسها اللي بتكوّن الرقم،
-            #    مع سياق كافي (غير متوفر؟ ليها جدولة حديثة؟ في انتظار اعتماد؟) عشان التحليل يكون مفهوم ──
-            def _render_alert_sku_row(r, lines=None, badges_html=""):
-                ci_al, cinfo_al = st.columns([1, 6])
-                with ci_al:
-                    show_img(r["img"], 55)
-                with cinfo_al:
-                    st.markdown(f"{sku_link_html(r['sku'])}", unsafe_allow_html=True)
-                    for line in (lines or []):
-                        st.caption(line)
-                    if badges_html:
-                        st.markdown(badges_html, unsafe_allow_html=True)
-
-            def _extra_context_badges(r, include_schedule=True):
-                """شارات إضافية مشتركة: غير متوفر حالياً / (لو include_schedule) جدولة خلال آخر 4 أيام
-                أو في انتظار اعتماد الجدولة."""
-                parts = []
-                for note in get_unavailable_ordered_note(r["sku"]):
-                    color = "#f87171" if "غير متوفر" in note else "#38bdf8"
-                    parts.append(f'<div dir="rtl" style="color:{color};font-size:11px;margin-top:3px;">{note}</div>')
-                if include_schedule:
-                    sched_entry = recent_sched_map_td.get(r["sku_up"])
-                    if sched_entry:
-                        color_sc = "#7c3aed" if sched_entry["source"] != "Expired" else "#b45309"
-                        parts.append(
-                            f'<div dir="rtl" style="background:{color_sc}1a;border:1px solid {color_sc};'
-                            f'border-radius:6px;padding:5px 9px;margin-top:4px;font-size:12px;'
-                            f'color:{color_sc};font-weight:700;line-height:1.7;">'
-                            f'📅 مجدول بتاريخ {sched_entry["date"]} — ASN {sched_entry["asn"]} — [{sched_entry["source_label"]}]'
-                            f'<div style="font-size:11px;color:#374151;margin-top:2px;font-weight:500;">خلال آخر 4 أيام، لسه في فترة الوصول — لا تطلبه تاني</div>'
-                            f'</div>')
-                    if r["sku_up"] in pending_approval_skus_dash:
-                        parts.append('<div dir="rtl" style="color:#7dd3fc;font-size:11px;margin-top:3px;">⏳ في انتظار اعتماد الجدولة | Pending schedule approval</div>')
-                return "".join(parts)
-
-            with st.expander(f"🔴 عرض منتجات معرضة لنفاد المخزون ({len(attention_rows_td):,}) | Show at-risk SKUs"):
-                if attention_rows_td:
-                    df_al1 = pd.DataFrame([{
-                        "SKU": r["sku"], "المخزون | Stock": r["stock"],
-                        "متوسط يومي | Daily Avg": round(r["avg_d"], 2),
-                        "أيام النفاد | Days to Stockout": r["days_to_so"],
-                        "الحالة | Status": r["status"],
-                    } for r in attention_rows_td])
-                    dl_btn(df_al1, "alert_stockout_risk", key="dl_alert_stockout_td")
-                    for r in attention_rows_td:
-                        _render_alert_sku_row(
-                            r,
-                            lines=[f"📦 مخزون: {r['stock']:,} — ⏳ نفاد خلال {r['days_to_so']} يوم", r["status"]],
-                            badges_html=_extra_context_badges(r, include_schedule=True))
-                else:
-                    st.caption("لا توجد أصناف معرضة لنفاد المخزون حالياً")
-
-            with st.expander(f"🟡 عرض منتجات بدون مبيعات في الفترة ({zero_skus_td:,}) | Show no-sale SKUs"):
-                st.caption("ℹ️ الأصناف اللي مخزونها صفر مستبعدة من القائمة دي — طبيعي متبعش لو مفيش مخزون أصلاً | SKUs with zero stock are excluded — no stock naturally means no sales")
-                if zero_rows_td:
-                    df_al2 = pd.DataFrame([{
-                        "SKU": r["sku"], "المخزون | Stock": r["stock"], "مبيعات الفترة | Period Sales": r["cur"],
-                    } for r in zero_rows_td])
-                    dl_btn(df_al2, "alert_no_sales", key="dl_alert_nosale_td")
-                    for r in zero_rows_td:
-                        _render_alert_sku_row(
-                            r,
-                            lines=[f"📦 مخزون: {r['stock']:,} — لا يوجد مبيعات خلال {analysis_days_td} يوم رغم توفر المخزون"],
-                            badges_html=_extra_context_badges(r, include_schedule=False))
-                else:
-                    st.caption("كل الأصناف اللي معاها مخزون باعت خلال الفترة المحددة")
-
-            with st.expander(f"🟠 عرض منتجات انخفضت مبيعاتها ({len(decline_rows_td):,}) | Show declining SKUs"):
-                st.caption("ℹ️ المخزون المعروض هنا بعد استبعاد المستودعات اللي مستبعدة من إعدادات النظام | Stock shown here already excludes warehouses excluded in settings")
-                if decline_rows_td:
-                    df_al3 = pd.DataFrame([{
-                        "SKU": r["sku"], "الفترة الحالية | Current": r["cur"], "الفترة السابقة | Previous": r["prev"],
-                        "الانخفاض | Drop %": round((r["prev"] - r["cur"]) / r["prev"] * 100, 1),
-                        "المخزون | Stock": r["stock"],
-                        "غير متوفر حالياً؟ | Unavailable now?": "نعم | Yes" if is_sku_unavailable(r["sku_up"]) else "لا | No",
-                    } for r in decline_rows_td])
-                    dl_btn(df_al3, "alert_declining", key="dl_alert_decline_td")
-                    for r in decline_rows_td:
-                        drop_pct = (r["prev"] - r["cur"]) / r["prev"] * 100
-                        stock_available_dec = r["stock"] > 0
-                        if not stock_available_dec:
-                            reason = '<span style="color:#f87171;font-size:12px;">🔴 لا يوجد مخزون الآن — الانخفاض غالباً بسبب نفاد الكمية | No stock currently — decline is likely stockout-driven</span>'
-                        elif is_sku_unavailable(r["sku_up"]):
-                            reason = '<span style="color:#f87171;font-size:12px;">❌ مسجل حالياً "غير متوفر" — ده ممكن يكون سبب الانخفاض | Currently marked Unavailable — likely explains the decline</span>'
-                        else:
-                            reason = '<span style="color:#4ade80;font-size:12px;">✅ المخزون متاح — الانخفاض مش بسبب نقص المخزون، محتاج مراجعة (سعر/منافسة/إعلانات..) | Stock is available — decline isn\'t stock-related, worth reviewing (price/competition/ads..)</span>'
-                        # جدولة/انتظار اعتماد بتظهر بس لو مفيش مخزون فعلاً — لو المخزون متاح مفيش داعي نعرض جدولته
-                        badges = _extra_context_badges(r, include_schedule=not stock_available_dec)
-                        _render_alert_sku_row(
-                            r,
-                            lines=[f"📉 {r['cur']:,} مقابل {r['prev']:,} (-{drop_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
-                            badges_html=(reason + badges))
-                else:
-                    st.caption("لا توجد أصناف انخفضت مبيعاتها بنسبة 20%+ حالياً")
-
-            with st.expander(f"🟢 عرض منتجات ارتفعت مبيعاتها ({len(rise_rows_td):,}) | Show rising SKUs"):
-                if rise_rows_td:
-                    df_al4 = pd.DataFrame([{
-                        "SKU": r["sku"], "الفترة الحالية | Current": r["cur"], "الفترة السابقة | Previous": r["prev"],
-                        "الارتفاع | Rise %": round((r["cur"] - r["prev"]) / r["prev"] * 100, 1),
-                    } for r in rise_rows_td])
-                    dl_btn(df_al4, "alert_rising", key="dl_alert_rise_td")
-                    for r in rise_rows_td:
-                        rise_pct = (r["cur"] - r["prev"]) / r["prev"] * 100
-                        _render_alert_sku_row(
-                            r,
-                            lines=[f"📈 {r['cur']:,} مقابل {r['prev']:,} (+{rise_pct:.0f}%)", f"📦 مخزون حالي: {r['stock']:,}"],
-                            badges_html=_extra_context_badges(r, include_schedule=False))
-                else:
-                    st.caption("لا توجد أصناف ارتفعت مبيعاتها بنسبة 20%+ حالياً")
-
-            def _ads_insight_html(r):
-                if r["orders"] <= 0:
-                    return (f'<span style="color:#f87171;font-size:12px;font-weight:700;">🚨 مفدتش لحد دلوقتي: '
-                            f'اتصرف {r["spends"]:,.2f} ريال ولسه ما جابش أي طلبات فعلية</span>')
-                if r["result"] >= 0:
-                    return (f'<span style="color:#4ade80;font-size:12px;font-weight:700;">🎯 الاعلان مربح: '
-                            f'عدد طلبات الاعلان {r["orders"]:,.0f} طلب بصافي ربح إجمالي {r["net_total"]:,.2f} ريال مقابل '
-                            f'{r["spends"]:,.2f} ريال مدفوع — حقق {r["result"]:,.2f} ريال 👌</span>')
-                return (f'<span style="color:#f87171;font-size:12px;font-weight:700;">🚨 الاعلان غير مربح: '
-                        f'مدفوع {r["spends"]:,.2f} ريال، لكن صافي الربح من {r["orders"]:,.0f} طلب بس {r["net_total"]:,.2f} ريال — '
-                        f'خسران {abs(r["result"]):,.2f} ريال إجمالي</span>')
-
-            with st.expander(f"🎯 عرض منتجات ربحانة من الإعلانات ({len(ads_profit_rows_td):,}) | Show profitable-ads SKUs"):
-                if ads_profit_rows_td:
-                    df_al5 = pd.DataFrame([{
-                        "SKU": r["sku"], "طلبات الإعلان | Ad Orders": r["orders"],
-                        "المصروف | Spends": round(r["spends"], 2), "صافي الربح | Net Total": round(r["net_total"], 2),
-                        "النتيجة | Result": round(r["result"], 2),
-                    } for r in ads_profit_rows_td])
-                    dl_btn(df_al5, "alert_ads_profit", key="dl_alert_ads_profit_td")
-                    for r in ads_profit_rows_td:
-                        _render_alert_sku_row(r, badges_html=_ads_insight_html(r))
-                else:
-                    st.caption("لا توجد أصناف ربحانة من الإعلانات حالياً")
-
-            with st.expander(f"🚨 عرض منتجات خسرانة من الإعلانات ({len(ads_loss_rows_td):,}) | Show losing-ads SKUs"):
-                if ads_loss_rows_td:
-                    df_al6 = pd.DataFrame([{
-                        "SKU": r["sku"], "طلبات الإعلان | Ad Orders": r["orders"],
-                        "المصروف | Spends": round(r["spends"], 2), "صافي الربح | Net Total": round(r["net_total"], 2),
-                        "النتيجة | Result": round(r["result"], 2),
-                    } for r in ads_loss_rows_td])
-                    dl_btn(df_al6, "alert_ads_loss", key="dl_alert_ads_loss_td")
-                    for r in ads_loss_rows_td:
-                        _render_alert_sku_row(r, badges_html=_ads_insight_html(r))
-                else:
-                    st.caption("لا توجد أصناف خسرانة من الإعلانات حالياً 🎉")
-
-            with st.expander(f"🟣 عرض أصناف مخزون Xdock قارب على النفاد ({len(xdock_low_rows_td):,} — {xdock_low_with_other_td} عندهم مخزون FBN | {xdock_low_without_other_td} من غيره) | Show low Xdock-stock SKUs"):
-                st.caption("ℹ️ ده مخزون Xdock من تاب LIVE، منفصل عن مخزون Inventory العادي — لو قرب يخلص محتاج تزويد (مش جدولة) لو متوفر عندنا. الأصناف اللي معاها مخزون FBN (Inventory) أقل إلحاحاً من اللي مفيش عندها غير مخزون Xdock بس. الترتيب هنا من الأعلى مبيعاً للأقل عشان تعرف الصنف مهم ولا لأ | This is Xdock stock from the LIVE sheet, separate from regular Inventory — running low means it needs restocking (not scheduling) if available with us. SKUs that also have FBN (Inventory) stock are less urgent than ones relying on Xdock stock alone. Sorted by monthly sales (highest → lowest) so you can tell if it actually matters")
-                if xdock_low_rows_td:
-                    df_al7 = pd.DataFrame([{
-                        "SKU": r["sku"], "مخزون Xdock | Xdock Stock": r["stock_xdock_net"],
-                        "مخزون FBN | FBN Stock": r["other_stock"],
-                        "مبيع شهري | Monthly Sales": r["sales_month"],
-                        "السعر | Price": r["price"] if r["price"] is not None else "—",
-                    } for r in xdock_low_rows_td])
-                    dl_btn(df_al7, "alert_xdock_low", key="dl_alert_xdock_td")
-                    for r in xdock_low_rows_td:
-                        if r["has_other_stock"]:
-                            other_badge = f'<span style="color:#4ade80;font-size:12px;">📦 عنده مخزون FBN (Inventory): {r["other_stock"]:,} — أقل إلحاحاً</span>'
-                        else:
-                            other_badge = '<span style="color:#f87171;font-size:12px;font-weight:700;">🚫 لا يوجد مخزون FBN — الاعتماد على Xdock بس</span>'
-                        _render_alert_sku_row(
-                            r,
-                            lines=[f"🟣 مخزون Xdock: {r['stock_xdock_net']:,} — 📈 مبيع شهري: {r['sales_month']:,}"
-                                   + (f" — 💵 {r['price']:,.2f} ريال" if r["price"] is not None else "")],
-                            badges_html=other_badge)
-                else:
-                    st.caption(f"لا توجد أصناف مخزون Xdock عندها {xdock_threshold_dash} قطعة أو أقل حالياً")
-
-            # ══════════════════════════════════════════════════════════════════════
-            # 📢 تحليل أداء الإعلانات | Ads Performance Analysis
-            # قسم جديد ومنفصل تمامًا عن القسم اللي فوق (ads_profit_rows_td/ads_loss_rows_td) —
-            # ده معتمد بس على بيانات الإعلانات الموجودة فعليًا (Views/Clicks/Orders/ATC/
-            # Spends/Revenue) من غير أي افتراض لتكلفة المنتج أو هامش ربح حقيقي. كل حساب هنا
-            # بيتجمّع من *كل* الحملات/الصفوف الخاصة بالـ SKU أو الحملة قبل ما يتحسب —
-            # مش بياخد رقم من صف واحد بس لو فيه أكتر من حملة | A new, fully separate
-            # section from the block above — based only on ad data that actually exists,
-            # no product-cost or profit-margin assumptions. Every number here is summed
-            # across *all* matching campaign rows before any ratio is computed — never
-            # taken from a single row when more than one campaign exists.
-            st.markdown("---")
-            st.markdown("## 📢 تحليل أداء الإعلانات | Ads Performance Analysis")
-            st.caption("مبني فقط على بيانات الإعلانات الموجودة في النظام حاليًا — بدون أي افتراض لتكلفة المنتج أو هامش الربح | Based only on ad data currently in the system — no product cost or profit margin assumptions")
-
-            def _apa_ratios(views, clicks, atc, orders, spends, revenue):
-                """يعيد حساب كل النسب من الأرقام الخام المجمّعة (مش من عمود جاهز في صف واحد)
-                عشان أي SKU/حملة ليها أكتر من صف تتحسب صح | Recomputes every ratio from the
-                summed raw totals (never from a single pre-computed column), so multi-row
-                SKUs/campaigns are calculated correctly."""
-                ctr = (clicks / views * 100) if views > 0 else 0.0
-                cpc = (spends / clicks) if clicks > 0 else 0.0
-                cpa = (spends / orders) if orders > 0 else 0.0
-                cvr = (orders / clicks * 100) if clicks > 0 else 0.0
-                roas = (revenue / spends) if spends > 0 else 0.0
-                click_to_atc = (atc / clicks * 100) if clicks > 0 else 0.0
-                atc_to_order = (orders / atc * 100) if atc > 0 else 0.0
-                return {"ctr": ctr, "cpc": cpc, "cpa": cpa, "cvr": cvr, "roas": roas,
-                        "click_to_atc": click_to_atc, "atc_to_order": atc_to_order}
-
-            # ── تجميع كل صفوف الإعلانات (Sku × Campaign) على مستوى الحملة نفسها —
-            #    عشان أي حملة بتستهدف أكتر من SKU تتحسب مجمّعة صح ومتاخدش من صف واحد ──
-            campaigns_apa = {}
-            for sku_up_c, entries_c in ads_map_dash.items():
-                for e in entries_c:
-                    cname_c = e["campaign"] or "—"
-                    agg_c = campaigns_apa.setdefault(cname_c, {
-                        "campaign": cname_c, "views": 0.0, "clicks": 0.0, "orders": 0.0,
-                        "atc": 0.0, "spends": 0.0, "revenue": 0.0, "skus": set(),
-                    })
-                    agg_c["views"]   += e["views"]
-                    agg_c["clicks"]  += e["clicks"]
-                    agg_c["orders"]  += e["orders"]
-                    agg_c["atc"]     += e["atc"]
-                    agg_c["spends"]  += e["spends"]
-                    agg_c["revenue"] += e["revenue"]
-                    agg_c["skus"].add(sku_up_c)
-
-            for _cname, _agg in campaigns_apa.items():
-                _agg.update(_apa_ratios(_agg["views"], _agg["clicks"], _agg["atc"], _agg["orders"], _agg["spends"], _agg["revenue"]))
-                _agg["sku_count"] = len(_agg["skus"])
-                # نتيجة الإعلان بعد الإنفاق الإعلاني فقط — مش ربح حقيقي (مفيش تكلفة منتج) |
-                # Ad result after ad spend only — not real profit (no product cost known)
-                _agg["ad_result"] = _agg["revenue"] - _agg["spends"]
-
-            campaigns_list_apa = list(campaigns_apa.values())
-
-            def _apa_render_related_skus(sku_up_set, max_show=6):
-                """يعرض الأصناف (SKU) المرتبطة بالحملة مع صورها | Renders the SKUs linked
-                to this campaign, each with its product image."""
-                sku_list_r = sorted(sku_up_set)
-                shown_r = sku_list_r[:max_show]
-                for sku_up_r in shown_r:
-                    inv_info_r = inv_map.get(sku_up_r, {})
-                    ci_r, cinfo_r = st.columns([1, 6])
-                    with ci_r:
-                        show_img(inv_info_r.get("img", ""), 45)
-                    with cinfo_r:
-                        st.markdown(sku_link_html(inv_info_r.get("sku", sku_up_r)), unsafe_allow_html=True)
-                if len(sku_list_r) > max_show:
-                    st.caption(f"+ {len(sku_list_r) - max_show} SKU إضافي | more SKUs")
-
-            if not campaigns_list_apa:
-                st.info("لا توجد بيانات إعلانات مرفوعة حالياً | No ad data uploaded yet")
-            else:
-                # ── 1) مؤشرات أداء الإعلانات | Ad Performance Metrics (إجمالي كل الحملات) ──
-                tot_views_apa   = sum(c["views"] for c in campaigns_list_apa)
-                tot_clicks_apa  = sum(c["clicks"] for c in campaigns_list_apa)
-                tot_atc_apa     = sum(c["atc"] for c in campaigns_list_apa)
-                tot_orders_apa  = sum(c["orders"] for c in campaigns_list_apa)
-                tot_spends_apa  = sum(c["spends"] for c in campaigns_list_apa)
-                tot_revenue_apa = sum(c["revenue"] for c in campaigns_list_apa)
-                tot_ratios_apa  = _apa_ratios(tot_views_apa, tot_clicks_apa, tot_atc_apa, tot_orders_apa, tot_spends_apa, tot_revenue_apa)
-
-                st.markdown("#### 📊 مؤشرات أداء الإعلانات | Ad Performance Metrics")
-                st.caption("ℹ️ كل النسب (CTR/CPC/CPS/CVR/ROAS) بتتحسب من إجمالي الأرقام الخام لكل الحملات مجمّعة — مش من عمود جاهز في صف واحد | All ratios are computed from the raw totals across every campaign combined — never from a single pre-computed column")
-                mrow1 = st.columns(4)
-                with mrow1[0]:
-                    st.markdown(_kpi_card_html("🛒", "#2563eb", "الطلبات | Orders", f"{tot_orders_apa:,.0f}"), unsafe_allow_html=True)
-                with mrow1[1]:
-                    st.markdown(_kpi_card_html("👁️", "#0891b2", "مرات الظهور | Impressions", f"{tot_views_apa:,.0f}"), unsafe_allow_html=True)
-                with mrow1[2]:
-                    st.markdown(_kpi_card_html("🖱️", "#7c3aed", "النقرات | Clicks", f"{tot_clicks_apa:,.0f}"), unsafe_allow_html=True)
-                with mrow1[3]:
-                    st.markdown(_kpi_card_html("➕", "#059669", "الإضافة إلى السلة | Add to Cart", f"{tot_atc_apa:,.0f}"), unsafe_allow_html=True)
-                mrow2 = st.columns(4)
-                with mrow2[0]:
-                    st.markdown(_kpi_card_html("📈", "#0891b2", "معدل النقر | CTR", f"{tot_ratios_apa['ctr']:.2f}%"), unsafe_allow_html=True)
-                with mrow2[1]:
-                    st.markdown(_kpi_card_html("💵", "#f59e0b", "تكلفة النقرة | CPC", f"{tot_ratios_apa['cpc']:.2f} ريال"), unsafe_allow_html=True)
-                with mrow2[2]:
-                    st.markdown(_kpi_card_html("🎯", "#dc2626", "تكلفة الطلب | CPS / CPA", f"{tot_ratios_apa['cpa']:.2f} ريال"), unsafe_allow_html=True)
-                with mrow2[3]:
-                    st.markdown(_kpi_card_html("📊", "#9333ea", "معدل التحويل | CVR", f"{tot_ratios_apa['cvr']:.2f}%"), unsafe_allow_html=True)
-                mrow3 = st.columns(3)
-                with mrow3[0]:
-                    st.markdown(_kpi_card_html("🎯", "#16a34a", "العائد على الإنفاق الإعلاني | ROAS", f"{tot_ratios_apa['roas']:.2f}"), unsafe_allow_html=True)
-                with mrow3[1]:
-                    st.markdown(_kpi_card_html("💰", "#16a34a", "الإيراد | Revenue", f"{tot_revenue_apa:,.2f} ريال"), unsafe_allow_html=True)
-                with mrow3[2]:
-                    st.markdown(_kpi_card_html("💸", "#dc2626", "الإنفاق الإعلاني | Ad Spend", f"{tot_spends_apa:,.2f} ريال"), unsafe_allow_html=True)
-
-                st.write("")
-
-                # ── 2) تحليل مسار الإعلان | Advertising Funnel ──
-                st.markdown("#### 🔻 تحليل مسار الإعلان | Advertising Funnel")
-                st.caption("عشان تعرف أين يحدث انخفاض الأداء في مسار الإعلان | See exactly where performance drops along the funnel")
-                fcols_apa = st.columns(4)
-                funnel_stages_apa = [
-                    ("👁️ مرات الظهور | Impressions", tot_views_apa, None),
-                    ("🖱️ النقرات | Clicks", tot_clicks_apa, tot_ratios_apa["ctr"]),
-                    ("➕ الإضافة إلى السلة | Add to Cart", tot_atc_apa, tot_ratios_apa["click_to_atc"]),
-                    ("🛒 الطلبات | Orders", tot_orders_apa, tot_ratios_apa["atc_to_order"]),
-                ]
-                for fc_apa, (label_f, val_f, rate_f) in zip(fcols_apa, funnel_stages_apa):
-                    with fc_apa:
-                        rate_html_f = (f'<div style="font-size:11px;color:#f59e0b;margin-top:4px;">↓ {rate_f:.1f}%</div>'
-                                       if rate_f is not None else "")
-                        st.markdown(
-                            f'<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;'
-                            f'padding:12px 10px;text-align:center;">'
-                            f'<div style="font-size:11px;color:#94a3b8;">{label_f}</div>'
-                            f'<div style="font-size:20px;font-weight:800;color:#e2e8f0;">{val_f:,.0f}</div>'
-                            f'{rate_html_f}</div>', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div style="margin-top:8px;font-size:12px;color:#94a3b8;">'
-                    f'📈 معدل النقر | CTR: <b style="color:#e2e8f0;">{tot_ratios_apa["ctr"]:.2f}%</b> &nbsp;|&nbsp; '
-                    f'النقر → السلة | Click → Cart: <b style="color:#e2e8f0;">{tot_ratios_apa["click_to_atc"]:.1f}%</b> &nbsp;|&nbsp; '
-                    f'السلة → الطلب | Cart → Order: <b style="color:#e2e8f0;">{tot_ratios_apa["atc_to_order"]:.1f}%</b> &nbsp;|&nbsp; '
-                    f'معدل التحويل الكلي | CVR: <b style="color:#e2e8f0;">{tot_ratios_apa["cvr"]:.2f}%</b>'
-                    f'</div>', unsafe_allow_html=True)
-
-                st.write("")
-
-                # ── دوال التحليل التلقائي / التصنيف / التوصية — مبنية على أكتر من مؤشر مع
-                #    بعض (ROAS+CPA+CVR+CTR+CPC+Orders+Spend+Revenue) مش مؤشر واحد بس ──
-                def _apa_insight(c):
-                    if c["orders"] <= 0:
-                        return ("🔴", "أداء ضعيف | Poor Performance",
-                                f"اتصرف {c['spends']:,.2f} ريال على الحملة ولسه ما جابتش أي طلبات فعلية.")
-                    score_c = 0
-                    if c["roas"] >= 3: score_c += 2
-                    elif c["roas"] >= 1.5: score_c += 1
-                    elif c["roas"] < 1: score_c -= 2
-                    if c["cvr"] >= 3: score_c += 1
-                    elif c["cvr"] < 1: score_c -= 1
-                    if c["ctr"] >= 1: score_c += 1
-                    elif c["ctr"] < 0.3: score_c -= 1
-                    if c["spends"] > 0 and c["revenue"] < c["spends"]:
-                        score_c -= 2
-                    if score_c >= 3:
-                        return ("🟢", "أداء جيد | Good Performance",
-                                f"الحملة تحقق ROAS {c['roas']:.2f} مع معدل تحويل {c['cvr']:.2f}% جيد.")
-                    elif score_c >= 0:
-                        return ("🟡", "يحتاج إلى تحسين | Needs Improvement",
-                                f"الحملة بتاخد نقرات معقولة (CTR {c['ctr']:.2f}%)، لكن التحويل للطلبات ({c['cvr']:.2f}%) أو الـ ROAS ({c['roas']:.2f}) لسه محتاج تحسين.")
-                    else:
-                        return ("🔴", "أداء ضعيف | Poor Performance",
-                                f"تكلفة الطلب {c['cpa']:,.2f} ريال مرتفعة مقارنة بعدد الطلبات ({c['orders']:,.0f}) والـ ROAS {c['roas']:.2f}.")
-
-                def _apa_classification(c):
-                    icon_i, _t, _d = _apa_insight(c)
-                    if c["orders"] <= 0:
-                        return "🔴", "أداء ضعيف | Poor Performance"
-                    if icon_i == "🟢":
-                        return "🟢", "أداء قوي | Strong Performance"
-                    if icon_i == "🟡":
-                        if c["roas"] < 1.5 and c["cvr"] < 2:
-                            return "🟠", "يحتاج إلى تحسين | Needs Improvement"
-                        return "🟡", "يحتاج إلى مراقبة | Needs Monitoring"
-                    return "🔴", "أداء ضعيف | Poor Performance"
-
-                def _apa_recommendation(c):
-                    cls_icon_c, _l = _apa_classification(c)
-                    if c["orders"] <= 0 and c["spends"] > 0:
-                        return "قلل الإنفاق | Reduce Spend"
-                    if cls_icon_c == "🟢":
-                        return "استمر | Continue"
-                    if cls_icon_c == "🟡":
-                        return "راقب | Monitor"
-                    if cls_icon_c == "🟠":
-                        return "حسّن الحملة | Optimize"
-                    return "راجع الحملة | Review"
-
-                # ── 5) مقارنة الحملات | Campaign Comparison (قبل التفاصيل عشان تبان الأهم فوق) ──
-                st.markdown("#### 🏆 مقارنة الحملات | Campaign Comparison")
-                camps_with_orders_apa = [c for c in campaigns_list_apa if c["orders"] > 0]
-                camps_with_clicks_apa = [c for c in campaigns_list_apa if c["clicks"] > 0]
-                comp_specs_apa = [
-                    ("🏆", "أفضل حملة حسب ROAS | Best by ROAS", camps_with_orders_apa, lambda c: c["roas"], lambda c: f"ROAS {c['roas']:.2f}"),
-                    ("💰", "أعلى إيراد | Highest Revenue", campaigns_list_apa, lambda c: c["revenue"], lambda c: f"{c['revenue']:,.2f} ريال"),
-                    ("🛒", "أكثر طلبات | Most Orders", campaigns_list_apa, lambda c: c["orders"], lambda c: f"{c['orders']:,.0f} طلب"),
-                    ("💸", "أعلى إنفاق إعلاني | Highest Ad Spend", campaigns_list_apa, lambda c: c["spends"], lambda c: f"{c['spends']:,.2f} ريال"),
-                    ("🎯", "أفضل تكلفة طلب | Best CPA", camps_with_orders_apa, lambda c: -c["cpa"], lambda c: f"{c['cpa']:.2f} ريال"),
-                    ("📈", "أفضل معدل تحويل | Best CVR", camps_with_clicks_apa, lambda c: c["cvr"], lambda c: f"{c['cvr']:.2f}%"),
-                    ("👁️", "أفضل معدل نقر | Best CTR", campaigns_list_apa, lambda c: c["ctr"], lambda c: f"{c['ctr']:.2f}%"),
-                ]
-                comp_cols_apa = st.columns(2)
-                for i_apa, (icon_s, label_s, pool_s, key_s, fmt_s) in enumerate(comp_specs_apa):
-                    best_c_apa = max(pool_s, key=key_s, default=None)
-                    with comp_cols_apa[i_apa % 2]:
-                        if best_c_apa:
-                            st.markdown(_kpi_card_html(icon_s, "#2563eb", label_s, best_c_apa["campaign"]), unsafe_allow_html=True)
-                            st.caption(fmt_s(best_c_apa))
-                            with st.expander(f"🏷️ الأصناف | SKUs ({best_c_apa['sku_count']})"):
-                                _apa_render_related_skus(best_c_apa["skus"])
-                        else:
-                            st.markdown(_kpi_card_html(icon_s, "#6b7280", label_s, "—"), unsafe_allow_html=True)
-
-                st.write("")
-
-                # ── 3+6+7) التحليل التلقائي + التصنيف + التوصية لكل حملة | Automatic
-                #    insight + classification + recommendation per campaign ──
-                st.markdown("#### 🔎 تحليل كل حملة | Per-Campaign Analysis")
-                for c_apa in sorted(campaigns_list_apa, key=lambda x: -x["spends"]):
-                    icon_i, title_i, desc_i = _apa_insight(c_apa)
-                    icon_c, label_c = _apa_classification(c_apa)
-                    rec_c = _apa_recommendation(c_apa)
-                    bg_i = {"🟢": "#052e1655", "🟡": "#78350f33", "🔴": "#4c051655"}[icon_i]
-                    border_i = {"🟢": "#16a34a", "🟡": "#f59e0b", "🔴": "#dc2626"}[icon_i]
-                    with st.expander(f"{icon_i} {c_apa['campaign']} — {c_apa['sku_count']} SKU | {c_apa['orders']:,.0f} طلب"):
-                        st.markdown(
-                            f'<div dir="rtl" style="background:{bg_i};border:1px solid {border_i};border-radius:8px;padding:8px 12px;margin-bottom:8px;">'
-                            f'<b>{icon_i} {title_i}</b><br><span style="font-size:13px;">{desc_i}</span>'
-                            f'</div>', unsafe_allow_html=True)
-                        st.markdown(
-                            f"👁️ ظهور: {c_apa['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {c_apa['clicks']:,.0f} &nbsp;|&nbsp; "
-                            f"➕ سلة: {c_apa['atc']:,.0f} &nbsp;|&nbsp; 🛒 طلبات: {c_apa['orders']:,.0f}<br>"
-                            f"📊 CTR: {c_apa['ctr']:.2f}% &nbsp;|&nbsp; 💵 CPC: {c_apa['cpc']:.2f} &nbsp;|&nbsp; "
-                            f"🎯 CPS/CPA: {c_apa['cpa']:.2f} &nbsp;|&nbsp; 📈 CVR: {c_apa['cvr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {c_apa['roas']:.2f}<br>"
-                            f"💸 إنفاق: {c_apa['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {c_apa['revenue']:,.2f} ريال &nbsp;|&nbsp; "
-                            f"📉 نتيجة الإعلان بعد الإنفاق الإعلاني | Ad Result After Ad Spend: <b>{c_apa['ad_result']:,.2f} ريال</b>")
-                        st.markdown(f"🏷️ التصنيف | Classification: **{icon_c} {label_c}**")
-                        st.markdown(f"✅ التوصية | Recommendation: **{rec_c}**")
-                        st.markdown("🏷️ **الأصناف المرتبطة | Related SKUs**")
-                        _apa_render_related_skus(c_apa["skus"])
-
-                st.caption(
-                    "ℹ️ مقارنة الفترة الحالية بالفترة السابقة (📈/📉 Revenue, Orders, Ad Spend, ROAS, CPA, CTR, CVR, "
-                    "Clicks, Add to Cart) مش متاحة هنا لسه — لأن تاب الإعلانات بيحفظ إجمالي كل حملة لحظيًا من غير "
-                    "تاريخ يومي، فمفيش فترة سابقة نقارن بيها. لو حبينا نفعّلها، محتاجين نبدأ نسجّل نسخة/تاريخ لكل "
-                    "تحديث في شيت الإعلانات | Current-vs-previous-period comparison isn't available yet because the "
-                    "Advertisements sheet only stores each campaign's live cumulative totals, with no daily date "
-                    "history to compare against. Enabling it would require snapshotting the ads sheet with dates.")
-
-            st.write("")
-
-            # ── كارت أعلى SKU مع صورة | Top SKU card with image ──
-            if top_row_td and top_row_td["cur"] > 0:
-                st.markdown("##### 🔥 أعلى SKU مبيعًا | Top-Selling SKU")
-                ci_top, cinfo_top = st.columns([1, 6])
-                with ci_top:
-                    show_img(top_row_td["img"], 90)
-                with cinfo_top:
-                    st.markdown(f"**`{top_row_td['sku']}`**")
-                    st.markdown(
-                        f"📦 **مبيعات الفترة | Period Sales:** {top_row_td['cur']:,} &nbsp;|&nbsp; "
-                        f"📊 **متوسط يومي | Daily Avg:** {(top_row_td['cur']/analysis_days_td):,.1f} &nbsp;|&nbsp; "
-                        f"📦 **مخزون | Stock:** {top_row_td['stock']:,}")
-                    st.markdown(f"💰 **إيراد الفترة | Period Revenue:** {top_row_td['cur_rev']:,.0f} ريال")
-
-            st.divider()
-
-            # ── رسم بياني لاتجاه المبيعات + أهم المنتجات جنب بعض | Trend chart + top products, side by side ──
-            cur_dates_sorted_td = sorted(cur_dates_td)
-            daily_totals_td = {
-                d: sum(cur_counts_td.get(r["sku_up"], {}).get(d, 0) for r in rows_td)
-                for d in cur_dates_sorted_td
-            }
-            chart_df_td = pd.DataFrame({
-                "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_td],
-                "المبيعات | Sales": [daily_totals_td.get(d, 0) for d in cur_dates_sorted_td],
-            }).set_index("التاريخ | Date")
-
-            col_chart_td, col_top_td = st.columns([1.1, 1])
-            with col_chart_td:
-                st.markdown(f"##### 📉 اتجاه المبيعات آخر {analysis_days_td} يوم | Sales Trend")
-                st.line_chart(chart_df_td)
-                growth_icon_td = "📈" if growth_td >= 0 else "📉"
-                growth_word_td = "نمو" if growth_td >= 0 else "انخفاض"
-                growth_rev_icon_td = "📈" if growth_rev_td >= 0 else "📉"
-                growth_rev_word_td = "نمو" if growth_rev_td >= 0 else "انخفاض"
-                st.caption(
-                    f"{growth_icon_td} {growth_word_td} الطلبات: {growth_td:+.1f}% ({total_cur_td:,} مقابل {total_prev_td:,}) "
-                    f"&nbsp;|&nbsp; {growth_rev_icon_td} {growth_rev_word_td} الإيراد: {growth_rev_td:+.1f}% "
-                    f"({total_cur_rev_td:,.0f} مقابل {total_prev_rev_td:,.0f} ريال)")
-
-            with col_top_td:
-                st.markdown("##### 🏆 أهم المنتجات | Top Products")
-                top5_td = sorted(rows_td, key=lambda r: -r["cur"])[:5]
-                if top5_td and top5_td[0]["cur"] > 0:
-                    rows_html_td = ""
-                    for r in top5_td:
-                        if r["cur"] <= 0:
-                            continue
-                        img_src = r["img"] if r["img"] else ""
-                        img_html = (f'<img src="{img_src}" style="width:32px;height:32px;border-radius:6px;'
-                                     f'object-fit:cover;margin-left:8px;">') if img_src else "📦"
-                        rows_html_td += (
-                            '<div style="display:flex;align-items:center;justify-content:space-between;'
-                            'padding:8px 4px;border-bottom:1px solid #f1f5f9;direction:rtl;">'
-                            f'<div style="display:flex;align-items:center;font-size:12px;color:#111827;">{img_html}'
-                            f'<span style="font-family:monospace;">{r["sku"]}</span></div>'
-                            f'<div style="text-align:left;font-size:12px;color:#374151;white-space:nowrap;">'
-                            f'<b>{r["cur"]:,}</b> طلب &nbsp; <span style="color:#6b7280;">({r["cur_rev"]:,.0f} ريال)</span></div>'
-                            '</div>'
-                        )
-                    st.markdown(
-                        f'<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:6px 12px;">{rows_html_td}</div>',
-                        unsafe_allow_html=True)
-                else:
-                    st.caption("لا توجد بيانات مبيعات كافية | Not enough sales data")
-
-            st.divider()
-
-            # ── المبيعات حسب القسم (فلوس وعدد) | Sales by Department (revenue & orders) ──
-            # بيعتمد على عمود Family (اختياري) في شيت DailyOrders — لو مش موجود أو الصف مالوش
-            # قيمة، الكود بيكمل عادي من غير ما يوقف وبيتجاهل هذا الصف من تحليل الأقسام بس
-            st.markdown("### 📂 المبيعات حسب القسم | Sales by Department")
-            dept_stats_td = build_daily_orders_family_stats(cur_dates_td, live_map_dash)
-            if not dept_stats_td:
-                st.caption("لا توجد بيانات أقسام (عمود Family) لهذه الفترة — العمود اختياري ولا يؤثر على باقي التحليلات | No department (Family) data for this period — the column is optional and does not affect other analytics")
-            else:
-                dept_sorted_td = sorted(dept_stats_td.items(), key=lambda x: -x[1]["revenue"])
-                df_dept_td = pd.DataFrame([{
-                    "القسم | Department": dept,
-                    "عدد الطلبات | Orders": v["orders"],
-                    "الإيراد | Revenue (ريال)": round(v["revenue"], 2),
-                } for dept, v in dept_sorted_td])
-                dl_btn(df_dept_td, "sales_by_department", key="dl_dept_td")
-                st.dataframe(df_dept_td, use_container_width=True, hide_index=True)
-                st.bar_chart(df_dept_td.set_index("القسم | Department")[["الإيراد | Revenue (ريال)"]])
-
-            st.divider()
-
-            # ── أعلى 10 أصناف مبيعًا (مع صور) | Top 10 best sellers (with images) ──
-            st.markdown("### 🔥 أعلى 10 أصناف مبيعًا | Top 10 Best Sellers")
-            top10_td = sorted([r for r in rows_td if r["cur"] > 0], key=lambda r: -r["cur"])[:10]
-            if top10_td:
-                df_top10_td = pd.DataFrame([{
-                    "الترتيب | #": i + 1, "SKU": r["sku"], "المبيعات | Sales": r["cur"],
-                    "متوسط يومي | Daily Avg": round(r["cur"] / analysis_days_td, 2), "المخزون | Stock": r["stock"],
-                    "الإيراد | Revenue (ريال)": round(r["cur_rev"], 2),
-                } for i, r in enumerate(top10_td)])
-                dl_btn(df_top10_td, "top_sellers", key="dl_top10_td")
-                for i, r in enumerate(top10_td):
-                    ci_t, cinfo_t = st.columns([1, 6])
-                    with ci_t:
-                        show_img(r["img"], 70)
-                    with cinfo_t:
-                        st.markdown(f"**#{i+1} — `{r['sku']}`**")
-                        st.markdown(
-                            f"📦 مبيعات | Sales: **{r['cur']:,}** &nbsp;|&nbsp; "
-                            f"📊 يومي | Daily: **{r['cur']/analysis_days_td:.1f}** &nbsp;|&nbsp; "
-                            f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
-                            f"💰 إيراد | Revenue: **{r['cur_rev']:,.0f} ريال**")
-                    st.divider()
-            else:
-                st.caption("لا توجد بيانات مبيعات كافية | Not enough sales data")
-
-            # ── الأصناف البطيئة (مع صور) | Slow moving items (with images) ──
-            st.markdown("### 🐌 الأصناف البطيئة | Slow Moving (Bottom 10)")
-            slow10_td = sorted(rows_td, key=lambda r: r["cur"])[:10]
-            if slow10_td:
-                df_slow10_td = pd.DataFrame([{
-                    "SKU": r["sku"], "المبيعات | Sales": r["cur"],
-                    "متوسط يومي | Daily Avg": round(r["cur"] / analysis_days_td, 2), "المخزون | Stock": r["stock"],
-                    "الإيراد | Revenue (ريال)": round(r["cur_rev"], 2),
-                } for r in slow10_td])
-                dl_btn(df_slow10_td, "slow_movers", key="dl_slow10_td")
-                for r in slow10_td:
-                    ci_s, cinfo_s = st.columns([1, 6])
-                    with ci_s:
-                        show_img(r["img"], 70)
-                    with cinfo_s:
-                        st.markdown(f"**`{r['sku']}`**")
-                        st.markdown(
-                            f"📦 مبيعات | Sales: **{r['cur']:,}** &nbsp;|&nbsp; "
-                            f"📊 يومي | Daily: **{r['cur']/analysis_days_td:.1f}** &nbsp;|&nbsp; "
-                            f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
-                            f"💰 إيراد | Revenue: **{r['cur_rev']:,.0f} ريال**")
-                    st.divider()
-
-            # ── تحليل اتجاه SKU فردي (مع صورة) | Per-SKU trend (with image) ──
-            st.markdown("### 🔎 تحليل اتجاه SKU | SKU Trend Analysis")
-            sku_options_td = sorted({r["sku"] for r in rows_td})
-            selected_sku_td = st.selectbox("اختر SKU للتحليل | Select SKU", ["—"] + sku_options_td, key="dash_sku_td")
-            if selected_sku_td and selected_sku_td != "—":
-                sel_row_td = next((r for r in rows_td if r["sku"] == selected_sku_td), None)
-                if sel_row_td:
-                    sel_daily_td = {d: cur_counts_td.get(sel_row_td["sku_up"], {}).get(d, 0) for d in cur_dates_sorted_td}
-                    sel_cur_td, sel_prev_td = sel_row_td["cur"], sel_row_td["prev"]
-                    sel_cur_rev_td, sel_prev_rev_td = sel_row_td["cur_rev"], sel_row_td["prev_rev"]
-                    sel_avg_td = (sel_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
-                    if sel_prev_td > 0:
-                        sel_growth_td = (sel_cur_td - sel_prev_td) / sel_prev_td * 100
-                    else:
-                        sel_growth_td = 100.0 if sel_cur_td > 0 else 0.0
-                    if sel_prev_rev_td > 0:
-                        sel_growth_rev_td = (sel_cur_rev_td - sel_prev_rev_td) / sel_prev_rev_td * 100
-                    else:
-                        sel_growth_rev_td = 100.0 if sel_cur_rev_td > 0 else 0.0
-                    max_day_td = max(sel_daily_td.items(), key=lambda x: x[1], default=(None, 0))
-                    min_day_td = min(sel_daily_td.items(), key=lambda x: x[1], default=(None, 0))
-
-                    ci_sel, cinfo_sel = st.columns([1, 6])
-                    with ci_sel:
-                        show_img(sel_row_td["img"], 90)
-                    with cinfo_sel:
-                        st.markdown(f"**`{sel_row_td['sku']}`** &nbsp;|&nbsp; 📦 مخزون | Stock: **{sel_row_td['stock']:,}**")
-
-                    m1_td, m2_td, m3_td = st.columns(3)
-                    m1_td.metric("مبيعات الفترة | Period Sales", f"{sel_cur_td:,}")
-                    m2_td.metric("متوسط يومي | Daily Avg", f"{sel_avg_td:,.1f}")
-                    m3_td.metric("النمو | Growth", f"{sel_growth_td:+.2f}%")
-                    st.caption(f"مبيعات الفترة السابقة | Previous period sales: **{sel_prev_td:,}**")
-
-                    mr1_td, mr2_td, mr3_td = st.columns(3)
-                    mr1_td.metric("إيراد الفترة | Period Revenue", f"{sel_cur_rev_td:,.0f} ريال")
-                    mr2_td.metric("متوسط إيراد يومي | Daily Avg Revenue", f"{(sel_cur_rev_td/analysis_days_td if analysis_days_td>0 else 0):,.0f} ريال")
-                    mr3_td.metric("نمو الإيراد | Revenue Growth", f"{sel_growth_rev_td:+.2f}%")
-                    st.caption(f"إيراد الفترة السابقة | Previous period revenue: **{sel_prev_rev_td:,.0f} ريال**")
-
-                    m4_td, m5_td = st.columns(2)
-                    with m4_td:
-                        st.markdown(f"📈 **أعلى يوم مبيعات | Best Day:** "
-                                    f"{max_day_td[0].strftime('%Y-%m-%d') if max_day_td[0] else '—'} ({max_day_td[1]})")
-                    with m5_td:
-                        st.markdown(f"📉 **أقل يوم مبيعات | Worst Day:** "
-                                    f"{min_day_td[0].strftime('%Y-%m-%d') if min_day_td[0] else '—'} ({min_day_td[1]})")
-                    sku_chart_df_td = pd.DataFrame({
-                        "التاريخ | Date": [d.strftime("%Y-%m-%d") for d in cur_dates_sorted_td],
-                        "المبيعات | Sales": [sel_daily_td.get(d, 0) for d in cur_dates_sorted_td],
-                    }).set_index("التاريخ | Date")
-                    st.line_chart(sku_chart_df_td)
-
-            st.divider()
-
-            # ── أصناف تحتاج انتباه (مع صور) | Needs-attention (with images) ──
-            # القائمة اتحسبت فوق قبل شريط التنبيهات السريعة (attention_rows_td) — هنا بس بنعرضها بالتفصيل
-            # Already computed above (before the quick-alerts strip) — this just renders the details
-            st.markdown("### 🚨 أصناف تحتاج انتباه | Needs Attention")
-            if attention_rows_td:
-                df_att_td = pd.DataFrame([{
-                    "SKU": r["sku"], "المخزون | Stock": r["stock"],
-                    "متوسط يومي | Daily Avg": round(r["avg_d"], 2),
-                    "أيام النفاد المتوقعة | Days to Stockout": r["days_to_so"],
-                    "الحالة | Status": r["status"],
-                } for r in attention_rows_td])
-                dl_btn(df_att_td, "needs_attention", key="dl_attention_td")
-                for r in attention_rows_td:
-                    ci_a, cinfo_a = st.columns([1, 6])
-                    with ci_a:
-                        show_img(r["img"], 70)
-                    with cinfo_a:
-                        st.markdown(f"**`{r['sku']}`**")
-                        st.markdown(
-                            f"📦 مخزون | Stock: **{r['stock']:,}** &nbsp;|&nbsp; "
-                            f"📊 يومي | Daily Avg: **{r['avg_d']:.1f}** &nbsp;|&nbsp; "
-                            f"⏳ نفاد خلال | Stockout in: **{r['days_to_so']}** يوم")
-                        st.markdown(r["status"])
-                    st.divider()
-            else:
-                st.success("✅ لا توجد أصناف محتاجة انتباه حالياً | No items currently need attention")
+            _dash_fbn_subtab_td, _dash_fbb_subtab_td = st.tabs(
+                ["🅽 مبيعات نون FBN | Noon FBN Sales", "🅱 مبيعات نون FBB | Noon FBB Sales"])
+            with _dash_fbn_subtab_td:
+                _render_sales_dashboard_body(
+                    build_daily_orders_counts, build_daily_orders_prices,
+                    build_daily_orders_family_stats, "fbn")
+            with _dash_fbb_subtab_td:
+                _render_sales_dashboard_body(
+                    build_daily_orders_counts_fbb, build_daily_orders_prices_fbb,
+                    build_daily_orders_family_stats_fbb, "fbb")
 
     # ══ TAB 15 — تحليل الجدولة ══
     # ══ TAB 16 — مخزون بدون بيع ══
