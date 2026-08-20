@@ -1235,6 +1235,120 @@ def build_daily_orders_prices(dates):
             prices[sku_up][d.date()].append((price_val, qty_val))
     return prices
 
+# ══════════════════════════════════════════════════════════════════════════
+# ══ نسخ منفصلة تمامًا لمبيعات FBB (Fulfilled by Partner) — بتفلتر على عمود
+#    "Fulfillment Model" في شيت DailyOrders، وبتاخد بس الصفوف اللي قيمتها فيها
+#    "FBP" (زي "Fulfilled by Partner (FBP)"). الدالتين دول نسخة كاملة منفصلة عن
+#    build_daily_orders_counts/build_daily_orders_prices الأصليين فوق — مفيش أي
+#    تعديل على الأصليين خالص، وتاب "مبيعات نون FBN" لسه بيستخدمهم زي ما هم من
+#    غير أي تغيير | Fully separate FBP/FBB-filtered copies — used only by the
+#    new FBB sub-tab. The originals above are completely untouched, and the
+#    FBN sub-tab keeps using them exactly as before.
+# ══════════════════════════════════════════════════════════════════════════
+def _find_fulfillment_col_idx(header):
+    for ci, h in enumerate(header):
+        if str(h).strip().lower() in ("fulfillment model", "fulfillment_model", "fulfillment"):
+            return ci
+    return None
+
+def _find_status_col_idx(header):
+    for ci, h in enumerate(header):
+        if str(h).strip().lower() in ("status", "الحالة", "order status"):
+            return ci
+    return None
+
+def _row_is_fbb(row, fulfillment_col_idx, status_col_idx):
+    """يرجع True لو الصف ده طلب FBB — لازم الشرطين مع بعض: Fulfillment Model فيه
+    FBP (Fulfilled by Partner)، والـ Status = Processing | Returns True only when
+    BOTH conditions hold: Fulfillment Model contains FBP (Fulfilled by Partner)
+    AND Status equals Processing."""
+    if fulfillment_col_idx is None or len(row) <= fulfillment_col_idx:
+        return False
+    fulfillment_val = str(row[fulfillment_col_idx]).strip().upper()
+    is_fbp = "FBP" in fulfillment_val or "PARTNER" in fulfillment_val
+    if not is_fbp:
+        return False
+    if status_col_idx is None or len(row) <= status_col_idx:
+        return False
+    status_val = str(row[status_col_idx]).strip().upper()
+    return status_val == "PROCESSING"
+
+def build_daily_orders_counts_fbb(dates):
+    """نفس منطق build_daily_orders_counts بالظبط، لكن بيقتصر بس على صفوف FBB
+    (Fulfillment Model = Fulfilled by Partner / FBP، والـ Status = Processing) |
+    Same logic as build_daily_orders_counts exactly, restricted to FBB rows
+    (Fulfillment Model = FBP AND Status = Processing) only."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    counts = {}
+    if len(data) <= 1:
+        return counts
+    hdr = data[0] if data else []
+    fulfillment_col_idx = _find_fulfillment_col_idx(hdr)
+    status_col_idx = _find_status_col_idx(hdr)
+    for row in data[1:]:
+        while len(row) < 2: row.append("")
+        sku, ts = row[0].strip(), row[1].strip()
+        if not sku or not ts:
+            continue
+        if not _row_is_fbb(row, fulfillment_col_idx, status_col_idx):
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() in dates_set:
+            sku_up = sku.upper()
+            if sku_up not in counts:
+                counts[sku_up] = {dd: 0 for dd in dates}
+            counts[sku_up][d.date()] += 1
+    return counts
+
+def build_daily_orders_prices_fbb(dates):
+    """نفس منطق build_daily_orders_prices بالظبط، لكن بيقتصر بس على صفوف FBB
+    (Fulfillment Model = Fulfilled by Partner / FBP، والـ Status = Processing) |
+    Same logic as build_daily_orders_prices exactly, restricted to FBB rows
+    (Fulfillment Model = FBP AND Status = Processing) only."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    prices = {}
+    if len(data) <= 1:
+        return prices
+    hdr = data[0] if data else []
+    fulfillment_col_idx = _find_fulfillment_col_idx(hdr)
+    status_col_idx = _find_status_col_idx(hdr)
+    price_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price"):
+            price_col_idx = ci; break
+    qty_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("quantity","qty","كمية","الكمية","count"):
+            qty_col_idx = ci; break
+    for row in data[1:]:
+        while len(row) < 2: row.append("")
+        sku, ts = row[0].strip(), row[1].strip()
+        if not sku or not ts:
+            continue
+        if not _row_is_fbb(row, fulfillment_col_idx, status_col_idx):
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() in dates_set:
+            sku_up = sku.upper()
+            price_val = ""
+            if price_col_idx is not None and len(row) > price_col_idx:
+                raw = str(row[price_col_idx]).strip()
+                price_val = raw if raw and raw.lower() not in ("nan","none","") else ""
+            qty_val = 1
+            if qty_col_idx is not None and len(row) > qty_col_idx:
+                try:
+                    qty_val = int(float(str(row[qty_col_idx]).strip()))
+                except Exception:
+                    qty_val = 1
+            if qty_val < 1:
+                qty_val = 1
+            if sku_up not in prices:
+                prices[sku_up] = {dd: [] for dd in dates}
+            prices[sku_up][d.date()].append((price_val, qty_val))
+    return prices
+
 # ══ الأقسام | Departments (عمود Family في DailyOrders — اختياري، لو مش موجود الكود بيكمل عادي) ══
 FAMILY_HOME_GROUP = {"kitchen_dining", "home_improvement", "gardening", "home_decor", "furniture", "bedding"}
 FAMILY_LABELS = {
@@ -1947,415 +2061,828 @@ with tab9:
     # ══ TAB 14 — المبيعات ══
 with tab14:
     if _tab_gate("tab14", "🛒 المبيعات | Sales"):
-        st.subheader("🛒 المبيعات اليومية | Daily Sales")
-        st.caption("كل SKU عنده مخزون — مبيعاته اليومية من أمس للوراء بجانب مخزونه ومبيعاته الشهرية وحالة التغطية | All SKUs with inventory — daily sales, stock, monthly sales, and coverage status")
-        render_tacweed_upload("sales")
-        render_warehouse_stock_upload("sales")
+        _fbn_subtab_t14, _fbb_subtab_t14 = st.tabs(["🅽 مبيعات نون FBN | Noon FBN Sales", "🅱 مبيعات نون FBB | Noon FBB Sales"])
+        with _fbn_subtab_t14:
+            st.subheader("🛒 المبيعات اليومية | Daily Sales")
+            st.caption("كل SKU عنده مخزون — مبيعاته اليومية من أمس للوراء بجانب مخزونه ومبيعاته الشهرية وحالة التغطية | All SKUs with inventory — daily sales, stock, monthly sales, and coverage status")
+            render_tacweed_upload("sales")
+            render_warehouse_stock_upload("sales")
 
-        sales_display_days = int(load_settings().get("sales_display_days","7") or 7)
-        today_t14 = datetime.now().date()
-        sales_dates = [today_t14 - timedelta(days=i) for i in range(1, sales_display_days + 1)]
-        sales_labels = []
-        for i, d in enumerate(sales_dates):
-            if i == 0:
-                sales_labels.append(f"أمس ({d.strftime('%m-%d')})")
-            elif i == 1:
-                sales_labels.append(f"أول أمس ({d.strftime('%m-%d')})")
+            sales_display_days = int(load_settings().get("sales_display_days","7") or 7)
+            today_t14 = datetime.now().date()
+            sales_dates = [today_t14 - timedelta(days=i) for i in range(1, sales_display_days + 1)]
+            sales_labels = []
+            for i, d in enumerate(sales_dates):
+                if i == 0:
+                    sales_labels.append(f"أمس ({d.strftime('%m-%d')})")
+                elif i == 1:
+                    sales_labels.append(f"أول أمس ({d.strftime('%m-%d')})")
+                else:
+                    sales_labels.append(f"قبل {i+1} أيام ({d.strftime('%m-%d')})")
+
+            delay_days_t14 = int(load_settings().get("schedule_delay_days","3") or 3)
+            coverage_days_t14 = int(load_settings().get("schedule_coverage_days","15") or 15)
+
+            if not inv_map:
+                st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
             else:
-                sales_labels.append(f"قبل {i+1} أيام ({d.strftime('%m-%d')})")
+                multi_counts_t14 = build_daily_orders_counts(sales_dates)
+                prices_map_t14   = build_daily_orders_prices(sales_dates)
 
-        delay_days_t14 = int(load_settings().get("schedule_delay_days","3") or 3)
-        coverage_days_t14 = int(load_settings().get("schedule_coverage_days","15") or 15)
+                # بناء صفوف — كل SKU موجود في المخزون
+                sales_tab_rows = []
+                for sku_up, info in inv_map.items():
+                    stock       = info.get("total_stock", 0)
+                    sales_month = info.get("sales", 0)
+                    img         = info.get("img", "")
+                    sku_disp    = info.get("sku", sku_up)
+                    day_counts  = multi_counts_t14.get(sku_up, {d: 0 for d in sales_dates})
+                    day_prices  = prices_map_t14.get(sku_up, {d: [] for d in sales_dates})
+                    total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
+                    avg_daily_t14 = (total_recent / sales_display_days) if sales_display_days > 0 else (sales_month / 30 if sales_month > 0 else 0)
+                    effective_avg_t14 = avg_daily_t14 if avg_daily_t14 > 0 else (sales_month / 30 if sales_month > 0 else 0)
+                    days_to_stockout_t14 = round(stock / effective_avg_t14) if effective_avg_t14 > 0 else 9999
+                    sales_tab_rows.append({
+                        "sku": sku_disp, "sku_up": sku_up,
+                        "stock": stock, "sales_month": sales_month, "img": img,
+                        "day_counts": day_counts, "day_prices": day_prices,
+                        "total_recent": total_recent,
+                        "effective_avg": effective_avg_t14,
+                        "days_to_stockout": days_to_stockout_t14,
+                    })
 
-        if not inv_map:
-            st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
-        else:
-            multi_counts_t14 = build_daily_orders_counts(sales_dates)
-            prices_map_t14   = build_daily_orders_prices(sales_dates)
+                # ترتيب: الأكتر مبيعاً أمس أولاً
+                sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
 
-            # بناء صفوف — كل SKU موجود في المخزون
-            sales_tab_rows = []
-            for sku_up, info in inv_map.items():
-                stock       = info.get("total_stock", 0)
-                sales_month = info.get("sales", 0)
-                img         = info.get("img", "")
-                sku_disp    = info.get("sku", sku_up)
-                day_counts  = multi_counts_t14.get(sku_up, {d: 0 for d in sales_dates})
-                day_prices  = prices_map_t14.get(sku_up, {d: [] for d in sales_dates})
-                total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
-                avg_daily_t14 = (total_recent / sales_display_days) if sales_display_days > 0 else (sales_month / 30 if sales_month > 0 else 0)
-                effective_avg_t14 = avg_daily_t14 if avg_daily_t14 > 0 else (sales_month / 30 if sales_month > 0 else 0)
-                days_to_stockout_t14 = round(stock / effective_avg_t14) if effective_avg_t14 > 0 else 9999
-                sales_tab_rows.append({
-                    "sku": sku_disp, "sku_up": sku_up,
-                    "stock": stock, "sales_month": sales_month, "img": img,
-                    "day_counts": day_counts, "day_prices": day_prices,
-                    "total_recent": total_recent,
-                    "effective_avg": effective_avg_t14,
-                    "days_to_stockout": days_to_stockout_t14,
-                })
-
-            # ترتيب: الأكتر مبيعاً أمس أولاً
-            sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
-
-            # ══ إجماليات اليومية في الأعلى ══
-            totals_per_day = {d: sum(r["day_counts"].get(d, 0) for r in sales_tab_rows) for d in sales_dates}
-            st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
-            total_cols = st.columns(min(len(sales_dates), sales_display_days))
-            for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
-                if ci < len(total_cols):
-                    with total_cols[ci]:
-                        day_total = totals_per_day.get(d, 0)
-                        is_yesterday = (ci == 0)
-                        if is_yesterday:
-                            bg    = "#14532d" if day_total > 0 else "#7f1d1d"
-                            num_color = "#86efac" if day_total > 0 else "#fca5a5"
-                            border = "border:2px solid #22c55e;" if day_total > 0 else "border:2px solid #ef4444;"
-                        else:
-                            bg    = "#1e293b" if day_total == 0 else "#172554"
-                            num_color = "#93c5fd" if day_total > 0 else "#64748b"
-                            border = ""
-                        st.markdown(
-                            f'<div style="background:{bg};border-radius:8px;padding:8px 10px;text-align:center;margin:2px;{border}">' +
-                            f'<div style="font-size:11px;color:#94a3b8;">{"🔴 " if is_yesterday and day_total==0 else ("🟢 " if is_yesterday else "")}{lbl.split("(")[0].strip()}</div>' +
-                            f'<div style="font-size:13px;color:#6b7280;">{d.strftime("%m-%d")}</div>' +
-                            f'<div style="font-size:{"28" if is_yesterday else "22"}px;font-weight:bold;color:{num_color};">{day_total}</div>' +
-                            '</div>',
-                            unsafe_allow_html=True)
-            st.divider()
-
-            srch_t14 = st.text_input("🔍 بحث SKU | Search SKU", key="srch_t14", placeholder="اكتب SKU...")
-            if srch_t14.strip():
-                sales_tab_rows = [r for r in sales_tab_rows if srch_t14.strip().upper() in r["sku_up"]]
-
-            # جدول تحميل
-            if sales_tab_rows:
-                df_t14 = pd.DataFrame([
-                    {"SKU": r["sku"], **{sales_labels[i]: r["day_counts"].get(d, 0) for i, d in enumerate(sales_dates)},
-                     "مخزون | Stock": r["stock"], "مبيع شهري | Monthly Sales": r["sales_month"]}
-                    for r in sales_tab_rows
-                ])
-                c1, c2 = st.columns(2)
-                with c1: dl_btn(df_t14, "sales_daily", key="dlbtn_t14")
-                with c2: st.info(f"📦 SKUs: {len(sales_tab_rows)} | 📅 {sales_display_days} يوم")
-
-            # ══ قائمة SKUs المرحلة من المبيعات (محتاج جدولة فقط) ══
-            # تحديث المرحلين بعد بناء الصفوف الكاملة
-            _new_transferred = []
-
-            # ══ خريطة SKUs المجدولة خلال آخر 4 أيام (لعرض ASN + الكمية لو فعلاً ليها جدولة) ══
-            recent_sched_map_t14 = get_recent_schedule_rows(days_back=4)
-            pending_approval_skus_t14 = get_pending_approval_skus()
-            ads_map_t14 = get_ads_map()
-            com_map_t14 = get_com_map()
-            live_map_t14 = get_live_map()
-            xdock_threshold_t14 = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
-
-            st.divider()
-            for r in sales_tab_rows:
-                c_img, c_info = st.columns([1, 7])
-                with c_img:
-                    show_img(r["img"], 70)
-                with c_info:
-                    st.markdown(f"**SKU:** {sku_link_html(r['sku'])}", unsafe_allow_html=True)
-                    tc_badge_t14 = warehouse_available_badge(r["sku_up"])
-                    if tc_badge_t14:
-                        st.markdown(tc_badge_t14, unsafe_allow_html=True)
-
-                    # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
-                    ads_entries_t14 = ads_map_t14.get(r["sku_up"])
-                    if ads_entries_t14:
-                        total_spends_t14  = sum(a["spends"] for a in ads_entries_t14)
-                        total_revenue_t14 = sum(a["revenue"] for a in ads_entries_t14)
-                        total_orders_t14  = sum(a["orders"] for a in ads_entries_t14)
-                        with st.expander(f"📢 أداء الإعلانات | Ads Performance — {len(ads_entries_t14)} حملة | campaign(s)"):
+                # ══ إجماليات اليومية في الأعلى ══
+                totals_per_day = {d: sum(r["day_counts"].get(d, 0) for r in sales_tab_rows) for d in sales_dates}
+                st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
+                total_cols = st.columns(min(len(sales_dates), sales_display_days))
+                for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
+                    if ci < len(total_cols):
+                        with total_cols[ci]:
+                            day_total = totals_per_day.get(d, 0)
+                            is_yesterday = (ci == 0)
+                            if is_yesterday:
+                                bg    = "#14532d" if day_total > 0 else "#7f1d1d"
+                                num_color = "#86efac" if day_total > 0 else "#fca5a5"
+                                border = "border:2px solid #22c55e;" if day_total > 0 else "border:2px solid #ef4444;"
+                            else:
+                                bg    = "#1e293b" if day_total == 0 else "#172554"
+                                num_color = "#93c5fd" if day_total > 0 else "#64748b"
+                                border = ""
                             st.markdown(
-                                f"💸 **إجمالي المصروف:** {total_spends_t14:,.2f} ريال &nbsp;|&nbsp; "
-                                f"💰 **إجمالي الإيراد:** {total_revenue_t14:,.2f} ريال &nbsp;|&nbsp; "
-                                f"🛒 **طلبات من الإعلان:** {total_orders_t14:,.0f}")
-                            for ad in ads_entries_t14:
+                                f'<div style="background:{bg};border-radius:8px;padding:8px 10px;text-align:center;margin:2px;{border}">' +
+                                f'<div style="font-size:11px;color:#94a3b8;">{"🔴 " if is_yesterday and day_total==0 else ("🟢 " if is_yesterday else "")}{lbl.split("(")[0].strip()}</div>' +
+                                f'<div style="font-size:13px;color:#6b7280;">{d.strftime("%m-%d")}</div>' +
+                                f'<div style="font-size:{"28" if is_yesterday else "22"}px;font-weight:bold;color:{num_color};">{day_total}</div>' +
+                                '</div>',
+                                unsafe_allow_html=True)
+                st.divider()
+
+                srch_t14 = st.text_input("🔍 بحث SKU | Search SKU", key="srch_t14", placeholder="اكتب SKU...")
+                if srch_t14.strip():
+                    sales_tab_rows = [r for r in sales_tab_rows if srch_t14.strip().upper() in r["sku_up"]]
+
+                # جدول تحميل
+                if sales_tab_rows:
+                    df_t14 = pd.DataFrame([
+                        {"SKU": r["sku"], **{sales_labels[i]: r["day_counts"].get(d, 0) for i, d in enumerate(sales_dates)},
+                         "مخزون | Stock": r["stock"], "مبيع شهري | Monthly Sales": r["sales_month"]}
+                        for r in sales_tab_rows
+                    ])
+                    c1, c2 = st.columns(2)
+                    with c1: dl_btn(df_t14, "sales_daily", key="dlbtn_t14")
+                    with c2: st.info(f"📦 SKUs: {len(sales_tab_rows)} | 📅 {sales_display_days} يوم")
+
+                # ══ قائمة SKUs المرحلة من المبيعات (محتاج جدولة فقط) ══
+                # تحديث المرحلين بعد بناء الصفوف الكاملة
+                _new_transferred = []
+
+                # ══ خريطة SKUs المجدولة خلال آخر 4 أيام (لعرض ASN + الكمية لو فعلاً ليها جدولة) ══
+                recent_sched_map_t14 = get_recent_schedule_rows(days_back=4)
+                pending_approval_skus_t14 = get_pending_approval_skus()
+                ads_map_t14 = get_ads_map()
+                com_map_t14 = get_com_map()
+                live_map_t14 = get_live_map()
+                xdock_threshold_t14 = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
+
+                st.divider()
+                for r in sales_tab_rows:
+                    c_img, c_info = st.columns([1, 7])
+                    with c_img:
+                        show_img(r["img"], 70)
+                    with c_info:
+                        st.markdown(f"**SKU:** {sku_link_html(r['sku'])}", unsafe_allow_html=True)
+                        tc_badge_t14 = warehouse_available_badge(r["sku_up"])
+                        if tc_badge_t14:
+                            st.markdown(tc_badge_t14, unsafe_allow_html=True)
+
+                        # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
+                        ads_entries_t14 = ads_map_t14.get(r["sku_up"])
+                        if ads_entries_t14:
+                            total_spends_t14  = sum(a["spends"] for a in ads_entries_t14)
+                            total_revenue_t14 = sum(a["revenue"] for a in ads_entries_t14)
+                            total_orders_t14  = sum(a["orders"] for a in ads_entries_t14)
+                            with st.expander(f"📢 أداء الإعلانات | Ads Performance — {len(ads_entries_t14)} حملة | campaign(s)"):
                                 st.markdown(
-                                    f"**{ad['campaign']}**<br>"
-                                    f"👁️ ظهور: {ad['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {ad['clicks']:,.0f} &nbsp;|&nbsp; "
-                                    f"🛒 طلبات: {ad['orders']:,.0f} &nbsp;|&nbsp; ➕ سلة: {ad['atc']:,.0f}<br>"
-                                    f"💸 مصروف: {ad['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {ad['revenue']:,.2f} ريال<br>"
-                                    f"📊 CTR: {ad['ctr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {ad['roas']:.2f} &nbsp;|&nbsp; "
-                                    f"CPC: {ad['cpc']:.2f} &nbsp;|&nbsp; CPS: {ad['cps']:.2f} &nbsp;|&nbsp; CVR: {ad['cvr']:.2f}%",
-                                    unsafe_allow_html=True)
-                                st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
+                                    f"💸 **إجمالي المصروف:** {total_spends_t14:,.2f} ريال &nbsp;|&nbsp; "
+                                    f"💰 **إجمالي الإيراد:** {total_revenue_t14:,.2f} ريال &nbsp;|&nbsp; "
+                                    f"🛒 **طلبات من الإعلان:** {total_orders_t14:,.0f}")
+                                for ad in ads_entries_t14:
+                                    st.markdown(
+                                        f"**{ad['campaign']}**<br>"
+                                        f"👁️ ظهور: {ad['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {ad['clicks']:,.0f} &nbsp;|&nbsp; "
+                                        f"🛒 طلبات: {ad['orders']:,.0f} &nbsp;|&nbsp; ➕ سلة: {ad['atc']:,.0f}<br>"
+                                        f"💸 مصروف: {ad['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {ad['revenue']:,.2f} ريال<br>"
+                                        f"📊 CTR: {ad['ctr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {ad['roas']:.2f} &nbsp;|&nbsp; "
+                                        f"CPC: {ad['cpc']:.2f} &nbsp;|&nbsp; CPS: {ad['cps']:.2f} &nbsp;|&nbsp; CVR: {ad['cvr']:.2f}%",
+                                        unsafe_allow_html=True)
+                                    st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
 
-                    # ══ مخزون Xdock (من تاب LIVE) — مخزون منفصل عن Inventory، لو قرب يخلص محتاج تزويد ══
-                    live_info_t14 = live_map_t14.get(r["sku_up"])
-                    if live_info_t14 is not None:
-                        xnet_t14 = live_info_t14.get("stock_xdock_net", 0)
-                        xlow_t14 = xnet_t14 <= xdock_threshold_t14
-                        st.markdown(
-                            f'<span class="wh-badge" style="background:{"#7f1d1d" if xlow_t14 else "#3b0764"};'
-                            f'color:{"#fca5a5" if xlow_t14 else "#e9d5ff"};">'
-                            f'{"🔴" if xlow_t14 else "🟣"} مخزون Xdock: {xnet_t14:,}'
-                            f'{" — قارب على النفاد" if xlow_t14 else ""}</span>',
-                            unsafe_allow_html=True)
+                        # ══ مخزون Xdock (من تاب LIVE) — مخزون منفصل عن Inventory، لو قرب يخلص محتاج تزويد ══
+                        live_info_t14 = live_map_t14.get(r["sku_up"])
+                        if live_info_t14 is not None:
+                            xnet_t14 = live_info_t14.get("stock_xdock_net", 0)
+                            xlow_t14 = xnet_t14 <= xdock_threshold_t14
+                            st.markdown(
+                                f'<span class="wh-badge" style="background:{"#7f1d1d" if xlow_t14 else "#3b0764"};'
+                                f'color:{"#fca5a5" if xlow_t14 else "#e9d5ff"};">'
+                                f'{"🔴" if xlow_t14 else "🟣"} مخزون Xdock: {xnet_t14:,}'
+                                f'{" — قارب على النفاد" if xlow_t14 else ""}</span>',
+                                unsafe_allow_html=True)
 
-                    # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة | Net price after commission,
-                    #    delivery fees, and VAT ══
-                    # سعر البيع الأساسي بييجي من عمود sale_price في تاب LIVE أولاً (وده اللي بتُحسب عليه
-                    # الخصومات والعمولة والضريبة والإعلانات)، ولو مش موجود بيرجع لسعر الطلبات القديم
-                    # (بقى اسمه "سعر العرض") كبديل.
-                    com_info_t14 = com_map_t14.get(r["sku_up"])
-                    if com_info_t14:
-                        offer_price_t14 = get_latest_sku_price(r, sales_dates)
-                        latest_price_t14, price_from_live_t14 = get_base_price(r["sku_up"], live_map_t14, offer_price_t14)
-                        if latest_price_t14 is not None:
-                            net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
+                        # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة | Net price after commission,
+                        #    delivery fees, and VAT ══
+                        # سعر البيع الأساسي بييجي من عمود sale_price في تاب LIVE أولاً (وده اللي بتُحسب عليه
+                        # الخصومات والعمولة والضريبة والإعلانات)، ولو مش موجود بيرجع لسعر الطلبات القديم
+                        # (بقى اسمه "سعر العرض") كبديل.
+                        com_info_t14 = com_map_t14.get(r["sku_up"])
+                        if com_info_t14:
+                            offer_price_t14 = get_latest_sku_price(r, sales_dates)
+                            latest_price_t14, price_from_live_t14 = get_base_price(r["sku_up"], live_map_t14, offer_price_t14)
+                            if latest_price_t14 is not None:
+                                net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
 
-                            # ── فلوس الإعلان دي مفديه ولا لأ؟ | Did the ad spend pay off overall? ──
-                            # مقارنة إجمالية: صافي الربح الكلي من الطلبات اللي جابها الإعلان مقابل
-                            # إجمالي اللي اتصرف على الإعلان — مش مقارنة لكل طلب لوحده
-                            ad_insight_t14 = ""
-                            if ads_entries_t14:
-                                if total_orders_t14 <= 0:
-                                    ad_insight_t14 = (
-                                        '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
-                                        'border:1px solid #dc2626;border-radius:7px;">'
-                                        f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 مفدتش لحد دلوقتي: '
-                                        f'اتصرف {total_spends_t14:,.2f} ريال على الإعلان ده ولسه ما جابش أي طلبات فعلية — يستاهل تراجع التفاصيل فوق 👆</span>'
-                                        '</div>')
-                                else:
-                                    total_net_from_ads_t14 = total_orders_t14 * net_tax_t14
-                                    net_result_t14 = total_net_from_ads_t14 - total_spends_t14
-                                    if net_result_t14 >= 0:
-                                        ad_insight_t14 = (
-                                            '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#052e1655;'
-                                            'border:1px solid #16a34a;border-radius:7px;">'
-                                            f'<span style="color:#4ade80;font-size:13px;font-weight:800;">🎯 الاعلان مربح: '
-                                            f'عدد طلبات الاعلان {total_orders_t14:,.0f} طلب بصافي ربح إجمالي {total_net_from_ads_t14:,.2f} ريال مقابل '
-                                            f'{total_spends_t14:,.2f} ريال مدفوع — حقق <u>{net_result_t14:,.2f} ريال</u>  👌</span>'
-                                            '</div>')
-                                    else:
+                                # ── فلوس الإعلان دي مفديه ولا لأ؟ | Did the ad spend pay off overall? ──
+                                # مقارنة إجمالية: صافي الربح الكلي من الطلبات اللي جابها الإعلان مقابل
+                                # إجمالي اللي اتصرف على الإعلان — مش مقارنة لكل طلب لوحده
+                                ad_insight_t14 = ""
+                                if ads_entries_t14:
+                                    if total_orders_t14 <= 0:
                                         ad_insight_t14 = (
                                             '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
                                             'border:1px solid #dc2626;border-radius:7px;">'
-                                            f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 الاعلان غير مربح: '
-                                            f'مدفوع {total_spends_t14:,.2f} ريال، لكن صافي الربح من {total_orders_t14:,.0f} طلب بس {total_net_from_ads_t14:,.2f} ريال — '
-                                            f'خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. افتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
+                                            f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 مفدتش لحد دلوقتي: '
+                                            f'اتصرف {total_spends_t14:,.2f} ريال على الإعلان ده ولسه ما جابش أي طلبات فعلية — يستاهل تراجع التفاصيل فوق 👆</span>'
                                             '</div>')
+                                    else:
+                                        total_net_from_ads_t14 = total_orders_t14 * net_tax_t14
+                                        net_result_t14 = total_net_from_ads_t14 - total_spends_t14
+                                        if net_result_t14 >= 0:
+                                            ad_insight_t14 = (
+                                                '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#052e1655;'
+                                                'border:1px solid #16a34a;border-radius:7px;">'
+                                                f'<span style="color:#4ade80;font-size:13px;font-weight:800;">🎯 الاعلان مربح: '
+                                                f'عدد طلبات الاعلان {total_orders_t14:,.0f} طلب بصافي ربح إجمالي {total_net_from_ads_t14:,.2f} ريال مقابل '
+                                                f'{total_spends_t14:,.2f} ريال مدفوع — حقق <u>{net_result_t14:,.2f} ريال</u>  👌</span>'
+                                                '</div>')
+                                        else:
+                                            ad_insight_t14 = (
+                                                '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
+                                                'border:1px solid #dc2626;border-radius:7px;">'
+                                                f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 الاعلان غير مربح: '
+                                                f'مدفوع {total_spends_t14:,.2f} ريال، لكن صافي الربح من {total_orders_t14:,.0f} طلب بس {total_net_from_ads_t14:,.2f} ريال — '
+                                                f'خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. افتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
+                                                '</div>')
 
-                            offer_price_line_t14 = ""
-                            if offer_price_t14 is not None and (not price_from_live_t14 or round(offer_price_t14, 2) != round(latest_price_t14, 2)):
-                                offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض (معلومة فقط، غير مستخدم في الحسابات): <b>{offer_price_t14:,.2f}</b> ريال'
-                            price_label_t14 = "سعر البيع الأساسي" if price_from_live_t14 else "سعر البيع (سعر العرض)"
-                            st.markdown(
-                                f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
-                                f'padding:8px 14px;margin:4px 0;">'
-                                f'<span style="color:#e2e8f0;font-size:13px;">💵 {price_label_t14}: <b>{latest_price_t14:,.2f}</b> ريال'
-                                f'{offer_price_line_t14}'
-                                f'&nbsp;|&nbsp; 🚚 توصيل: <b>{com_info_t14["delivery"]:,.0f}</b> '
-                                f'&nbsp;|&nbsp; 🏷️ عمولة: <b>{com_info_t14["commission_pct"]:,.0f}%</b></span><br>'
-                                f'<span style="color:#4ade80;font-size:14px;font-weight:bold;">💳 الصافي بعد خصم العمولة والتوصيل: {net_fees_t14:,.2f} ريال</span><br>'
-                                f'<span style="color:#fbbf24;font-size:14px;font-weight:bold;">🧾 الصافي بعد خصم 15% ضريبة: {net_tax_t14:,.2f} ريال</span>'
-                                f'{ad_insight_t14}'
-                                f'</div>',
-                                unsafe_allow_html=True)
-                        else:
-                            st.caption("ℹ️ فيه عمولة وتوصيل مسجلين لكن مفيش سعر بيع حديث (لا في LIVE ولا في الطلبات) لحساب الصافي منهم | Commission & delivery are set but no price found (neither in LIVE nor in orders) to calculate the net")
-
-                    # ══ أمس بارز ══
-                    yesterday_t14 = sales_dates[0] if sales_dates else None
-                    yesterday_cnt = r["day_counts"].get(yesterday_t14, 0) if yesterday_t14 else 0
-                    yesterday_prices = r["day_prices"].get(yesterday_t14, []) if yesterday_t14 else []
-
-                    def fmt_prices(prices_list):
-                        """يجمع الأسعار ويرتبها من الأعلى للأقل، ويتجاهل الفاضي.
-                        prices_list: قائمة من (price_str, qty) أو strings."""
-                        pc = {}  # price_str -> (total_qty, float_val)
-                        for item in prices_list:
-                            if isinstance(item, tuple):
-                                p, qty = item
+                                offer_price_line_t14 = ""
+                                if offer_price_t14 is not None and (not price_from_live_t14 or round(offer_price_t14, 2) != round(latest_price_t14, 2)):
+                                    offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض (معلومة فقط، غير مستخدم في الحسابات): <b>{offer_price_t14:,.2f}</b> ريال'
+                                price_label_t14 = "سعر البيع الأساسي" if price_from_live_t14 else "سعر البيع (سعر العرض)"
+                                st.markdown(
+                                    f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
+                                    f'padding:8px 14px;margin:4px 0;">'
+                                    f'<span style="color:#e2e8f0;font-size:13px;">💵 {price_label_t14}: <b>{latest_price_t14:,.2f}</b> ريال'
+                                    f'{offer_price_line_t14}'
+                                    f'&nbsp;|&nbsp; 🚚 توصيل: <b>{com_info_t14["delivery"]:,.0f}</b> '
+                                    f'&nbsp;|&nbsp; 🏷️ عمولة: <b>{com_info_t14["commission_pct"]:,.0f}%</b></span><br>'
+                                    f'<span style="color:#4ade80;font-size:14px;font-weight:bold;">💳 الصافي بعد خصم العمولة والتوصيل: {net_fees_t14:,.2f} ريال</span><br>'
+                                    f'<span style="color:#fbbf24;font-size:14px;font-weight:bold;">🧾 الصافي بعد خصم 15% ضريبة: {net_tax_t14:,.2f} ريال</span>'
+                                    f'{ad_insight_t14}'
+                                    f'</div>',
+                                    unsafe_allow_html=True)
                             else:
-                                p, qty = item, 1
-                            if not p or str(p).strip().lower() in ("","nan","none"):
-                                # لو مفيش سعر، نعد الكمية بس بدون سعر
-                                pc["__no_price__"] = (pc.get("__no_price__",(0,0))[0] + qty, -1)
-                                continue
-                            p_str = str(p).strip()
-                            try:
-                                key = float(p_str.replace(",",""))
-                            except Exception:
-                                key = 0.0
-                            prev_qty, _ = pc.get(p_str, (0, key))
-                            pc[p_str] = (prev_qty + qty, key)
-                        if not pc:
-                            return ""
-                        # ترتيب من السعر الأعلى للأقل
-                        sorted_prices = sorted(pc.items(), key=lambda x: -x[1][1])
-                        parts = []
-                        for price_str, (total_qty, _) in sorted_prices:
-                            if price_str == "__no_price__":
-                                parts.append(f"{total_qty}")
-                            else:
-                                parts.append(f"{total_qty} × {price_str}")
-                        return " | ".join(parts)
+                                st.caption("ℹ️ فيه عمولة وتوصيل مسجلين لكن مفيش سعر بيع حديث (لا في LIVE ولا في الطلبات) لحساب الصافي منهم | Commission & delivery are set but no price found (neither in LIVE nor in orders) to calculate the net")
 
-                    def get_min_max_price(prices_list):
-                        """يرجع (أقل سعر, أعلى سعر) كـ float من قائمة (price_str, qty)."""
-                        vals = []
-                        for item in prices_list:
-                            p = item[0] if isinstance(item, tuple) else item
-                            if p and str(p).strip().lower() not in ("","nan","none"):
+                        # ══ أمس بارز ══
+                        yesterday_t14 = sales_dates[0] if sales_dates else None
+                        yesterday_cnt = r["day_counts"].get(yesterday_t14, 0) if yesterday_t14 else 0
+                        yesterday_prices = r["day_prices"].get(yesterday_t14, []) if yesterday_t14 else []
+
+                        def fmt_prices(prices_list):
+                            """يجمع الأسعار ويرتبها من الأعلى للأقل، ويتجاهل الفاضي.
+                            prices_list: قائمة من (price_str, qty) أو strings."""
+                            pc = {}  # price_str -> (total_qty, float_val)
+                            for item in prices_list:
+                                if isinstance(item, tuple):
+                                    p, qty = item
+                                else:
+                                    p, qty = item, 1
+                                if not p or str(p).strip().lower() in ("","nan","none"):
+                                    # لو مفيش سعر، نعد الكمية بس بدون سعر
+                                    pc["__no_price__"] = (pc.get("__no_price__",(0,0))[0] + qty, -1)
+                                    continue
+                                p_str = str(p).strip()
                                 try:
-                                    vals.append(float(str(p).replace(",","")))
+                                    key = float(p_str.replace(",",""))
                                 except Exception:
-                                    pass
-                        if not vals:
-                            return None, None
-                        return min(vals), max(vals)
+                                    key = 0.0
+                                prev_qty, _ = pc.get(p_str, (0, key))
+                                pc[p_str] = (prev_qty + qty, key)
+                            if not pc:
+                                return ""
+                            # ترتيب من السعر الأعلى للأقل
+                            sorted_prices = sorted(pc.items(), key=lambda x: -x[1][1])
+                            parts = []
+                            for price_str, (total_qty, _) in sorted_prices:
+                                if price_str == "__no_price__":
+                                    parts.append(f"{total_qty}")
+                                else:
+                                    parts.append(f"{total_qty} × {price_str}")
+                            return " | ".join(parts)
 
-                    if yesterday_t14:
-                        if yesterday_cnt > 0:
-                            prices_str_y = fmt_prices(yesterday_prices)
-                            min_p_y, max_p_y = get_min_max_price(yesterday_prices)
-                            price_lines_y = prices_str_y.split(" | ") if prices_str_y else []
-                            price_html_y = ""
-                            if price_lines_y:
-                                price_html_y = "<br>" + "<br>".join(
-                                    f'<span style="color:#bbf7d0;font-size:14px;font-weight:bold;">↳ {line}</span>'
-                                    for line in price_lines_y
+                        def get_min_max_price(prices_list):
+                            """يرجع (أقل سعر, أعلى سعر) كـ float من قائمة (price_str, qty)."""
+                            vals = []
+                            for item in prices_list:
+                                p = item[0] if isinstance(item, tuple) else item
+                                if p and str(p).strip().lower() not in ("","nan","none"):
+                                    try:
+                                        vals.append(float(str(p).replace(",","")))
+                                    except Exception:
+                                        pass
+                            if not vals:
+                                return None, None
+                            return min(vals), max(vals)
+
+                        if yesterday_t14:
+                            if yesterday_cnt > 0:
+                                prices_str_y = fmt_prices(yesterday_prices)
+                                min_p_y, max_p_y = get_min_max_price(yesterday_prices)
+                                price_lines_y = prices_str_y.split(" | ") if prices_str_y else []
+                                price_html_y = ""
+                                if price_lines_y:
+                                    price_html_y = "<br>" + "<br>".join(
+                                        f'<span style="color:#bbf7d0;font-size:14px;font-weight:bold;">↳ {line}</span>'
+                                        for line in price_lines_y
+                                    )
+                                minmax_html_y = ""
+                                if min_p_y is not None and max_p_y is not None and min_p_y != max_p_y:
+                                    minmax_html_y = (
+                                        f'<br><span style="color:#fbbf24;font-size:14px;font-weight:bold;">📉 أقل: {min_p_y:g} &nbsp;|&nbsp; 📈 أعلى: {max_p_y:g}</span>'
+                                    )
+                                elif min_p_y is not None:
+                                    minmax_html_y = f'<br><span style="color:#fbbf24;font-size:14px;font-weight:bold;">💰 سعر: {min_p_y:g}</span>'
+                                yesterday_html = (
+                                    f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                                    f'<span style="color:#86efac;font-size:15px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
+                                    minmax_html_y +
+                                    price_html_y +
+                                    '</div>'
                                 )
-                            minmax_html_y = ""
-                            if min_p_y is not None and max_p_y is not None and min_p_y != max_p_y:
-                                minmax_html_y = (
-                                    f'<br><span style="color:#fbbf24;font-size:14px;font-weight:bold;">📉 أقل: {min_p_y:g} &nbsp;|&nbsp; 📈 أعلى: {max_p_y:g}</span>'
+                            else:
+                                yesterday_html = (
+                                    '<div style="background:#7f1d1d;border:2px solid #ef4444;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                                    '<span style="color:#fca5a5;font-size:15px;font-weight:bold;">🔴 أمس: 0</span>' +
+                                    '</div>'
                                 )
-                            elif min_p_y is not None:
-                                minmax_html_y = f'<br><span style="color:#fbbf24;font-size:14px;font-weight:bold;">💰 سعر: {min_p_y:g}</span>'
-                            yesterday_html = (
-                                f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
-                                f'<span style="color:#86efac;font-size:15px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
-                                minmax_html_y +
-                                price_html_y +
-                                '</div>'
-                            )
-                        else:
-                            yesterday_html = (
-                                '<div style="background:#7f1d1d;border:2px solid #ef4444;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
-                                '<span style="color:#fca5a5;font-size:15px;font-weight:bold;">🔴 أمس: 0</span>' +
-                                '</div>'
-                            )
-                        st.markdown(yesterday_html, unsafe_allow_html=True)
+                            st.markdown(yesterday_html, unsafe_allow_html=True)
 
-                    # باقي الأيام — كل يوم في سطر مع الأسعار تنازلياً + أعلى/أقل
-                    day_parts = []
-                    for i, d in enumerate(sales_dates):
-                        if i == 0:
-                            continue  # أمس اتعرض فوق
-                        cnt = r["day_counts"].get(d, 0)
-                        day_prices_list = r["day_prices"].get(d, [])
-                        color = "#000000" if cnt > 0 else "#475569"
-                        lbl_short = sales_labels[i].split("(")[0].strip()
-                        prices_str_d = fmt_prices(day_prices_list)
-                        min_p_d, max_p_d = get_min_max_price(day_prices_list)
-                        minmax_d = ""
-                        if min_p_d is not None and max_p_d is not None and min_p_d != max_p_d:
-                            minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">(📉{min_p_d:g}–📈{max_p_d:g})</span>'
-                        elif min_p_d is not None:
-                            minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">({min_p_d:g})</span>'
-                        if prices_str_d:
-                            price_lines_d = prices_str_d.split(" | ")
-                            price_detail = " &nbsp; ".join(
-                                f'<span style="color:#1d4ed8;font-size:13px;font-weight:bold;">↳ {line}</span>'
-                                for line in price_lines_d
-                            )
-                            day_parts.append(
-                                f'<span style="color:{color};font-size:15px;font-weight:bold;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>' +
-                                f'<br><span style="padding-right:8px;">{price_detail}</span>'
-                            )
-                        else:
-                            day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>')
-                    if day_parts:
-                        st.markdown("<br>".join(day_parts), unsafe_allow_html=True)
+                        # باقي الأيام — كل يوم في سطر مع الأسعار تنازلياً + أعلى/أقل
+                        day_parts = []
+                        for i, d in enumerate(sales_dates):
+                            if i == 0:
+                                continue  # أمس اتعرض فوق
+                            cnt = r["day_counts"].get(d, 0)
+                            day_prices_list = r["day_prices"].get(d, [])
+                            color = "#000000" if cnt > 0 else "#475569"
+                            lbl_short = sales_labels[i].split("(")[0].strip()
+                            prices_str_d = fmt_prices(day_prices_list)
+                            min_p_d, max_p_d = get_min_max_price(day_prices_list)
+                            minmax_d = ""
+                            if min_p_d is not None and max_p_d is not None and min_p_d != max_p_d:
+                                minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">(📉{min_p_d:g}–📈{max_p_d:g})</span>'
+                            elif min_p_d is not None:
+                                minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">({min_p_d:g})</span>'
+                            if prices_str_d:
+                                price_lines_d = prices_str_d.split(" | ")
+                                price_detail = " &nbsp; ".join(
+                                    f'<span style="color:#1d4ed8;font-size:13px;font-weight:bold;">↳ {line}</span>'
+                                    for line in price_lines_d
+                                )
+                                day_parts.append(
+                                    f'<span style="color:{color};font-size:15px;font-weight:bold;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>' +
+                                    f'<br><span style="padding-right:8px;">{price_detail}</span>'
+                                )
+                            else:
+                                day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>')
+                        if day_parts:
+                            st.markdown("<br>".join(day_parts), unsafe_allow_html=True)
 
-                    # مخزون + مبيع شهري
-                    st.markdown(
-                        f"📦 **مخزون:** {r['stock']} &nbsp;|&nbsp; "
-                        f"📈 **شهري:** {r['sales_month']} &nbsp;|&nbsp; "
-                        f"📊 **يومي أخير:** {r['effective_avg']:.1f} &nbsp;|&nbsp; "
-                        f"⏳ **نفاد خلال:** {r['days_to_stockout'] if r['days_to_stockout'] < 9999 else '—'} يوم"
-                    )
-
-                    # ══ حالة التغطية ══
-                    badge_text_t14, badge_color_t14, sched_t14 = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days_t14)
-                    # لو مفيش أي متوسط بيع (لا حديث ولا شهري) يبقى المخزون مش بينزل خالص —
-                    # فمينفعش نعتبره "غير كافٍ" لمجرد إن مفيش بيانات بيع (كان ده الخلل قبل كده)
-                    stock_self_ok = (r["effective_avg"] <= 0) or (r["days_to_stockout"] >= coverage_days_t14)
-                    un_notes = get_unavailable_ordered_note(r["sku"])
-                    # ══ مجدولة خلال آخر 4 أيام؟ (بنحسبها الأول عشان نستخدمها في قرار عرض شارة التغطية والترحيل) ══
-                    recent_sched_t14 = recent_sched_map_t14.get(r["sku_up"])
-
-                    if stock_self_ok and not sched_t14:
-                        if r["effective_avg"] <= 0:
-                            cov_badge_text = "✅ لا توجد مبيعات حالياً — لا يحتاج جدولة | No sales recorded — no scheduling needed"
-                        else:
-                            cov_badge_text = f"✅ مخزون كافٍ ({r['days_to_stockout']} يوم) — لا يحتاج جدولة الآن | Stock sufficient"
-                        cov_badge_color = "#15803d"
-                    elif stock_self_ok and sched_t14:
-                        sched_src_t14 = "تشييك" if sched_t14.get("source") == "Check" else "مجدول"
-                        arrival_t14 = (sched_t14["parsed"] + timedelta(days=delay_days_t14)).date() if sched_t14.get("parsed") else None
-                        stockout_disp_t14 = f"{r['days_to_stockout']} يوم" if r["effective_avg"] > 0 else "لا توجد مبيعات"
-                        cov_badge_text  = (f"✅ مخزون كافٍ ({stockout_disp_t14}) + ASN {sched_t14['asn']} بتاريخ {sched_t14['date']}"
-                                           + (f" — وصول: {arrival_t14}" if arrival_t14 else "") + f" [{sched_src_t14}]")
-                        cov_badge_color = "#15803d"
-                    else:
-                        cov_badge_text  = badge_text_t14
-                        cov_badge_color = badge_color_t14
-
-                    # لو السكو فعلاً ليه جدولة خلال آخر 4 أيام، منعرضش شارة "محتاج جدولة الآن"
-                    # المتناقضة جنب شارة الجدولة الحديثة (البنفسجي) اللي هتتعرض تحت — عشان محدش يتلخبط
-                    show_normal_cov_badge_t14 = not (recent_sched_t14 and "محتاج جدولة" in cov_badge_text)
-                    if show_normal_cov_badge_t14:
+                        # مخزون + مبيع شهري
                         st.markdown(
-                            f'<span class="status-badge-lg" style="background:{cov_badge_color};">{cov_badge_text}</span>',
-                            unsafe_allow_html=True)
+                            f"📦 **مخزون:** {r['stock']} &nbsp;|&nbsp; "
+                            f"📈 **شهري:** {r['sales_month']} &nbsp;|&nbsp; "
+                            f"📊 **يومي أخير:** {r['effective_avg']:.1f} &nbsp;|&nbsp; "
+                            f"⏳ **نفاد خلال:** {r['days_to_stockout'] if r['days_to_stockout'] < 9999 else '—'} يوم"
+                        )
 
-                    # ══ مجدولة خلال آخر 4 أيام؟ (لو فعلاً ليها جدولة) — تعرض ASN + الكمية + التاريخ ══
-                    if recent_sched_t14:
-                        st.markdown(
-                            f'<span class="status-badge-lg" style="background:#7c3aed;">'
-                            f'📅 مجدولة خلال آخر 4 أيام | Scheduled in last 4 days — '
-                            f'ASN <b>{recent_sched_t14["asn"]}</b> &nbsp;|&nbsp; '
-                            f'الكمية | Qty: <b>{recent_sched_t14.get("qty","")}</b> &nbsp;|&nbsp; '
-                            f'بتاريخ {recent_sched_t14["date"]} [{recent_sched_t14["source_label"]}]'
-                            f'</span>',
-                            unsafe_allow_html=True)
+                        # ══ حالة التغطية ══
+                        badge_text_t14, badge_color_t14, sched_t14 = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days_t14)
+                        # لو مفيش أي متوسط بيع (لا حديث ولا شهري) يبقى المخزون مش بينزل خالص —
+                        # فمينفعش نعتبره "غير كافٍ" لمجرد إن مفيش بيانات بيع (كان ده الخلل قبل كده)
+                        stock_self_ok = (r["effective_avg"] <= 0) or (r["days_to_stockout"] >= coverage_days_t14)
+                        un_notes = get_unavailable_ordered_note(r["sku"])
+                        # ══ مجدولة خلال آخر 4 أيام؟ (بنحسبها الأول عشان نستخدمها في قرار عرض شارة التغطية والترحيل) ══
+                        recent_sched_t14 = recent_sched_map_t14.get(r["sku_up"])
 
-                    if r["sku_up"] in pending_approval_skus_t14:
-                        st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
+                        if stock_self_ok and not sched_t14:
+                            if r["effective_avg"] <= 0:
+                                cov_badge_text = "✅ لا توجد مبيعات حالياً — لا يحتاج جدولة | No sales recorded — no scheduling needed"
+                            else:
+                                cov_badge_text = f"✅ مخزون كافٍ ({r['days_to_stockout']} يوم) — لا يحتاج جدولة الآن | Stock sufficient"
+                            cov_badge_color = "#15803d"
+                        elif stock_self_ok and sched_t14:
+                            sched_src_t14 = "تشييك" if sched_t14.get("source") == "Check" else "مجدول"
+                            arrival_t14 = (sched_t14["parsed"] + timedelta(days=delay_days_t14)).date() if sched_t14.get("parsed") else None
+                            stockout_disp_t14 = f"{r['days_to_stockout']} يوم" if r["effective_avg"] > 0 else "لا توجد مبيعات"
+                            cov_badge_text  = (f"✅ مخزون كافٍ ({stockout_disp_t14}) + ASN {sched_t14['asn']} بتاريخ {sched_t14['date']}"
+                                               + (f" — وصول: {arrival_t14}" if arrival_t14 else "") + f" [{sched_src_t14}]")
+                            cov_badge_color = "#15803d"
+                        else:
+                            cov_badge_text  = badge_text_t14
+                            cov_badge_color = badge_color_t14
 
-                    # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة
-                    #    وبدون تفاصيل أخرى وبدون جدولة حديثة (آخر 4 أيام) — لو ليه جدولة حديثة
-                    #    (حتى لو منتهية) يبقى أموره تمام ومينفعش يترحّل لمراجعة المخزون ══
-                    is_needs_sched_only = (
-                        not stock_self_ok
-                        and badge_text_t14 and "محتاج جدولة" in badge_text_t14
-                        and not sched_t14
-                        and not un_notes
-                        and not recent_sched_t14
-                    )
-                    if is_needs_sched_only:
-                        _new_transferred.append({
-                            "sku": r["sku"], "sku_up": r["sku_up"], "stock": r["stock"],
-                            "sales_month": r["sales_month"], "img": r["img"],
-                            "effective_avg": r["effective_avg"], "days_to_stockout": r["days_to_stockout"],
-                            "day_counts": r["day_counts"],
-                        })
-                        st.caption("📌 مرحّل لتاب مراجعة المخزون | Transferred to Stock Review tab")
+                        # لو السكو فعلاً ليه جدولة خلال آخر 4 أيام، منعرضش شارة "محتاج جدولة الآن"
+                        # المتناقضة جنب شارة الجدولة الحديثة (البنفسجي) اللي هتتعرض تحت — عشان محدش يتلخبط
+                        show_normal_cov_badge_t14 = not (recent_sched_t14 and "محتاج جدولة" in cov_badge_text)
+                        if show_normal_cov_badge_t14:
+                            st.markdown(
+                                f'<span class="status-badge-lg" style="background:{cov_badge_color};">{cov_badge_text}</span>',
+                                unsafe_allow_html=True)
 
-                    if un_notes:
-                        for note in un_notes:
-                            st.markdown(big_note_html(note), unsafe_allow_html=True)
-                    render_recent_expired_note(r["sku"])
+                        # ══ مجدولة خلال آخر 4 أيام؟ (لو فعلاً ليها جدولة) — تعرض ASN + الكمية + التاريخ ══
+                        if recent_sched_t14:
+                            st.markdown(
+                                f'<span class="status-badge-lg" style="background:#7c3aed;">'
+                                f'📅 مجدولة خلال آخر 4 أيام | Scheduled in last 4 days — '
+                                f'ASN <b>{recent_sched_t14["asn"]}</b> &nbsp;|&nbsp; '
+                                f'الكمية | Qty: <b>{recent_sched_t14.get("qty","")}</b> &nbsp;|&nbsp; '
+                                f'بتاريخ {recent_sched_t14["date"]} [{recent_sched_t14["source_label"]}]'
+                                f'</span>',
+                                unsafe_allow_html=True)
+
+                        if r["sku_up"] in pending_approval_skus_t14:
+                            st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
+
+                        # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة
+                        #    وبدون تفاصيل أخرى وبدون جدولة حديثة (آخر 4 أيام) — لو ليه جدولة حديثة
+                        #    (حتى لو منتهية) يبقى أموره تمام ومينفعش يترحّل لمراجعة المخزون ══
+                        is_needs_sched_only = (
+                            not stock_self_ok
+                            and badge_text_t14 and "محتاج جدولة" in badge_text_t14
+                            and not sched_t14
+                            and not un_notes
+                            and not recent_sched_t14
+                        )
+                        if is_needs_sched_only:
+                            _new_transferred.append({
+                                "sku": r["sku"], "sku_up": r["sku_up"], "stock": r["stock"],
+                                "sales_month": r["sales_month"], "img": r["img"],
+                                "effective_avg": r["effective_avg"], "days_to_stockout": r["days_to_stockout"],
+                                "day_counts": r["day_counts"],
+                            })
+                            st.caption("📌 مرحّل لتاب مراجعة المخزون | Transferred to Stock Review tab")
+
+                        if un_notes:
+                            for note in un_notes:
+                                st.markdown(big_note_html(note), unsafe_allow_html=True)
+                        render_recent_expired_note(r["sku"])
+                    st.divider()
+                # حفظ المرحلين في session_state بعد اكتمال العرض
+                st.session_state["transferred_skus_t14"] = _new_transferred
+
+        with _fbb_subtab_t14:
+            st.subheader("🛒 مبيعات نون FBB | Noon FBB Sales")
+            st.caption("نفس تاب المبيعات بالظبط، لكن مقتصر على الطلبات اللي Fulfillment Model بتاعها Fulfilled by Partner (FBP) والـ Status بتاعها Processing في شيت DailyOrders | Same as the Sales tab exactly, restricted to orders whose Fulfillment Model is Fulfilled by Partner (FBP) AND whose Status is Processing in the DailyOrders sheet")
+            render_tacweed_upload("sales_fbb")
+            render_warehouse_stock_upload("sales_fbb")
+
+            sales_display_days = int(load_settings().get("sales_display_days","7") or 7)
+            today_t14 = datetime.now().date()
+            sales_dates = [today_t14 - timedelta(days=i) for i in range(1, sales_display_days + 1)]
+            sales_labels = []
+            for i, d in enumerate(sales_dates):
+                if i == 0:
+                    sales_labels.append(f"أمس ({d.strftime('%m-%d')})")
+                elif i == 1:
+                    sales_labels.append(f"أول أمس ({d.strftime('%m-%d')})")
+                else:
+                    sales_labels.append(f"قبل {i+1} أيام ({d.strftime('%m-%d')})")
+
+            delay_days_t14 = int(load_settings().get("schedule_delay_days","3") or 3)
+            coverage_days_t14 = int(load_settings().get("schedule_coverage_days","15") or 15)
+
+            if not inv_map:
+                st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
+            else:
+                multi_counts_t14 = build_daily_orders_counts_fbb(sales_dates)
+                prices_map_t14   = build_daily_orders_prices_fbb(sales_dates)
+
+                # بناء صفوف — كل SKU موجود في المخزون
+                sales_tab_rows = []
+                for sku_up, info in inv_map.items():
+                    stock       = info.get("total_stock", 0)
+                    sales_month = info.get("sales", 0)
+                    img         = info.get("img", "")
+                    sku_disp    = info.get("sku", sku_up)
+                    day_counts  = multi_counts_t14.get(sku_up, {d: 0 for d in sales_dates})
+                    day_prices  = prices_map_t14.get(sku_up, {d: [] for d in sales_dates})
+                    total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
+                    avg_daily_t14 = (total_recent / sales_display_days) if sales_display_days > 0 else (sales_month / 30 if sales_month > 0 else 0)
+                    effective_avg_t14 = avg_daily_t14 if avg_daily_t14 > 0 else (sales_month / 30 if sales_month > 0 else 0)
+                    days_to_stockout_t14 = round(stock / effective_avg_t14) if effective_avg_t14 > 0 else 9999
+                    sales_tab_rows.append({
+                        "sku": sku_disp, "sku_up": sku_up,
+                        "stock": stock, "sales_month": sales_month, "img": img,
+                        "day_counts": day_counts, "day_prices": day_prices,
+                        "total_recent": total_recent,
+                        "effective_avg": effective_avg_t14,
+                        "days_to_stockout": days_to_stockout_t14,
+                    })
+
+                # ترتيب: الأكتر مبيعاً أمس أولاً
+                sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
+
+                # ══ إجماليات اليومية في الأعلى ══
+                totals_per_day = {d: sum(r["day_counts"].get(d, 0) for r in sales_tab_rows) for d in sales_dates}
+                st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
+                total_cols = st.columns(min(len(sales_dates), sales_display_days))
+                for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
+                    if ci < len(total_cols):
+                        with total_cols[ci]:
+                            day_total = totals_per_day.get(d, 0)
+                            is_yesterday = (ci == 0)
+                            if is_yesterday:
+                                bg    = "#14532d" if day_total > 0 else "#7f1d1d"
+                                num_color = "#86efac" if day_total > 0 else "#fca5a5"
+                                border = "border:2px solid #22c55e;" if day_total > 0 else "border:2px solid #ef4444;"
+                            else:
+                                bg    = "#1e293b" if day_total == 0 else "#172554"
+                                num_color = "#93c5fd" if day_total > 0 else "#64748b"
+                                border = ""
+                            st.markdown(
+                                f'<div style="background:{bg};border-radius:8px;padding:8px 10px;text-align:center;margin:2px;{border}">' +
+                                f'<div style="font-size:11px;color:#94a3b8;">{"🔴 " if is_yesterday and day_total==0 else ("🟢 " if is_yesterday else "")}{lbl.split("(")[0].strip()}</div>' +
+                                f'<div style="font-size:13px;color:#6b7280;">{d.strftime("%m-%d")}</div>' +
+                                f'<div style="font-size:{"28" if is_yesterday else "22"}px;font-weight:bold;color:{num_color};">{day_total}</div>' +
+                                '</div>',
+                                unsafe_allow_html=True)
                 st.divider()
-            # حفظ المرحلين في session_state بعد اكتمال العرض
-            st.session_state["transferred_skus_t14"] = _new_transferred
+
+                srch_t14 = st.text_input("🔍 بحث SKU | Search SKU", key="srch_t14_fbb", placeholder="اكتب SKU...")
+                if srch_t14.strip():
+                    sales_tab_rows = [r for r in sales_tab_rows if srch_t14.strip().upper() in r["sku_up"]]
+
+                # جدول تحميل
+                if sales_tab_rows:
+                    df_t14 = pd.DataFrame([
+                        {"SKU": r["sku"], **{sales_labels[i]: r["day_counts"].get(d, 0) for i, d in enumerate(sales_dates)},
+                         "مخزون | Stock": r["stock"], "مبيع شهري | Monthly Sales": r["sales_month"]}
+                        for r in sales_tab_rows
+                    ])
+                    c1, c2 = st.columns(2)
+                    with c1: dl_btn(df_t14, "sales_daily_fbb", key="dlbtn_t14_fbb")
+                    with c2: st.info(f"📦 SKUs: {len(sales_tab_rows)} | 📅 {sales_display_days} يوم")
+
+                # ══ قائمة SKUs المرحلة من المبيعات (محتاج جدولة فقط) ══
+                # تحديث المرحلين بعد بناء الصفوف الكاملة
+                _new_transferred = []
+
+                # ══ خريطة SKUs المجدولة خلال آخر 4 أيام (لعرض ASN + الكمية لو فعلاً ليها جدولة) ══
+                recent_sched_map_t14 = get_recent_schedule_rows(days_back=4)
+                pending_approval_skus_t14 = get_pending_approval_skus()
+                ads_map_t14 = get_ads_map()
+                com_map_t14 = get_com_map()
+                live_map_t14 = get_live_map()
+                xdock_threshold_t14 = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
+
+                st.divider()
+                for r in sales_tab_rows:
+                    c_img, c_info = st.columns([1, 7])
+                    with c_img:
+                        show_img(r["img"], 70)
+                    with c_info:
+                        st.markdown(f"**SKU:** {sku_link_html(r['sku'])}", unsafe_allow_html=True)
+                        tc_badge_t14 = warehouse_available_badge(r["sku_up"])
+                        if tc_badge_t14:
+                            st.markdown(tc_badge_t14, unsafe_allow_html=True)
+
+                        # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
+                        ads_entries_t14 = ads_map_t14.get(r["sku_up"])
+                        if ads_entries_t14:
+                            total_spends_t14  = sum(a["spends"] for a in ads_entries_t14)
+                            total_revenue_t14 = sum(a["revenue"] for a in ads_entries_t14)
+                            total_orders_t14  = sum(a["orders"] for a in ads_entries_t14)
+                            with st.expander(f"📢 أداء الإعلانات | Ads Performance — {len(ads_entries_t14)} حملة | campaign(s)"):
+                                st.markdown(
+                                    f"💸 **إجمالي المصروف:** {total_spends_t14:,.2f} ريال &nbsp;|&nbsp; "
+                                    f"💰 **إجمالي الإيراد:** {total_revenue_t14:,.2f} ريال &nbsp;|&nbsp; "
+                                    f"🛒 **طلبات من الإعلان:** {total_orders_t14:,.0f}")
+                                for ad in ads_entries_t14:
+                                    st.markdown(
+                                        f"**{ad['campaign']}**<br>"
+                                        f"👁️ ظهور: {ad['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {ad['clicks']:,.0f} &nbsp;|&nbsp; "
+                                        f"🛒 طلبات: {ad['orders']:,.0f} &nbsp;|&nbsp; ➕ سلة: {ad['atc']:,.0f}<br>"
+                                        f"💸 مصروف: {ad['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {ad['revenue']:,.2f} ريال<br>"
+                                        f"📊 CTR: {ad['ctr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {ad['roas']:.2f} &nbsp;|&nbsp; "
+                                        f"CPC: {ad['cpc']:.2f} &nbsp;|&nbsp; CPS: {ad['cps']:.2f} &nbsp;|&nbsp; CVR: {ad['cvr']:.2f}%",
+                                        unsafe_allow_html=True)
+                                    st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
+
+                        # ══ مخزون Xdock (من تاب LIVE) — مخزون منفصل عن Inventory، لو قرب يخلص محتاج تزويد ══
+                        live_info_t14 = live_map_t14.get(r["sku_up"])
+                        if live_info_t14 is not None:
+                            xnet_t14 = live_info_t14.get("stock_xdock_net", 0)
+                            xlow_t14 = xnet_t14 <= xdock_threshold_t14
+                            st.markdown(
+                                f'<span class="wh-badge" style="background:{"#7f1d1d" if xlow_t14 else "#3b0764"};'
+                                f'color:{"#fca5a5" if xlow_t14 else "#e9d5ff"};">'
+                                f'{"🔴" if xlow_t14 else "🟣"} مخزون Xdock: {xnet_t14:,}'
+                                f'{" — قارب على النفاد" if xlow_t14 else ""}</span>',
+                                unsafe_allow_html=True)
+
+                        # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة | Net price after commission,
+                        #    delivery fees, and VAT ══
+                        # سعر البيع الأساسي بييجي من عمود sale_price في تاب LIVE أولاً (وده اللي بتُحسب عليه
+                        # الخصومات والعمولة والضريبة والإعلانات)، ولو مش موجود بيرجع لسعر الطلبات القديم
+                        # (بقى اسمه "سعر العرض") كبديل.
+                        com_info_t14 = com_map_t14.get(r["sku_up"])
+                        if com_info_t14:
+                            offer_price_t14 = get_latest_sku_price(r, sales_dates)
+                            latest_price_t14, price_from_live_t14 = get_base_price(r["sku_up"], live_map_t14, offer_price_t14)
+                            if latest_price_t14 is not None:
+                                net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
+
+                                # ── فلوس الإعلان دي مفديه ولا لأ؟ | Did the ad spend pay off overall? ──
+                                # مقارنة إجمالية: صافي الربح الكلي من الطلبات اللي جابها الإعلان مقابل
+                                # إجمالي اللي اتصرف على الإعلان — مش مقارنة لكل طلب لوحده
+                                ad_insight_t14 = ""
+                                if ads_entries_t14:
+                                    if total_orders_t14 <= 0:
+                                        ad_insight_t14 = (
+                                            '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
+                                            'border:1px solid #dc2626;border-radius:7px;">'
+                                            f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 مفدتش لحد دلوقتي: '
+                                            f'اتصرف {total_spends_t14:,.2f} ريال على الإعلان ده ولسه ما جابش أي طلبات فعلية — يستاهل تراجع التفاصيل فوق 👆</span>'
+                                            '</div>')
+                                    else:
+                                        total_net_from_ads_t14 = total_orders_t14 * net_tax_t14
+                                        net_result_t14 = total_net_from_ads_t14 - total_spends_t14
+                                        if net_result_t14 >= 0:
+                                            ad_insight_t14 = (
+                                                '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#052e1655;'
+                                                'border:1px solid #16a34a;border-radius:7px;">'
+                                                f'<span style="color:#4ade80;font-size:13px;font-weight:800;">🎯 الاعلان مربح: '
+                                                f'عدد طلبات الاعلان {total_orders_t14:,.0f} طلب بصافي ربح إجمالي {total_net_from_ads_t14:,.2f} ريال مقابل '
+                                                f'{total_spends_t14:,.2f} ريال مدفوع — حقق <u>{net_result_t14:,.2f} ريال</u>  👌</span>'
+                                                '</div>')
+                                        else:
+                                            ad_insight_t14 = (
+                                                '<div dir="rtl" style="margin-top:8px;padding:7px 11px;background:#4c051655;'
+                                                'border:1px solid #dc2626;border-radius:7px;">'
+                                                f'<span style="color:#f87171;font-size:13px;font-weight:800;">🚨 الاعلان غير مربح: '
+                                                f'مدفوع {total_spends_t14:,.2f} ريال، لكن صافي الربح من {total_orders_t14:,.0f} طلب بس {total_net_from_ads_t14:,.2f} ريال — '
+                                                f'خسران <u>{abs(net_result_t14):,.2f} ريال إجمالي</u>. افتح تفاصيل الحملة فوق 👆 وتراجعها</span>'
+                                                '</div>')
+
+                                offer_price_line_t14 = ""
+                                if offer_price_t14 is not None and (not price_from_live_t14 or round(offer_price_t14, 2) != round(latest_price_t14, 2)):
+                                    offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض (معلومة فقط، غير مستخدم في الحسابات): <b>{offer_price_t14:,.2f}</b> ريال'
+                                price_label_t14 = "سعر البيع الأساسي" if price_from_live_t14 else "سعر البيع (سعر العرض)"
+                                st.markdown(
+                                    f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
+                                    f'padding:8px 14px;margin:4px 0;">'
+                                    f'<span style="color:#e2e8f0;font-size:13px;">💵 {price_label_t14}: <b>{latest_price_t14:,.2f}</b> ريال'
+                                    f'{offer_price_line_t14}'
+                                    f'&nbsp;|&nbsp; 🚚 توصيل: <b>{com_info_t14["delivery"]:,.0f}</b> '
+                                    f'&nbsp;|&nbsp; 🏷️ عمولة: <b>{com_info_t14["commission_pct"]:,.0f}%</b></span><br>'
+                                    f'<span style="color:#4ade80;font-size:14px;font-weight:bold;">💳 الصافي بعد خصم العمولة والتوصيل: {net_fees_t14:,.2f} ريال</span><br>'
+                                    f'<span style="color:#fbbf24;font-size:14px;font-weight:bold;">🧾 الصافي بعد خصم 15% ضريبة: {net_tax_t14:,.2f} ريال</span>'
+                                    f'{ad_insight_t14}'
+                                    f'</div>',
+                                    unsafe_allow_html=True)
+                            else:
+                                st.caption("ℹ️ فيه عمولة وتوصيل مسجلين لكن مفيش سعر بيع حديث (لا في LIVE ولا في الطلبات) لحساب الصافي منهم | Commission & delivery are set but no price found (neither in LIVE nor in orders) to calculate the net")
+
+                        # ══ أمس بارز ══
+                        yesterday_t14 = sales_dates[0] if sales_dates else None
+                        yesterday_cnt = r["day_counts"].get(yesterday_t14, 0) if yesterday_t14 else 0
+                        yesterday_prices = r["day_prices"].get(yesterday_t14, []) if yesterday_t14 else []
+
+                        def fmt_prices(prices_list):
+                            """يجمع الأسعار ويرتبها من الأعلى للأقل، ويتجاهل الفاضي.
+                            prices_list: قائمة من (price_str, qty) أو strings."""
+                            pc = {}  # price_str -> (total_qty, float_val)
+                            for item in prices_list:
+                                if isinstance(item, tuple):
+                                    p, qty = item
+                                else:
+                                    p, qty = item, 1
+                                if not p or str(p).strip().lower() in ("","nan","none"):
+                                    # لو مفيش سعر، نعد الكمية بس بدون سعر
+                                    pc["__no_price__"] = (pc.get("__no_price__",(0,0))[0] + qty, -1)
+                                    continue
+                                p_str = str(p).strip()
+                                try:
+                                    key = float(p_str.replace(",",""))
+                                except Exception:
+                                    key = 0.0
+                                prev_qty, _ = pc.get(p_str, (0, key))
+                                pc[p_str] = (prev_qty + qty, key)
+                            if not pc:
+                                return ""
+                            # ترتيب من السعر الأعلى للأقل
+                            sorted_prices = sorted(pc.items(), key=lambda x: -x[1][1])
+                            parts = []
+                            for price_str, (total_qty, _) in sorted_prices:
+                                if price_str == "__no_price__":
+                                    parts.append(f"{total_qty}")
+                                else:
+                                    parts.append(f"{total_qty} × {price_str}")
+                            return " | ".join(parts)
+
+                        def get_min_max_price(prices_list):
+                            """يرجع (أقل سعر, أعلى سعر) كـ float من قائمة (price_str, qty)."""
+                            vals = []
+                            for item in prices_list:
+                                p = item[0] if isinstance(item, tuple) else item
+                                if p and str(p).strip().lower() not in ("","nan","none"):
+                                    try:
+                                        vals.append(float(str(p).replace(",","")))
+                                    except Exception:
+                                        pass
+                            if not vals:
+                                return None, None
+                            return min(vals), max(vals)
+
+                        if yesterday_t14:
+                            if yesterday_cnt > 0:
+                                prices_str_y = fmt_prices(yesterday_prices)
+                                min_p_y, max_p_y = get_min_max_price(yesterday_prices)
+                                price_lines_y = prices_str_y.split(" | ") if prices_str_y else []
+                                price_html_y = ""
+                                if price_lines_y:
+                                    price_html_y = "<br>" + "<br>".join(
+                                        f'<span style="color:#bbf7d0;font-size:14px;font-weight:bold;">↳ {line}</span>'
+                                        for line in price_lines_y
+                                    )
+                                minmax_html_y = ""
+                                if min_p_y is not None and max_p_y is not None and min_p_y != max_p_y:
+                                    minmax_html_y = (
+                                        f'<br><span style="color:#fbbf24;font-size:14px;font-weight:bold;">📉 أقل: {min_p_y:g} &nbsp;|&nbsp; 📈 أعلى: {max_p_y:g}</span>'
+                                    )
+                                elif min_p_y is not None:
+                                    minmax_html_y = f'<br><span style="color:#fbbf24;font-size:14px;font-weight:bold;">💰 سعر: {min_p_y:g}</span>'
+                                yesterday_html = (
+                                    f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                                    f'<span style="color:#86efac;font-size:15px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
+                                    minmax_html_y +
+                                    price_html_y +
+                                    '</div>'
+                                )
+                            else:
+                                yesterday_html = (
+                                    '<div style="background:#7f1d1d;border:2px solid #ef4444;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                                    '<span style="color:#fca5a5;font-size:15px;font-weight:bold;">🔴 أمس: 0</span>' +
+                                    '</div>'
+                                )
+                            st.markdown(yesterday_html, unsafe_allow_html=True)
+
+                        # باقي الأيام — كل يوم في سطر مع الأسعار تنازلياً + أعلى/أقل
+                        day_parts = []
+                        for i, d in enumerate(sales_dates):
+                            if i == 0:
+                                continue  # أمس اتعرض فوق
+                            cnt = r["day_counts"].get(d, 0)
+                            day_prices_list = r["day_prices"].get(d, [])
+                            color = "#000000" if cnt > 0 else "#475569"
+                            lbl_short = sales_labels[i].split("(")[0].strip()
+                            prices_str_d = fmt_prices(day_prices_list)
+                            min_p_d, max_p_d = get_min_max_price(day_prices_list)
+                            minmax_d = ""
+                            if min_p_d is not None and max_p_d is not None and min_p_d != max_p_d:
+                                minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">(📉{min_p_d:g}–📈{max_p_d:g})</span>'
+                            elif min_p_d is not None:
+                                minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">({min_p_d:g})</span>'
+                            if prices_str_d:
+                                price_lines_d = prices_str_d.split(" | ")
+                                price_detail = " &nbsp; ".join(
+                                    f'<span style="color:#1d4ed8;font-size:13px;font-weight:bold;">↳ {line}</span>'
+                                    for line in price_lines_d
+                                )
+                                day_parts.append(
+                                    f'<span style="color:{color};font-size:15px;font-weight:bold;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>' +
+                                    f'<br><span style="padding-right:8px;">{price_detail}</span>'
+                                )
+                            else:
+                                day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>')
+                        if day_parts:
+                            st.markdown("<br>".join(day_parts), unsafe_allow_html=True)
+
+                        # مخزون + مبيع شهري
+                        st.markdown(
+                            f"📦 **مخزون:** {r['stock']} &nbsp;|&nbsp; "
+                            f"📈 **شهري:** {r['sales_month']} &nbsp;|&nbsp; "
+                            f"📊 **يومي أخير:** {r['effective_avg']:.1f} &nbsp;|&nbsp; "
+                            f"⏳ **نفاد خلال:** {r['days_to_stockout'] if r['days_to_stockout'] < 9999 else '—'} يوم"
+                        )
+
+                        # ══ حالة التغطية ══
+                        badge_text_t14, badge_color_t14, sched_t14 = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days_t14)
+                        # لو مفيش أي متوسط بيع (لا حديث ولا شهري) يبقى المخزون مش بينزل خالص —
+                        # فمينفعش نعتبره "غير كافٍ" لمجرد إن مفيش بيانات بيع (كان ده الخلل قبل كده)
+                        stock_self_ok = (r["effective_avg"] <= 0) or (r["days_to_stockout"] >= coverage_days_t14)
+                        un_notes = get_unavailable_ordered_note(r["sku"])
+                        # ══ مجدولة خلال آخر 4 أيام؟ (بنحسبها الأول عشان نستخدمها في قرار عرض شارة التغطية والترحيل) ══
+                        recent_sched_t14 = recent_sched_map_t14.get(r["sku_up"])
+
+                        if stock_self_ok and not sched_t14:
+                            if r["effective_avg"] <= 0:
+                                cov_badge_text = "✅ لا توجد مبيعات حالياً — لا يحتاج جدولة | No sales recorded — no scheduling needed"
+                            else:
+                                cov_badge_text = f"✅ مخزون كافٍ ({r['days_to_stockout']} يوم) — لا يحتاج جدولة الآن | Stock sufficient"
+                            cov_badge_color = "#15803d"
+                        elif stock_self_ok and sched_t14:
+                            sched_src_t14 = "تشييك" if sched_t14.get("source") == "Check" else "مجدول"
+                            arrival_t14 = (sched_t14["parsed"] + timedelta(days=delay_days_t14)).date() if sched_t14.get("parsed") else None
+                            stockout_disp_t14 = f"{r['days_to_stockout']} يوم" if r["effective_avg"] > 0 else "لا توجد مبيعات"
+                            cov_badge_text  = (f"✅ مخزون كافٍ ({stockout_disp_t14}) + ASN {sched_t14['asn']} بتاريخ {sched_t14['date']}"
+                                               + (f" — وصول: {arrival_t14}" if arrival_t14 else "") + f" [{sched_src_t14}]")
+                            cov_badge_color = "#15803d"
+                        else:
+                            cov_badge_text  = badge_text_t14
+                            cov_badge_color = badge_color_t14
+
+                        # لو السكو فعلاً ليه جدولة خلال آخر 4 أيام، منعرضش شارة "محتاج جدولة الآن"
+                        # المتناقضة جنب شارة الجدولة الحديثة (البنفسجي) اللي هتتعرض تحت — عشان محدش يتلخبط
+                        show_normal_cov_badge_t14 = not (recent_sched_t14 and "محتاج جدولة" in cov_badge_text)
+                        if show_normal_cov_badge_t14:
+                            st.markdown(
+                                f'<span class="status-badge-lg" style="background:{cov_badge_color};">{cov_badge_text}</span>',
+                                unsafe_allow_html=True)
+
+                        # ══ مجدولة خلال آخر 4 أيام؟ (لو فعلاً ليها جدولة) — تعرض ASN + الكمية + التاريخ ══
+                        if recent_sched_t14:
+                            st.markdown(
+                                f'<span class="status-badge-lg" style="background:#7c3aed;">'
+                                f'📅 مجدولة خلال آخر 4 أيام | Scheduled in last 4 days — '
+                                f'ASN <b>{recent_sched_t14["asn"]}</b> &nbsp;|&nbsp; '
+                                f'الكمية | Qty: <b>{recent_sched_t14.get("qty","")}</b> &nbsp;|&nbsp; '
+                                f'بتاريخ {recent_sched_t14["date"]} [{recent_sched_t14["source_label"]}]'
+                                f'</span>',
+                                unsafe_allow_html=True)
+
+                        if r["sku_up"] in pending_approval_skus_t14:
+                            st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
+
+                        # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة
+                        #    وبدون تفاصيل أخرى وبدون جدولة حديثة (آخر 4 أيام) — لو ليه جدولة حديثة
+                        #    (حتى لو منتهية) يبقى أموره تمام ومينفعش يترحّل لمراجعة المخزون ══
+                        is_needs_sched_only = (
+                            not stock_self_ok
+                            and badge_text_t14 and "محتاج جدولة" in badge_text_t14
+                            and not sched_t14
+                            and not un_notes
+                            and not recent_sched_t14
+                        )
+                        if is_needs_sched_only:
+                            _new_transferred.append({
+                                "sku": r["sku"], "sku_up": r["sku_up"], "stock": r["stock"],
+                                "sales_month": r["sales_month"], "img": r["img"],
+                                "effective_avg": r["effective_avg"], "days_to_stockout": r["days_to_stockout"],
+                                "day_counts": r["day_counts"],
+                            })
+                            st.caption("📌 مرحّل لتاب مراجعة المخزون | Transferred to Stock Review tab")
+
+                        if un_notes:
+                            for note in un_notes:
+                                st.markdown(big_note_html(note), unsafe_allow_html=True)
+                        render_recent_expired_note(r["sku"])
+                    st.divider()
+                # حفظ المرحلين في session_state بعد اكتمال العرض
+                st.session_state["transferred_skus_t14"] = _new_transferred
 
     # ══ TAB DASHBOARD — داشبورد تحليلات المبيعات (تاب جديدة منفصلة) ══
     # ══ TAB DASHBOARD — داشبورد تحليلات المبيعات (تاب جديدة منفصلة) ══
