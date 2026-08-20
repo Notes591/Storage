@@ -1268,26 +1268,22 @@ def _find_status_col_idx(header):
     return None
 
 def _row_is_fbb(row, fulfillment_col_idx, status_col_idx):
-    """يرجع True لو الصف ده طلب FBB — لازم الشرطين مع بعض: Fulfillment Model فيه
-    FBP (Fulfilled by Partner)، والـ Status = Processing | Returns True only when
-    BOTH conditions hold: Fulfillment Model contains FBP (Fulfilled by Partner)
-    AND Status equals Processing."""
+    """يرجع True لو الصف ده طلب FBB — الشرط الوحيد: Fulfillment Model فيه FBP
+    (Fulfilled by Partner). شرط الـ Status = Processing اتشال (كان بيمنع تصنيف
+    صفوف قديمة كـ FBB لو حالتها اتغيّرت من Processing بعد كده) | Returns True
+    when Fulfillment Model contains FBP (Fulfilled by Partner). The
+    Status == Processing condition was removed (it was excluding rows whose
+    status had since moved on from Processing)."""
     if fulfillment_col_idx is None or len(row) <= fulfillment_col_idx:
         return False
     fulfillment_val = str(row[fulfillment_col_idx]).strip().upper()
-    is_fbp = "FBP" in fulfillment_val or "PARTNER" in fulfillment_val
-    if not is_fbp:
-        return False
-    if status_col_idx is None or len(row) <= status_col_idx:
-        return False
-    status_val = str(row[status_col_idx]).strip().upper()
-    return status_val == "PROCESSING"
+    return "FBP" in fulfillment_val or "PARTNER" in fulfillment_val
 
 def build_daily_orders_counts_fbb(dates):
     """نفس منطق build_daily_orders_counts بالظبط، لكن بيقتصر بس على صفوف FBB
-    (Fulfillment Model = Fulfilled by Partner / FBP، والـ Status = Processing) |
-    Same logic as build_daily_orders_counts exactly, restricted to FBB rows
-    (Fulfillment Model = FBP AND Status = Processing) only."""
+    (Fulfillment Model = Fulfilled by Partner / FBP فقط) | Same logic as
+    build_daily_orders_counts exactly, restricted to FBB rows
+    (Fulfillment Model = FBP) only."""
     data = get_cached(daily_orders_sheet)
     dates_set = set(dates)
     counts = {}
@@ -1313,9 +1309,9 @@ def build_daily_orders_counts_fbb(dates):
 
 def build_daily_orders_prices_fbb(dates):
     """نفس منطق build_daily_orders_prices بالظبط، لكن بيقتصر بس على صفوف FBB
-    (Fulfillment Model = Fulfilled by Partner / FBP، والـ Status = Processing) |
-    Same logic as build_daily_orders_prices exactly, restricted to FBB rows
-    (Fulfillment Model = FBP AND Status = Processing) only."""
+    (Fulfillment Model = Fulfilled by Partner / FBP فقط) | Same logic as
+    build_daily_orders_prices exactly, restricted to FBB rows
+    (Fulfillment Model = FBP) only."""
     data = get_cached(daily_orders_sheet)
     dates_set = set(dates)
     prices = {}
@@ -1459,7 +1455,7 @@ def build_daily_orders_family_stats(dates, live_map=None):
 
 def build_daily_orders_family_stats_fbb(dates, live_map=None):
     """نفس منطق build_daily_orders_family_stats بالظبط، لكن بيقتصر بس على صفوف FBB
-    (Fulfillment Model = Fulfilled by Partner / FBP، والـ Status = Processing) —
+    (Fulfillment Model = Fulfilled by Partner / FBP فقط) —
     نسخة منفصلة تمامًا زي build_daily_orders_counts_fbb/build_daily_orders_prices_fbb
     فوق، من غير أي تعديل على الدالة الأصلية | Same logic as
     build_daily_orders_family_stats exactly, restricted to FBB rows only. A fully
@@ -1534,12 +1530,12 @@ def build_daily_orders_family_stats_fbb(dates, live_map=None):
 
 # ══════════════════════════════════════════════════════════════════════════
 # ══ نسخ "FBN فقط" — عكس فلتر FBB بالظبط (يستبعد أي صف Fulfillment Model فيه
-#    FBP/Partner والـ Status بتاعه Processing)، عشان الداشبورد بس (تاب
-#    "الكل" + تاب "FBN") يبقى صحيح رياضيًا: FBN فقط + FBB = الكل، من غير أي
-#    تكرار أو نقص. الدوال دي مستخدمة في داشبورد المبيعات فقط — تاب المبيعات
-#    الأصلي (tab14) لسه بيستخدم النسخة غير المفلترة زي ما هو، بدون أي تغيير |
-#    "FBN-only" copies — the exact inverse of the FBB filter (excludes any row
-#    whose Fulfillment Model is FBP/Partner AND Status is Processing), so the
+#    FBP/Partner)، عشان الداشبورد بس (تاب "الكل" + تاب "FBN") يبقى صحيح
+#    رياضيًا: FBN فقط + FBB = الكل، من غير أي تكرار أو نقص. الدوال دي مستخدمة
+#    في داشبورد المبيعات فقط — تاب المبيعات الأصلي (tab14) لسه بيستخدم النسخة
+#    غير المفلترة زي ما هو، بدون أي تغيير | "FBN-only" copies — the exact
+#    inverse of the FBB filter (excludes any row whose Fulfillment Model is
+#    FBP/Partner), so the
 #    dashboard's "All Combined" + "FBN" tabs add up correctly: FBN-only + FBB =
 #    Combined, with no double-counting or gaps. Used only by the Sales
 #    Dashboard — the original Sales tab (tab14) keeps using the unfiltered
@@ -2719,7 +2715,7 @@ with tab14:
 
         with _fbb_subtab_t14:
             st.subheader("🛒 مبيعات نون FBB | Noon FBB Sales")
-            st.caption("نفس تاب المبيعات بالظبط، لكن مقتصر على الطلبات اللي Fulfillment Model بتاعها Fulfilled by Partner (FBP) والـ Status بتاعها Processing في شيت DailyOrders | Same as the Sales tab exactly, restricted to orders whose Fulfillment Model is Fulfilled by Partner (FBP) AND whose Status is Processing in the DailyOrders sheet")
+            st.caption("نفس تاب المبيعات بالظبط، لكن مقتصر على الطلبات اللي Fulfillment Model بتاعها Fulfilled by Partner (FBP) في شيت DailyOrders (بغض النظر عن الـ Status) | Same as the Sales tab exactly, restricted to orders whose Fulfillment Model is Fulfilled by Partner (FBP) in the DailyOrders sheet (regardless of Status)")
             render_tacweed_upload("sales_fbb")
             render_warehouse_stock_upload("sales_fbb")
 
@@ -4084,11 +4080,11 @@ with tab_dash:
                     build_daily_orders_counts, build_daily_orders_prices,
                     build_daily_orders_family_stats, "all")
             with _dash_fbn_subtab_td:
-                # ── FBN بس: مستبعد منه أي طلب مصنّف FBB (Fulfillment=FBP +
-                #    Status=Processing)، عشان FBN + FBB = تاب "الكل" بالظبط
-                #    من غير أي تكرار | FBN only: excludes anything classified
-                #    as FBB, so FBN + FBB always adds up exactly to "All
-                #    Combined" with no double-counting.
+                # ── FBN بس: مستبعد منه أي طلب مصنّف FBB (Fulfillment=FBP)،
+                #    عشان FBN + FBB = تاب "الكل" بالظبط من غير أي تكرار |
+                #    FBN only: excludes anything classified as FBB
+                #    (Fulfillment=FBP), so FBN + FBB always adds up exactly to
+                #    "All Combined" with no double-counting.
                 _render_sales_dashboard_body(
                     build_daily_orders_counts_fbn, build_daily_orders_prices_fbn,
                     build_daily_orders_family_stats_fbn, "fbn")
