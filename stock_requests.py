@@ -1721,36 +1721,125 @@ def compute_transferred_from_sales():
 if "transferred_skus_t14" not in st.session_state:
     st.session_state["transferred_skus_t14"] = compute_transferred_from_sales()
 
-tabs = st.tabs([
-    "🛒 المبيعات | Sales",
-    "📊 داشبورد المبيعات | Sales Dashboard",
-    "📊 المخزون | Inventory",
-    "📦 مخزون بدون بيع | No Sales",
-])
-(tab14,tab_dash,tab9,tab16) = tabs
+NAV_ITEMS = [
+    ("tab14",    "🛒", "المبيعات | Sales"),
+    ("tab_dash", "📊", "داشبورد المبيعات | Dashboard"),
+    ("tab9",     "📦", "المخزون | Inventory"),
+    ("tab16",    "🗂️", "مخزون بدون بيع | No Sales"),
+]
+NAV_KEY_LABELS = {k: lbl for k, _i, lbl in NAV_ITEMS}
 
-# ── تحسينات بسيطة لشكل شريط التابات الأصلي (مسافات، حواف مدوّرة، خط أوضح للتاب النشط) ──
-st.markdown("""
+if "nav_page" not in st.session_state:
+    st.session_state["nav_page"] = "tab14"
+if "sidebar_open" not in st.session_state:
+    st.session_state["sidebar_open"] = True
+
+_sb_open = st.session_state["sidebar_open"]
+_sb_width = "250px" if _sb_open else "58px"
+
+# ── Sidebar مخصصة داكنة على يمين الشاشة بدل شريط التابات العلوي — قابلة للفتح
+#    والإغلاق بزر. كل عنصر فيها بيمثل نفس الـ tab القديم بالظبط، والمحتوى نفسه
+#    (كل الأكواد اللي تحت "with tabX:") فاضل زي ما هو من غير أي تغيير — الاختلاف
+#    الوحيد إن tab14/tab_dash/tab9/tab16 بقوا containers بمفتاح ثابت بدل ما يكونوا
+#    ناتج st.tabs()، وبيتم إخفاء غير النشط منهم بـ CSS | Custom dark right-side
+#    sidebar replacing the old top tab bar — collapsible via a button. Each item
+#    maps to exactly the same tab as before, and every line of code under each
+#    "with tabX:" block below is 100% unchanged. The only difference is that
+#    tab14/tab_dash/tab9/tab16 are now keyed containers instead of st.tabs()
+#    output, with the inactive ones hidden via CSS.
+st.markdown(f"""
 <style>
-div[data-baseweb="tab-list"] {
-    gap: 4px;
-    flex-wrap: wrap;
-    border-bottom: 1px solid rgba(150,150,150,0.25);
-}
-div[data-baseweb="tab-list"] button[data-baseweb="tab"] {
-    border-radius: 8px 8px 0 0;
-    padding: 8px 14px;
-    font-size: 14px;
-}
-div[data-baseweb="tab-list"] button[data-baseweb="tab"][aria-selected="true"] {
-    font-weight: 700;
-    border-bottom: 3px solid #ef4444;
-}
+[data-testid="stAppViewContainer"] > .main {{ order: 1 !important; }}
+[data-testid="stSidebar"] {{
+    order: 2 !important;
+    width: {_sb_width} !important;
+    min-width: {_sb_width} !important;
+    max-width: {_sb_width} !important;
+    transition: width .2s ease, min-width .2s ease, max-width .2s ease;
+    background: linear-gradient(180deg,#0f172a 0%,#111827 100%) !important;
+    border-left: 1px solid rgba(255,255,255,.08);
+}}
+[data-testid="stSidebar"] > div:first-child {{ padding-top: 10px; }}
+[data-testid="collapsedControl"] {{ display: none !important; }}
+.nav-brand {{
+    display:flex; align-items:center; justify-content:center; gap:8px;
+    padding: 4px 4px 14px 4px; border-bottom: 1px solid rgba(255,255,255,.08);
+    margin-bottom: 10px;
+}}
+.nav-brand .logo-box {{
+    width:36px; height:36px; border-radius:12px; background:#1e293b;
+    display:flex; align-items:center; justify-content:center; font-size:18px; flex:0 0 auto;
+}}
+.nav-brand .brand-text {{ color:#e2e8f0; font-weight:800; font-size:14px; text-align:center; white-space:nowrap; }}
+[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] div.stButton > button {{
+    width: 100%;
+    direction: rtl;
+    text-align: right !important;
+    justify-content: flex-start !important;
+    background: transparent !important;
+    color: #cbd5e1 !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-size: 14px !important;
+    padding: 10px 14px !important;
+    margin-bottom: 4px !important;
+    box-shadow: none !important;
+}}
+[data-testid="stSidebar"] div.stButton > button:hover {{
+    background: rgba(255,255,255,.07) !important;
+    color: #f1f5f9 !important;
+}}
+[data-testid="stSidebar"] div.stButton > button[kind="primary"] {{
+    background: #ef4444 !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+}}
+[data-testid="stSidebar"] div.stButton > button[kind="primary"]:hover {{
+    background: #dc2626 !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
-# ══ TAB 1 — الطلبات ══
-    # ══ TAB 9 — المخزون ══
+with st.sidebar:
+    if _sb_open:
+        bcol1, bcol2 = st.columns([1, 5])
+        with bcol1:
+            if st.button("☰", key="nav_toggle_btn_open"):
+                st.session_state["sidebar_open"] = False
+                st.rerun()
+        with bcol2:
+            st.markdown(
+                '<div class="nav-brand"><span class="logo-box">🏬</span>'
+                '<span class="brand-text">المتجر الذكي<br>منظومة إدارة المتاجر</span></div>',
+                unsafe_allow_html=True)
+        for _key, _icon, _label in NAV_ITEMS:
+            _active = st.session_state["nav_page"] == _key
+            if st.button(f"{_icon}  {_label}", key=f"nav_item_{_key}",
+                         type="primary" if _active else "secondary",
+                         use_container_width=True):
+                st.session_state["nav_page"] = _key
+                st.rerun()
+    else:
+        if st.button("☰", key="nav_toggle_btn_closed"):
+            st.session_state["sidebar_open"] = True
+            st.rerun()
+        for _key, _icon, _label in NAV_ITEMS:
+            _active = st.session_state["nav_page"] == _key
+            if st.button(_icon, key=f"nav_item_c_{_key}", help=NAV_KEY_LABELS[_key],
+                         type="primary" if _active else "secondary",
+                         use_container_width=True):
+                st.session_state["nav_page"] = _key
+                st.rerun()
+
+tab14    = st.container(key="navpanel_tab14")
+tab_dash = st.container(key="navpanel_tab_dash")
+tab9     = st.container(key="navpanel_tab9")
+tab16    = st.container(key="navpanel_tab16")
+
+for _key, _i, _l in NAV_ITEMS:
+    _disp = "block" if st.session_state["nav_page"] == _key else "none"
+    st.markdown(f'<style>.st-key-navpanel_{_key} {{ display: {_disp} !important; }}</style>', unsafe_allow_html=True)
+
 with tab9:
     if _tab_gate("tab9", "📊 المخزون | Inventory"):
         st.subheader("📊 المخزون والمبيع الشهري | Inventory & Monthly Sales")
