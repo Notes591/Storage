@@ -9,7 +9,7 @@ import io
 import re
 import gspread.exceptions
 
-st.set_page_config(page_title="📦 Stock Requests | طلبات المخزون", page_icon="📦", layout="wide")
+st.set_page_config(page_title="🏢 عالم الرشاقة للتجارة | Fitness World Trading", page_icon="🏢", layout="wide")
 
 # ══ قفل القايمة الجانبية تلقائياً على الموبايل لما تدوس على أي حاجة برا | Auto-close
 #    the sidebar on mobile when tapping outside it, instead of only via the toggle
@@ -2056,7 +2056,7 @@ ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الراب�
 
 
 # ══════════════════════════════════════════════
-st.title("📦 Stock Requests | طلبات المخزون")
+st.title("🏢 عالم الرشاقة للتجارة | Fitness World Trading")
 
 # ══ حساب المرحلين من المبيعات مسبقاً (قبل رسم التابات) ══
 def compute_transferred_from_sales():
