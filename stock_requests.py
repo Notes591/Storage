@@ -3271,6 +3271,27 @@ def _render_sales_dashboard_body(counts_fn, prices_fn, family_stats_fn, key_suff
             "cur_rev": cur_rev_td, "prev_rev": prev_rev_td,
         })
 
+    # ── SKUs باعت لكن مش موجودة في ملف المخزون المرفوع — بتتضاف كمان عشان
+    #    إجماليات الداشبورد (الكل/FBN/FBB) تعكس عدد الطلبات الحقيقي، مش بس
+    #    اللي عندها مخزون مرفوع | SKUs that sold but aren't in the uploaded
+    #    inventory file — added too so the dashboard totals (All/FBN/FBB)
+    #    reflect the true order count, not only SKUs with uploaded stock.
+    _inv_skus_seen_td = set(inv_map.keys())
+    _orphan_skus_td = (set(cur_counts_td.keys()) | set(prev_counts_td.keys())) - _inv_skus_seen_td
+    for sku_up_td in _orphan_skus_td:
+        cur_t_td  = _td_total(cur_counts_td, sku_up_td, cur_dates_td)
+        prev_t_td = _td_total(prev_counts_td, sku_up_td, prev_dates_td)
+        if cur_t_td <= 0 and prev_t_td <= 0:
+            continue
+        cur_rev_td  = _td_revenue_total(cur_prices_td, sku_up_td, cur_dates_td, live_map_dash)
+        prev_rev_td = _td_revenue_total(prev_prices_td, sku_up_td, prev_dates_td, live_map_dash)
+        rows_td.append({
+            "sku_up": sku_up_td, "sku": sku_up_td, "img": "",
+            "cur": cur_t_td, "prev": prev_t_td, "stock": 0,
+            "cur_rev": cur_rev_td, "prev_rev": prev_rev_td,
+            "not_in_inventory": True,
+        })
+
     total_cur_td  = sum(r["cur"] for r in rows_td)
     total_prev_td = sum(r["prev"] for r in rows_td)
     avg_daily_td  = (total_cur_td / analysis_days_td) if analysis_days_td > 0 else 0
@@ -3307,6 +3328,8 @@ def _render_sales_dashboard_body(counts_fn, prices_fn, family_stats_fn, key_suff
     delay_days_td = int(load_settings().get("schedule_delay_days", "3") or 3)
     attention_rows_td = []
     for r_td in rows_td:
+        if r_td.get("not_in_inventory"):
+            continue  # مفيش بيانات مخزون حقيقية له، فمينفعش نحسب له نفاد مخزون | no real stock data to judge stockout from
         avg_d_td = (r_td["cur"] / analysis_days_td) if analysis_days_td > 0 else 0
         if avg_d_td <= 0:
             continue
