@@ -2767,6 +2767,31 @@ with tab14:
                         "days_to_stockout": days_to_stockout_t14,
                     })
 
+                # ── SKUs باعت طلبات FBB لكن مش موجودة في ملف المخزون المرفوع —
+                #    بتتضاف كمان عشان كل مبيعات FBB تظهر في القائمة، مش بس اللي
+                #    عندها مخزون مرفوع. المخزون بيتحط 0 (غير معروف) ومعاها علامة
+                #    توضيحية | SKUs with FBB orders that aren't in the uploaded
+                #    inventory file — added too so every FBB sale shows up, not
+                #    only SKUs with uploaded stock. Stock shown as 0 (unknown)
+                #    with a note explaining why.
+                inv_skus_seen_fbb = set(inv_map.keys())
+                for sku_up, day_counts in multi_counts_t14.items():
+                    if sku_up in inv_skus_seen_fbb:
+                        continue
+                    total_recent_orphan = sum(day_counts.get(d, 0) for d in sales_dates)
+                    if total_recent_orphan <= 0:
+                        continue
+                    day_prices_orphan = prices_map_t14.get(sku_up, {d: [] for d in sales_dates})
+                    sales_tab_rows.append({
+                        "sku": sku_up, "sku_up": sku_up,
+                        "stock": 0, "sales_month": 0, "img": "",
+                        "day_counts": day_counts, "day_prices": day_prices_orphan,
+                        "total_recent": total_recent_orphan,
+                        "effective_avg": 0,
+                        "days_to_stockout": 9999,
+                        "not_in_inventory": True,
+                    })
+
                 # ترتيب: الأكتر مبيعاً أمس أولاً
                 sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
 
@@ -2835,6 +2860,11 @@ with tab14:
                         show_img(r["img"], 70)
                     with c_info:
                         st.markdown(f"**SKU:** {sku_link_html(r['sku'])}", unsafe_allow_html=True)
+                        if r.get("not_in_inventory"):
+                            st.markdown(
+                                '<span style="background:#78350f;color:#fde68a;padding:2px 8px;'
+                                'border-radius:6px;font-size:12px;">⚠️ مش موجود في ملف المخزون المرفوع | Not in uploaded inventory</span>',
+                                unsafe_allow_html=True)
                         tc_badge_t14 = warehouse_available_badge(r["sku_up"])
                         if tc_badge_t14:
                             st.markdown(tc_badge_t14, unsafe_allow_html=True)
