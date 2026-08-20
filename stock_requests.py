@@ -2326,8 +2326,8 @@ with tab14:
             if not inv_map:
                 st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
             else:
-                multi_counts_t14 = build_daily_orders_counts(sales_dates)
-                prices_map_t14   = build_daily_orders_prices(sales_dates)
+                multi_counts_t14 = build_daily_orders_counts_fbn(sales_dates)
+                prices_map_t14   = build_daily_orders_prices_fbn(sales_dates)
 
                 # بناء صفوف — كل SKU موجود في المخزون
                 sales_tab_rows = []
