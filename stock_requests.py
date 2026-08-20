@@ -2354,8 +2354,13 @@ with tab14:
                 # ترتيب: الأكتر مبيعاً أمس أولاً
                 sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
 
-                # ══ إجماليات اليومية في الأعلى ══
-                totals_per_day = {d: sum(r["day_counts"].get(d, 0) for r in sales_tab_rows) for d in sales_dates}
+                # ══ إجماليات اليومية في الأعلى — بتتحسب من كل صفوف الأوردرز الخام
+                #    (multi_counts_t14)، مش بس الـ SKUs الموجودة في ملف المخزون
+                #    المرفوع، عشان الإجمالي يعكس العدد الحقيقي دايمًا | Daily totals
+                #    are computed from the raw daily-orders counts, not only SKUs
+                #    present in the uploaded inventory file, so the total always
+                #    reflects the true order count ══
+                totals_per_day = {d: sum(day_counts.get(d, 0) for day_counts in multi_counts_t14.values()) for d in sales_dates}
                 st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
                 total_cols = st.columns(min(len(sales_dates), sales_display_days))
                 for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
@@ -2765,8 +2770,13 @@ with tab14:
                 # ترتيب: الأكتر مبيعاً أمس أولاً
                 sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
 
-                # ══ إجماليات اليومية في الأعلى ══
-                totals_per_day = {d: sum(r["day_counts"].get(d, 0) for r in sales_tab_rows) for d in sales_dates}
+                # ══ إجماليات اليومية في الأعلى — بتتحسب من كل صفوف الأوردرز الخام
+                #    (multi_counts_t14)، مش بس الـ SKUs الموجودة في ملف المخزون
+                #    المرفوع، عشان الإجمالي يعكس العدد الحقيقي دايمًا | Daily totals
+                #    are computed from the raw daily-orders counts, not only SKUs
+                #    present in the uploaded inventory file, so the total always
+                #    reflects the true order count ══
+                totals_per_day = {d: sum(day_counts.get(d, 0) for day_counts in multi_counts_t14.values()) for d in sales_dates}
                 st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
                 total_cols = st.columns(min(len(sales_dates), sales_display_days))
                 for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
