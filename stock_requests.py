@@ -1532,6 +1532,165 @@ def build_daily_orders_family_stats_fbb(dates, live_map=None):
         stats[dept_name]["revenue"] += rev_val
     return stats
 
+# ══════════════════════════════════════════════════════════════════════════
+# ══ نسخ "FBN فقط" — عكس فلتر FBB بالظبط (يستبعد أي صف Fulfillment Model فيه
+#    FBP/Partner والـ Status بتاعه Processing)، عشان الداشبورد بس (تاب
+#    "الكل" + تاب "FBN") يبقى صحيح رياضيًا: FBN فقط + FBB = الكل، من غير أي
+#    تكرار أو نقص. الدوال دي مستخدمة في داشبورد المبيعات فقط — تاب المبيعات
+#    الأصلي (tab14) لسه بيستخدم النسخة غير المفلترة زي ما هو، بدون أي تغيير |
+#    "FBN-only" copies — the exact inverse of the FBB filter (excludes any row
+#    whose Fulfillment Model is FBP/Partner AND Status is Processing), so the
+#    dashboard's "All Combined" + "FBN" tabs add up correctly: FBN-only + FBB =
+#    Combined, with no double-counting or gaps. Used only by the Sales
+#    Dashboard — the original Sales tab (tab14) keeps using the unfiltered
+#    functions exactly as before, untouched.
+# ══════════════════════════════════════════════════════════════════════════
+def build_daily_orders_counts_fbn(dates):
+    """نفس منطق build_daily_orders_counts بالظبط، لكن بيستبعد صفوف FBB (عكس
+    build_daily_orders_counts_fbb) | Same logic as build_daily_orders_counts
+    exactly, but excludes FBB rows (inverse of build_daily_orders_counts_fbb)."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    counts = {}
+    if len(data) <= 1:
+        return counts
+    hdr = data[0] if data else []
+    fulfillment_col_idx = _find_fulfillment_col_idx(hdr)
+    status_col_idx = _find_status_col_idx(hdr)
+    for row in data[1:]:
+        while len(row) < 2: row.append("")
+        sku, ts = row[0].strip(), row[1].strip()
+        if not sku or not ts:
+            continue
+        if _row_is_fbb(row, fulfillment_col_idx, status_col_idx):
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() in dates_set:
+            sku_up = sku.upper()
+            if sku_up not in counts:
+                counts[sku_up] = {dd: 0 for dd in dates}
+            counts[sku_up][d.date()] += 1
+    return counts
+
+def build_daily_orders_prices_fbn(dates):
+    """نفس منطق build_daily_orders_prices بالظبط، لكن بيستبعد صفوف FBB (عكس
+    build_daily_orders_prices_fbb) | Same logic as build_daily_orders_prices
+    exactly, but excludes FBB rows (inverse of build_daily_orders_prices_fbb)."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    prices = {}
+    if len(data) <= 1:
+        return prices
+    hdr = data[0] if data else []
+    fulfillment_col_idx = _find_fulfillment_col_idx(hdr)
+    status_col_idx = _find_status_col_idx(hdr)
+    price_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price"):
+            price_col_idx = ci; break
+    qty_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("quantity","qty","كمية","الكمية","count"):
+            qty_col_idx = ci; break
+    for row in data[1:]:
+        while len(row) < 2: row.append("")
+        sku, ts = row[0].strip(), row[1].strip()
+        if not sku or not ts:
+            continue
+        if _row_is_fbb(row, fulfillment_col_idx, status_col_idx):
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() in dates_set:
+            sku_up = sku.upper()
+            price_val = ""
+            if price_col_idx is not None and len(row) > price_col_idx:
+                raw = str(row[price_col_idx]).strip()
+                price_val = raw if raw and raw.lower() not in ("nan","none","") else ""
+            qty_val = 1
+            if qty_col_idx is not None and len(row) > qty_col_idx:
+                try:
+                    qty_val = int(float(str(row[qty_col_idx]).strip()))
+                except Exception:
+                    qty_val = 1
+            if qty_val < 1:
+                qty_val = 1
+            if sku_up not in prices:
+                prices[sku_up] = {dd: [] for dd in dates}
+            prices[sku_up][d.date()].append((price_val, qty_val))
+    return prices
+
+def build_daily_orders_family_stats_fbn(dates, live_map=None):
+    """نفس منطق build_daily_orders_family_stats بالظبط، لكن بيستبعد صفوف FBB
+    (عكس build_daily_orders_family_stats_fbb) | Same logic as
+    build_daily_orders_family_stats exactly, but excludes FBB rows (inverse of
+    build_daily_orders_family_stats_fbb)."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    stats = {}
+    if len(data) <= 1:
+        return stats
+    hdr = data[0] if data else []
+    fulfillment_col_idx = _find_fulfillment_col_idx(hdr)
+    status_col_idx = _find_status_col_idx(hdr)
+    family_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("family", "القسم", "قسم", "department", "category"):
+            family_col_idx = ci; break
+    if family_col_idx is None:
+        return stats
+    price_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("price","base_price","سعر","السعر","price_egp","unit_price","sale_price","selling_price"):
+            price_col_idx = ci; break
+    qty_col_idx = None
+    for ci, h in enumerate(hdr):
+        if str(h).strip().lower() in ("quantity","qty","كمية","الكمية","count"):
+            qty_col_idx = ci; break
+    for row in data[1:]:
+        while len(row) <= family_col_idx:
+            row.append("")
+        sku = row[0].strip() if len(row) > 0 else ""
+        ts  = row[1].strip() if len(row) > 1 else ""
+        if not sku or not ts:
+            continue
+        if _row_is_fbb(row, fulfillment_col_idx, status_col_idx):
+            continue
+        d = parse_excel_date(ts)
+        if not d or d.date() not in dates_set:
+            continue
+        fam_raw = row[family_col_idx].strip() if len(row) > family_col_idx else ""
+        if not fam_raw or fam_raw.lower() in ("nan", "none"):
+            continue
+        dept_name = family_display_name(fam_raw)
+        if not dept_name:
+            continue
+        price_val = ""
+        if price_col_idx is not None and len(row) > price_col_idx:
+            price_val = str(row[price_col_idx]).strip()
+        qty_val = 1
+        if qty_col_idx is not None and len(row) > qty_col_idx:
+            try:
+                qty_val = int(float(str(row[qty_col_idx]).strip()))
+            except Exception:
+                qty_val = 1
+        if qty_val < 1:
+            qty_val = 1
+        rev_val = 0.0
+        live_info_fam = live_map.get(sku.upper()) if live_map else None
+        live_price_fam = live_info_fam.get("price") if live_info_fam else None
+        if live_price_fam is not None:
+            rev_val = live_price_fam * qty_val
+        elif price_val and price_val.lower() not in ("", "nan", "none"):
+            try:
+                rev_val = float(price_val.replace(",", "")) * qty_val
+            except Exception:
+                rev_val = 0.0
+        if dept_name not in stats:
+            stats[dept_name] = {"orders": 0, "revenue": 0.0}
+        stats[dept_name]["orders"]  += 1
+        stats[dept_name]["revenue"] += rev_val
+    return stats
+
 def is_sku_only_in_excluded_warehouses(sku_up, excluded_wh):
     """يتحقق هل كل مستودعات هذا الـ SKU (في ملف المخزون) هي مستودعات مستثناة فقط —
     لو كذلك، يبقى مينفعش يظهر في تابي مراجعة المخزون / مراجعة المبيعات."""
@@ -3925,9 +4084,14 @@ with tab_dash:
                     build_daily_orders_counts, build_daily_orders_prices,
                     build_daily_orders_family_stats, "all")
             with _dash_fbn_subtab_td:
+                # ── FBN بس: مستبعد منه أي طلب مصنّف FBB (Fulfillment=FBP +
+                #    Status=Processing)، عشان FBN + FBB = تاب "الكل" بالظبط
+                #    من غير أي تكرار | FBN only: excludes anything classified
+                #    as FBB, so FBN + FBB always adds up exactly to "All
+                #    Combined" with no double-counting.
                 _render_sales_dashboard_body(
-                    build_daily_orders_counts, build_daily_orders_prices,
-                    build_daily_orders_family_stats, "fbn")
+                    build_daily_orders_counts_fbn, build_daily_orders_prices_fbn,
+                    build_daily_orders_family_stats_fbn, "fbn")
             with _dash_fbb_subtab_td:
                 _render_sales_dashboard_body(
                     build_daily_orders_counts_fbb, build_daily_orders_prices_fbb,
