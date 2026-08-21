@@ -14,29 +14,113 @@ st.set_page_config(page_title="🏢 عالم الرشاقة للتجارة | Fit
 # ══ قفل القايمة الجانبية تلقائياً على الموبايل لما تدوس على أي حاجة برا | Auto-close
 #    the sidebar on mobile when tapping outside it, instead of only via the toggle
 #    button ══
+# ملحوظة: القايمة عندنا بتاخد جزء من عرض الشاشة بس وهي مفتوحة على الموبايل (مش
+# تغطية كاملة)، يعني باقي الشاشة (زي فورم كلمة السر) بيفضل ظاهر وقابل للمس جنبها.
+# النسخة القديمة كانت بتسمع لأي ضغطة على الصفحة وتقفل القايمة برمجياً، لكن من غير
+# ما توقف الضغطة الأصلية من إنها توصل للعنصر اللي تحتها — فكان بيحصل: القايمة
+# تتقفل وفي نفس اللحظة الصفحة تعيد ترتيب نفسها، فإصبعك يبقى فوق عنصر تاني
+# (زي زرار "دخول")، وده اللي كان بيظهر كـ"نطة" وتغطية لفورم تسجيل الدخول.
+# الحل: طبقة شفافة (overlay) تغطي الشاشة كاملة وقت ما القايمة مفتوحة، وهي اللي
+# بتاخد الضغطة الأولى بالكامل ومتسيبهاش توصل لأي حاجة تحتها — تقفل القايمة بس،
+# وأي ضغطة بعد كده بتوصل طبيعي وسليم لللي تحتها | Note: our sidebar only takes
+# part of the screen width when open on mobile (not a full overlay), so the rest
+# of the screen (like the password form) stays visible and tappable right next to
+# it. The old version listened for any tap on the page and closed the sidebar
+# programmatically, but never stopped that same tap from reaching whatever was
+# underneath it — so the sidebar would close, the page would reflow at that exact
+# moment, and your finger would end up over a different element (like the
+# "Unlock" button), which showed up as a "jump" covering the login form. Fix: a
+# transparent overlay that covers the full screen while the sidebar is open. It
+# fully absorbs the first tap so nothing underneath ever receives it — that tap
+# only closes the sidebar, and every tap after that lands normally and safely on
+# whatever is underneath.
 st.components.v1.html("""
 <script>
 (function() {
     const doc = window.parent.document;
-    if (doc.__sidebarOutsideCloseBound) return;
-    doc.__sidebarOutsideCloseBound = true;
+    if (doc.__sidebarOverlayBound) return;
+    doc.__sidebarOverlayBound = true;
 
-    doc.addEventListener('click', function(e) {
-        if (window.parent.innerWidth >= 768) return;  // موبايل بس | mobile only
+    function isMobile() { return window.parent.innerWidth < 768; }
 
-        const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-        if (!sidebar) return;
+    function getSidebar() { return doc.querySelector('[data-testid="stSidebar"]'); }
 
+    function isSidebarOpen(sidebar) {
+        if (!sidebar) return false;
         const expanded = sidebar.getAttribute('aria-expanded');
-        const isOpen = (expanded === null) ? sidebar.offsetWidth > 0 : expanded === 'true';
-        if (!isOpen) return;
+        return (expanded === null) ? sidebar.offsetWidth > 0 : expanded === 'true';
+    }
 
-        const openToggle = doc.querySelector('[data-testid="stSidebarCollapseButton"] button')
-                         || doc.querySelector('[data-testid="baseButton-headerNoPadding"]');
-        if (sidebar.contains(e.target) || (openToggle && openToggle.contains(e.target))) return;
+    function getOpenToggle() {
+        return doc.querySelector('[data-testid="stSidebarCollapseButton"] button')
+            || doc.querySelector('[data-testid="stSidebarCollapseButton"]')
+            || doc.querySelector('[data-testid="baseButton-headerNoPadding"]');
+    }
 
-        if (openToggle) openToggle.click();
-    }, true);
+    function ensureOverlay(sidebar) {
+        let overlay = doc.getElementById('__sidebarCloseOverlay');
+        if (overlay) return overlay;
+        overlay = doc.createElement('div');
+        overlay.id = '__sidebarCloseOverlay';
+        overlay.style.position = 'fixed';
+        overlay.style.top = '0';
+        overlay.style.left = '0';
+        overlay.style.right = '0';
+        overlay.style.bottom = '0';
+        overlay.style.background = 'transparent';
+        // نحطها فوق باقي المحتوى بس تحت القايمة الجانبية نفسها، عشان تمنع أي لمسة
+        // من الوصول لأي عنصر تحتها من غير ما تغطي القايمة ذاتها | Sit above the
+        // rest of the content but below the sidebar itself, so it blocks any tap
+        // from reaching anything underneath without covering the sidebar
+        const sidebarZ = parseInt(window.parent.getComputedStyle(sidebar).zIndex, 10) || 999990;
+        overlay.style.zIndex = String(sidebarZ - 1);
+
+        function closeOnTap(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const toggle = getOpenToggle();
+            if (toggle) toggle.click();
+        }
+        overlay.addEventListener('touchstart', closeOnTap, { passive: false, capture: true });
+        overlay.addEventListener('click', closeOnTap, true);
+        doc.body.appendChild(overlay);
+        return overlay;
+    }
+
+    function removeOverlay() {
+        const overlay = doc.getElementById('__sidebarCloseOverlay');
+        if (overlay) overlay.remove();
+    }
+
+    function sync() {
+        const sidebar = getSidebar();
+        if (!sidebar || !isMobile()) { removeOverlay(); return; }
+        if (isSidebarOpen(sidebar)) {
+            ensureOverlay(sidebar);
+        } else {
+            removeOverlay();
+        }
+    }
+
+    const observer = new MutationObserver(sync);
+    function attachObserver() {
+        const sidebar = getSidebar();
+        if (sidebar) {
+            observer.observe(sidebar, { attributes: true, attributeFilter: ['aria-expanded', 'style', 'class'] });
+        }
+    }
+    attachObserver();
+    // القايمة الجانبية ممكن تتحمّل متأخرة شوية عن السكريبت ده، فبنعيد المحاولة
+    // لحد ما تظهر | The sidebar may render slightly after this script runs, so
+    // retry until it shows up
+    let tries = 0;
+    const retryId = setInterval(function() {
+        tries++;
+        if (getSidebar() || tries > 20) { clearInterval(retryId); attachObserver(); sync(); }
+    }, 250);
+
+    window.parent.addEventListener('resize', sync);
+    sync();
 })();
 </script>
 """, height=0)
