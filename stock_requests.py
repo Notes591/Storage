@@ -2838,11 +2838,17 @@ with tab14:
                 # ── SKUs باعت طلبات FBB لكن مش موجودة في ملف المخزون المرفوع —
                 #    بتتضاف كمان عشان كل مبيعات FBB تظهر في القائمة، مش بس اللي
                 #    عندها مخزون مرفوع. المخزون بيتحط 0 (غير معروف) ومعاها علامة
-                #    توضيحية | SKUs with FBB orders that aren't in the uploaded
-                #    inventory file — added too so every FBB sale shows up, not
-                #    only SKUs with uploaded stock. Stock shown as 0 (unknown)
-                #    with a note explaining why.
+                #    توضيحية. الصورة بتتجاب من شيت "links n" (نفس مصدر الصور في
+                #    تاب المخزون) لأن الـ SKU ده أصلاً مش في ملف المخزون فمفيش
+                #    عمود صورة نجيبها منه هناك | SKUs with FBB orders that
+                #    aren't in the uploaded inventory file — added too so every
+                #    FBB sale shows up, not only SKUs with uploaded stock.
+                #    Stock shown as 0 (unknown) with a note explaining why. The
+                #    image is looked up from the "links n" sheet (the same
+                #    source Inventory itself pulls images from), since this SKU
+                #    has no Inventory row to carry an image column at all.
                 inv_skus_seen_fbb = set(inv_map.keys())
+                links_map_fbb_orphan = get_links_map()
                 for sku_up, day_counts in multi_counts_t14.items():
                     if sku_up in inv_skus_seen_fbb:
                         continue
@@ -2852,13 +2858,14 @@ with tab14:
                     day_prices_orphan = prices_map_t14.get(sku_up, {d: [] for d in sales_dates})
                     sales_tab_rows.append({
                         "sku": sku_up, "sku_up": sku_up,
-                        "stock": 0, "sales_month": 0, "img": "",
+                        "stock": 0, "sales_month": 0, "img": links_map_fbb_orphan.get(sku_up, ""),
                         "day_counts": day_counts, "day_prices": day_prices_orphan,
                         "total_recent": total_recent_orphan,
                         "effective_avg": 0,
                         "days_to_stockout": 9999,
                         "not_in_inventory": True,
                     })
+
 
                 # ترتيب: الأكتر مبيعاً أمس أولاً
                 sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
