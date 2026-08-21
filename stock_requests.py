@@ -2515,12 +2515,25 @@ with tab_wh:
                 f'<span class="tacweed-badge" style="background:#14532d;color:#bbf7d0;">📦 إجمالي الأكواد: {len(wh_rows)}</span>'
                 '</div>', unsafe_allow_html=True)
 
-            status_filter = st.radio(
-                "فلترة حسب الحالة | Filter by status",
-                ["الكل | All", "🚨 محتاج طلب الآن", "🟠 قرب موعد الطلب", "🟢 آمن"],
-                horizontal=True, key="wh_status_filter")
+            sort_cols = st.columns([2, 2])
+            with sort_cols[0]:
+                status_filter = st.radio(
+                    "فلترة حسب الحالة | Filter by status",
+                    ["الكل | All", "🚨 محتاج طلب الآن", "🟠 قرب موعد الطلب", "🟢 آمن"],
+                    horizontal=True, key="wh_status_filter")
+            with sort_cols[1]:
+                sort_choice = st.radio(
+                    "الترتيب | Sort by",
+                    ["📈 الأعلى مبيعات", "⏳ الأقرب للنفاد"],
+                    horizontal=True, key="wh_sort_choice")
 
-            for r in wh_rows:
+            wh_rows_display = list(wh_rows)
+            if sort_choice == "📈 الأعلى مبيعات":
+                wh_rows_display.sort(key=lambda r: -r["daily_draw"])
+            else:
+                wh_rows_display.sort(key=lambda r: (r["days_to_stockout"] if r["days_to_stockout"] is not None else 10**9))
+
+            for r in wh_rows_display:
                 if status_filter != "الكل | All" and not r["status"].startswith(status_filter.split(" ")[0]):
                     continue
                 dts_txt = f"{r['days_to_stockout']} يوم" if r["days_to_stockout"] is not None else "—"
