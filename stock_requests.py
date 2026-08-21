@@ -32,120 +32,6 @@ html, body {
 </style>
 """, unsafe_allow_html=True)
 
-# ══ قفل القايمة الجانبية تلقائياً على الموبايل لما تدوس على أي حاجة برا | Auto-close
-#    the sidebar on mobile when tapping outside it, instead of only via the toggle
-#    button ══
-# ملحوظة: القايمة عندنا بتاخد جزء من عرض الشاشة بس وهي مفتوحة على الموبايل (مش
-# تغطية كاملة)، يعني باقي الشاشة (زي فورم كلمة السر) بيفضل ظاهر وقابل للمس جنبها.
-# النسخة القديمة كانت بتسمع لأي ضغطة على الصفحة وتقفل القايمة برمجياً، لكن من غير
-# ما توقف الضغطة الأصلية من إنها توصل للعنصر اللي تحتها — فكان بيحصل: القايمة
-# تتقفل وفي نفس اللحظة الصفحة تعيد ترتيب نفسها، فإصبعك يبقى فوق عنصر تاني
-# (زي زرار "دخول")، وده اللي كان بيظهر كـ"نطة" وتغطية لفورم تسجيل الدخول.
-# الحل: طبقة شفافة (overlay) تغطي الشاشة كاملة وقت ما القايمة مفتوحة، وهي اللي
-# بتاخد الضغطة الأولى بالكامل ومتسيبهاش توصل لأي حاجة تحتها — تقفل القايمة بس،
-# وأي ضغطة بعد كده بتوصل طبيعي وسليم لللي تحتها | Note: our sidebar only takes
-# part of the screen width when open on mobile (not a full overlay), so the rest
-# of the screen (like the password form) stays visible and tappable right next to
-# it. The old version listened for any tap on the page and closed the sidebar
-# programmatically, but never stopped that same tap from reaching whatever was
-# underneath it — so the sidebar would close, the page would reflow at that exact
-# moment, and your finger would end up over a different element (like the
-# "Unlock" button), which showed up as a "jump" covering the login form. Fix: a
-# transparent overlay that covers the full screen while the sidebar is open. It
-# fully absorbs the first tap so nothing underneath ever receives it — that tap
-# only closes the sidebar, and every tap after that lands normally and safely on
-# whatever is underneath.
-st.components.v1.html("""
-<script>
-(function() {
-    const doc = window.parent.document;
-    if (doc.__sidebarOverlayBound) return;
-    doc.__sidebarOverlayBound = true;
-
-    function isMobile() { return window.parent.innerWidth < 768; }
-
-    function getSidebar() { return doc.querySelector('[data-testid="stSidebar"]'); }
-
-    function isSidebarOpen(sidebar) {
-        if (!sidebar) return false;
-        const expanded = sidebar.getAttribute('aria-expanded');
-        return (expanded === null) ? sidebar.offsetWidth > 0 : expanded === 'true';
-    }
-
-    function getOpenToggle() {
-        return doc.querySelector('[data-testid="stSidebarCollapseButton"] button')
-            || doc.querySelector('[data-testid="stSidebarCollapseButton"]')
-            || doc.querySelector('[data-testid="baseButton-headerNoPadding"]');
-    }
-
-    function ensureOverlay(sidebar) {
-        let overlay = doc.getElementById('__sidebarCloseOverlay');
-        if (overlay) return overlay;
-        overlay = doc.createElement('div');
-        overlay.id = '__sidebarCloseOverlay';
-        overlay.style.position = 'fixed';
-        overlay.style.top = '0';
-        overlay.style.left = '0';
-        overlay.style.right = '0';
-        overlay.style.bottom = '0';
-        overlay.style.background = 'transparent';
-        // نحطها فوق باقي المحتوى بس تحت القايمة الجانبية نفسها، عشان تمنع أي لمسة
-        // من الوصول لأي عنصر تحتها من غير ما تغطي القايمة ذاتها | Sit above the
-        // rest of the content but below the sidebar itself, so it blocks any tap
-        // from reaching anything underneath without covering the sidebar
-        const sidebarZ = parseInt(window.parent.getComputedStyle(sidebar).zIndex, 10) || 999990;
-        overlay.style.zIndex = String(sidebarZ - 1);
-
-        function closeOnTap(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            const toggle = getOpenToggle();
-            if (toggle) toggle.click();
-        }
-        overlay.addEventListener('touchstart', closeOnTap, { passive: false, capture: true });
-        overlay.addEventListener('click', closeOnTap, true);
-        doc.body.appendChild(overlay);
-        return overlay;
-    }
-
-    function removeOverlay() {
-        const overlay = doc.getElementById('__sidebarCloseOverlay');
-        if (overlay) overlay.remove();
-    }
-
-    function sync() {
-        const sidebar = getSidebar();
-        if (!sidebar || !isMobile()) { removeOverlay(); return; }
-        if (isSidebarOpen(sidebar)) {
-            ensureOverlay(sidebar);
-        } else {
-            removeOverlay();
-        }
-    }
-
-    const observer = new MutationObserver(sync);
-    function attachObserver() {
-        const sidebar = getSidebar();
-        if (sidebar) {
-            observer.observe(sidebar, { attributes: true, attributeFilter: ['aria-expanded', 'style', 'class'] });
-        }
-    }
-    attachObserver();
-    // القايمة الجانبية ممكن تتحمّل متأخرة شوية عن السكريبت ده، فبنعيد المحاولة
-    // لحد ما تظهر | The sidebar may render slightly after this script runs, so
-    // retry until it shows up
-    let tries = 0;
-    const retryId = setInterval(function() {
-        tries++;
-        if (getSidebar() || tries > 20) { clearInterval(retryId); attachObserver(); sync(); }
-    }, 250);
-
-    window.parent.addEventListener('resize', sync);
-    sync();
-})();
-</script>
-""", height=0)
-
 # ══ اتصال ══
 scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
@@ -2316,6 +2202,51 @@ with st.sidebar:
         for _key, _icon, _label in NAV_ITEMS:
             _active = st.session_state["nav_page"] == _key
             if st.button(_icon, key=f"nav_item_c_{_key}", help=NAV_KEY_LABELS[_key],
+                         type="primary" if _active else "secondary",
+                         use_container_width=True):
+                st.session_state["nav_page"] = _key
+                st.rerun()
+
+# ══ قايمة أفقية فوق للموبايل فقط | Mobile-only horizontal top nav ══
+# القايمة الجانبية فوق دي overlay بتاخد جزء من عرض الشاشة وهي مفتوحة على
+# الموبايل — وده أصل كل مشاكل التغطية/القفز اللي واجهناها، لأن باقي الشاشة
+# (زي فورم كلمة السر) فاضل ظاهر وقابل للمس جنبها. الحل الأنضف: نخبيها خالص على
+# الموبايل (بـ CSS media query تحت)، ونستبدلها بشريط أفقي عادي فوق الصفحة —
+# جزء طبيعي من تدفق الصفحة (مش overlay ولا عليه فتح/قفل)، فمفيش أي حاجة تتغطي
+# أو تتقفز تاني. الشريط ده بيتحكم في نفس nav_page بالظبط زي القايمة الجانبية،
+# فمفيش تعارض بينهم أبداً | The sidebar above is an overlay that eats part of
+# the screen width while open on mobile — the root cause of every
+# covering/jumping issue we ran into, since the rest of the screen (like the
+# password form) stays visible and tappable right beside it. Cleaner fix: hide
+# it completely on mobile (CSS media query below) and replace it with an
+# ordinary horizontal bar at the top of the page — a normal part of page flow,
+# with no open/close and nothing to overlay. It drives the exact same
+# nav_page state as the sidebar, so the two can never conflict.
+st.markdown("""
+<style>
+[data-testid="stSidebar"] { display: block; }
+.st-key-mobile_topnav { display: none; }
+@media (max-width: 767px) {
+    [data-testid="stSidebar"] { display: none !important; }
+    .st-key-mobile_topnav { display: block !important; }
+}
+.st-key-mobile_topnav div.stButton > button {
+    padding: 8px 4px !important;
+    font-size: 20px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+with st.container(key="mobile_topnav"):
+    st.markdown(
+        '<div style="text-align:center;font-weight:800;color:#0f172a;'
+        'padding:6px 0 10px 0;">🏬 المتجر الذكي | منظومة إدارة المتاجر</div>',
+        unsafe_allow_html=True)
+    _mt_cols = st.columns(len(NAV_ITEMS))
+    for _mt_col, (_key, _icon, _label) in zip(_mt_cols, NAV_ITEMS):
+        with _mt_col:
+            _active = st.session_state["nav_page"] == _key
+            if st.button(_icon, key=f"nav_item_mobile_{_key}", help=_label,
                          type="primary" if _active else "secondary",
                          use_container_width=True):
                 st.session_state["nav_page"] = _key
