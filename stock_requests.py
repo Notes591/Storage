@@ -2141,6 +2141,26 @@ def build_warehouse_stockout_sku_lookup(rows):
             lookup[sku_up] = r
     return lookup
 
+def compute_no_sale_rows(days=7):
+    """يرجع قائمة SKUs الموجودة في المخزون (inv_map) ومالهاش أي مبيع في آخر عدد
+    أيام محدد — نفس منطق تاب 'مخزون بدون بيع' بالظبط، لكن بيتقرا هنا كمان
+    (مش بس جوه تاب16) عشان يتستخدم في شريط التنبيهات السريعة بالداشبورد."""
+    today_ns = datetime.now().date()
+    dates_ns = [today_ns - timedelta(days=i) for i in range(1, days + 1)]
+    counts_ns = build_daily_orders_counts(dates_ns)
+    rows = []
+    for sku_up, info in inv_map.items():
+        dc = counts_ns.get(sku_up, {})
+        if sum(dc.get(d, 0) for d in dates_ns) > 0:
+            continue
+        rows.append({
+            "sku": info.get("sku", sku_up), "sku_up": sku_up,
+            "stock": info.get("total_stock", 0), "sales_month": info.get("sales", 0),
+            "img": info.get("img", ""),
+        })
+    rows.sort(key=lambda x: -x["stock"])
+    return rows
+
 ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الرابعة|Fourth",4:"الخامسة|Fifth"}
 
 
@@ -3685,6 +3705,27 @@ def _render_sales_dashboard_body(counts_fn, prices_fn, family_stats_fn, key_suff
     with ac4:
         st.markdown(_alert_chip_html("🟢", "#f0fdf4", "#22c55e", "منتجات ارتفعت مبيعاتها",
                     f"{len(rise_rows_td):,}", "أكثر من 20% عن الفترة السابقة"), unsafe_allow_html=True)
+
+    # ── تنبيهات التابين الجداد (مخزون بدون بيع + مخزون المستودع) — نفس منطق
+    #    الحساب المستخدم جوه التابين نفسهم بالظبط، عشان الرقم هنا يطابق اللي
+    #    هتلاقيه لو فتحت التاب مباشرة | Alerts for the two newer tabs (No Sales
+    #    stock + Warehouse Stockout) — using the exact same computation as
+    #    inside those tabs themselves, so the number here always matches what
+    #    you'd see by opening the tab directly.
+    no_sale_rows_dash = compute_no_sale_rows(days=7)
+    wh_stockout_rows_dash = st.session_state.get("warehouse_stockout_rows", [])
+    wh_urgent_rows_dash = [r for r in wh_stockout_rows_dash if "🚨" in r["status"] or "🟠" in r["status"]]
+    wh_now_dash = sum(1 for r in wh_urgent_rows_dash if "🚨" in r["status"])
+    wh_soon_dash = len(wh_urgent_rows_dash) - wh_now_dash
+
+    ac5, ac6 = st.columns(2)
+    with ac5:
+        st.markdown(_alert_chip_html("🗂️", "#fefce8", "#ca8a04", "مخزون بدون بيع",
+                    f"{len(no_sale_rows_dash):,}", "SKUs في المخزون بدون أي مبيع آخر 7 أيام"), unsafe_allow_html=True)
+    with ac6:
+        st.markdown(_alert_chip_html("🏭", "#fdf4ff", "#c026d3", "مخزون مستودع محتاج تزويد",
+                    f"{len(wh_urgent_rows_dash):,}",
+                    f"{wh_now_dash} اطلب الآن، {wh_soon_dash} قرب موعد الطلب"), unsafe_allow_html=True)
 
     ac7 = st.columns(1)[0]
     with ac7:
