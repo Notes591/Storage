@@ -3318,11 +3318,17 @@ def _render_sales_dashboard_body(counts_fn, prices_fn, family_stats_fn, key_suff
 
     # ── SKUs باعت لكن مش موجودة في ملف المخزون المرفوع — بتتضاف كمان عشان
     #    إجماليات الداشبورد (الكل/FBN/FBB) تعكس عدد الطلبات الحقيقي، مش بس
-    #    اللي عندها مخزون مرفوع | SKUs that sold but aren't in the uploaded
+    #    اللي عندها مخزون مرفوع. الصورة بتتجاب من شيت "links n" (نفس مصدر
+    #    الصور في تاب المخزون) لأن الـ SKU ده أصلاً مش في ملف المخزون فمفيش
+    #    عمود صورة نجيبها منه هناك | SKUs that sold but aren't in the uploaded
     #    inventory file — added too so the dashboard totals (All/FBN/FBB)
-    #    reflect the true order count, not only SKUs with uploaded stock.
+    #    reflect the true order count, not only SKUs with uploaded stock. The
+    #    image is looked up from the "links n" sheet (the same source
+    #    Inventory itself pulls images from), since this SKU has no Inventory
+    #    row to carry an image column at all.
     _inv_skus_seen_td = set(inv_map.keys())
     _orphan_skus_td = (set(cur_counts_td.keys()) | set(prev_counts_td.keys())) - _inv_skus_seen_td
+    _links_map_dash_orphan = get_links_map()
     for sku_up_td in _orphan_skus_td:
         cur_t_td  = _td_total(cur_counts_td, sku_up_td, cur_dates_td)
         prev_t_td = _td_total(prev_counts_td, sku_up_td, prev_dates_td)
@@ -3331,7 +3337,7 @@ def _render_sales_dashboard_body(counts_fn, prices_fn, family_stats_fn, key_suff
         cur_rev_td  = _td_revenue_total(cur_prices_td, sku_up_td, cur_dates_td, live_map_dash)
         prev_rev_td = _td_revenue_total(prev_prices_td, sku_up_td, prev_dates_td, live_map_dash)
         rows_td.append({
-            "sku_up": sku_up_td, "sku": sku_up_td, "img": "",
+            "sku_up": sku_up_td, "sku": sku_up_td, "img": _links_map_dash_orphan.get(sku_up_td, ""),
             "cur": cur_t_td, "prev": prev_t_td, "stock": 0,
             "cur_rev": cur_rev_td, "prev_rev": prev_rev_td,
             "not_in_inventory": True,
@@ -3909,6 +3915,7 @@ def _render_ads_performance_tab():
         return None
 
     ads_profit_rows_ap, ads_loss_rows_ap = [], []
+    _links_map_ads_orphan = get_links_map()
     for sku_up_ad, ads_entries_ad in ads_map_dash.items():
         com_info_ad = com_map_dash.get(sku_up_ad)
         if not ads_entries_ad or not com_info_ad:
@@ -3922,8 +3929,12 @@ def _render_ads_performance_tab():
         total_net_ad = total_orders_ad * net_tax_ad
         result_ad = total_net_ad - total_spends_ad
         inv_info_ad = inv_map.get(sku_up_ad, {})
+        # الصورة من المخزون لو الـ SKU موجود فيه، وإلا من شيت links n مباشرة |
+        # Image from Inventory if the SKU is there, otherwise straight from
+        # the links n sheet
+        img_ad = inv_info_ad.get("img", "") or _links_map_ads_orphan.get(sku_up_ad, "")
         entry_ad = {"sku_up": sku_up_ad, "sku": inv_info_ad.get("sku", sku_up_ad),
-                    "img": inv_info_ad.get("img", ""),
+                    "img": img_ad,
                     "spends": total_spends_ad, "orders": total_orders_ad,
                     "net_total": total_net_ad, "result": result_ad}
         if total_orders_ad <= 0 or result_ad < 0:
@@ -4062,11 +4073,16 @@ def _render_ads_performance_tab():
         to this campaign, each with its product image."""
         sku_list_r = sorted(sku_up_set)
         shown_r = sku_list_r[:max_show]
+        _links_map_apa_orphan = get_links_map()
         for sku_up_r in shown_r:
             inv_info_r = inv_map.get(sku_up_r, {})
+            # الصورة من المخزون لو الـ SKU موجود فيه، وإلا من شيت links n مباشرة |
+            # Image from Inventory if the SKU is there, otherwise straight
+            # from the links n sheet
+            img_r = inv_info_r.get("img", "") or _links_map_apa_orphan.get(sku_up_r, "")
             ci_r, cinfo_r = st.columns([1, 6])
             with ci_r:
-                show_img(inv_info_r.get("img", ""), 45)
+                show_img(img_r, 45)
             with cinfo_r:
                 st.markdown(sku_link_html(inv_info_r.get("sku", sku_up_r)), unsafe_allow_html=True)
         if len(sku_list_r) > max_show:
