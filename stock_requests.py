@@ -290,6 +290,7 @@ TAB_LOCK_OPTIONS = [
     ("tab7",      "🔄 تعديل موعد | Rescheduled"),
     ("tab8",      "⚠️ تنبيهات | Alerts"),
     ("tab9",      "📊 المخزون | Inventory"),
+    ("tab_wh",    "🏭 مخزون المستودع | Warehouse Stockout"),
     ("tab10",     "🔴 مراجعة المخزون | Stock Review"),
     ("tab11",     "🗂️ منتهية | Expired"),
     ("tab12",     "⚙️ الإعدادات | Settings"),
@@ -379,6 +380,14 @@ def get_tacweed_map():
             if code:
                 m[row[0].strip().upper()] = code
     return m
+
+def get_tacweed_reverse_map():
+    """يرجع dict: كود -> قائمة SKUs المرتبطة بيه (عكس get_tacweed_map) — لأن نفس
+    الكود ممكن يتكرر لأكتر من SKU وبالتالي يشتركوا في نفس كمية المستودع الواحدة."""
+    rev = {}
+    for sku_up, code in get_tacweed_map().items():
+        rev.setdefault(code, []).append(sku_up)
+    return rev
 
 def big_note_html(text):
     """نص ملاحظة (غير متوفر سابقاً / تم طلبه سابقاً) بخط أكبر وأسود بولد بدل الكابشن الصغير الرمادي."""
@@ -607,6 +616,8 @@ def render_tacweed_upload(key_prefix):
                         safe_delete_all(tacweed_sheet)
                     safe_batch_append(tacweed_sheet, to_add)
                     clear_cache(tacweed_sheet)
+                    st.session_state.pop("warehouse_stockout_rows", None)
+                    st.session_state.pop("warehouse_stockout_sku_lookup", None)
                     return len(to_add)
 
                 ca_tc, cb_tc = st.columns(2)
@@ -644,16 +655,32 @@ def get_warehouse_stock_map():
     return m
 
 def warehouse_available_badge(sku_up):
-    """يعرض الكود 01 + الكمية المتوفرة بالمستودع (لو الكود موجود ف ملف المستودع) جنب الSKU."""
+    """يعرض الكود 01 + الكمية المتوفرة بالمستودع (لو الكود موجود ف ملف المستودع) جنب الSKU
+    + شارة توقع النفاد/موعد الطلب لو محسوبة (compute_warehouse_stockout_rows) — الشارة دي
+    محسوبة على مستوى الكود ككل (مجموع مبيعات كل الـ SKUs المشتركة فيه)، مش على SKU لوحده."""
     code = get_tacweed_map().get(sku_up, "")
     if not code:
         return ""
     qty = get_warehouse_stock_map().get(code, "")
+
+    stockout_html = ""
+    wh_row = st.session_state.get("warehouse_stockout_sku_lookup", {}).get(sku_up)
+    if wh_row:
+        dts = wh_row["days_to_stockout"]
+        dts_txt = f"نفاد خلال {dts} يوم" if dts is not None else "لا يوجد سحب مسجل"
+        status_short = wh_row["status"].split(" | ")[0]
+        stockout_html = (
+            f' <span class="tacweed-badge" style="background:{wh_row["color"]}22;'
+            f'color:{wh_row["color"]};border:1px solid {wh_row["color"]}55;">'
+            f'{status_short} — {dts_txt}</span>'
+        )
+
     if qty == "":
-        return f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>'
+        return f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>{stockout_html}'
     return (
         f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span> '
         f'<span class="tacweed-badge" style="background:#78350f;color:#fde68a;">📦 المتوفر بالمستودع: {qty}</span>'
+        f'{stockout_html}'
     )
 
 def render_warehouse_stock_upload(key_prefix):
@@ -721,6 +748,8 @@ def render_warehouse_stock_upload(key_prefix):
                         safe_delete_all(warehouse_stock_sheet)
                     safe_batch_append(warehouse_stock_sheet, to_add)
                     clear_cache(warehouse_stock_sheet)
+                    st.session_state.pop("warehouse_stockout_rows", None)
+                    st.session_state.pop("warehouse_stockout_sku_lookup", None)
                     return len(to_add)
 
                 ca_ws, cb_ws = st.columns(2)
@@ -2043,6 +2072,75 @@ def schedule_coverage_badge(sku, days_to_stockout, delay_days):
     else:
         return (f"🔴 مجدول (ASN {sched['asn']}) بتاريخ {sched['date']} [{src_label}] — لكن متأخر عن موعد النفاد | But too late before stockout", "#ef4444", sched)
 
+def compute_warehouse_stockout_rows():
+    """لكل كود عنده كمية مسجلة في WarehouseStock، بيحسب معدل السحب اليومي المجمّع من
+    كل الـ SKUs التابعة لنفس الكود (فعليًا من شيت DailyOrders، مش من مبيع Inventory
+    الشهري)، وبيرجع أيام النفاد المتوقعة وعدد الأيام المتبقية لموعد الطلب.
+
+    3 إعدادات بتتحكم في الحساب، بتتضاف/تتعدّل يدوي في شيت Settings (نفس أسلوب
+    schedule_delay_days و xdock_low_stock_threshold الموجودين):
+    - warehouse_sales_window_days: عدد أيام نافذة حساب معدل السحب (افتراضي 30)
+    - warehouse_lead_time_days: مدة التوريد المتوقعة (افتراضي 7)
+    - warehouse_reorder_safety_days: هامش الأمان قبل موعد الطلب (افتراضي 3)
+    """
+    settings_wh = load_settings()
+    window_days = int(settings_wh.get("warehouse_sales_window_days", "30") or 30)
+    lead_time   = int(settings_wh.get("warehouse_lead_time_days", "7") or 7)
+    safety_days = int(settings_wh.get("warehouse_reorder_safety_days", "3") or 3)
+
+    dates = [(datetime.now() - timedelta(days=i)).date() for i in range(max(window_days, 1))]
+    multi_counts_wh = build_daily_orders_counts(dates)
+    reverse_map_wh  = get_tacweed_reverse_map()
+    stock_map_wh    = get_warehouse_stock_map()
+    links_map_wh    = get_links_map()
+
+    rows = []
+    for code, qty_str in stock_map_wh.items():
+        try:
+            qty = float(str(qty_str).replace(",", "").strip())
+        except (TypeError, ValueError):
+            continue
+
+        skus = reverse_map_wh.get(code, [])
+        total_sold = sum(sum(multi_counts_wh.get(sku_up, {}).values()) for sku_up in skus)
+        daily_draw = (total_sold / window_days) if window_days > 0 else 0
+
+        if daily_draw <= 0:
+            days_to_stockout, reorder_in = None, None
+            status, color = "⚪ لا يوجد سحب مسجل | No recorded draw", "#9ca3af"
+        else:
+            days_to_stockout = qty / daily_draw
+            reorder_in = days_to_stockout - lead_time
+            if reorder_in <= 0:
+                status, color = "🚨 اطلب الآن | Order now", "#ef4444"
+            elif reorder_in <= safety_days:
+                status, color = "🟠 قرب موعد الطلب | Reorder soon", "#f59e0b"
+            else:
+                status, color = "🟢 آمن | Safe", "#22c55e"
+
+        suggested_qty = round(daily_draw * (lead_time + safety_days)) if daily_draw > 0 else 0
+        img = next((links_map_wh.get(s) for s in skus if links_map_wh.get(s)), "")
+
+        rows.append({
+            "code": code, "skus": skus, "qty": qty,
+            "daily_draw": round(daily_draw, 2),
+            "days_to_stockout": round(days_to_stockout) if days_to_stockout is not None else None,
+            "reorder_in": round(reorder_in) if reorder_in is not None else None,
+            "status": status, "color": color, "suggested_qty": suggested_qty, "img": img,
+        })
+
+    rows.sort(key=lambda r: (r["days_to_stockout"] if r["days_to_stockout"] is not None else 10**9))
+    return rows
+
+def build_warehouse_stockout_sku_lookup(rows):
+    """يرجع dict: sku_up -> صف كود المستودع بتاعه، لاستخدام سريع (O(1)) جوه البادچات
+    بدل ما نعيد حساب compute_warehouse_stockout_rows لكل SKU على حدة."""
+    lookup = {}
+    for r in rows:
+        for sku_up in r["skus"]:
+            lookup[sku_up] = r
+    return lookup
+
 ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الرابعة|Fourth",4:"الخامسة|Fifth"}
 
 
@@ -2096,10 +2194,16 @@ def compute_transferred_from_sales():
 if "transferred_skus_t14" not in st.session_state:
     st.session_state["transferred_skus_t14"] = compute_transferred_from_sales()
 
+if "warehouse_stockout_rows" not in st.session_state:
+    st.session_state["warehouse_stockout_rows"] = compute_warehouse_stockout_rows()
+    st.session_state["warehouse_stockout_sku_lookup"] = build_warehouse_stockout_sku_lookup(
+        st.session_state["warehouse_stockout_rows"])
+
 NAV_ITEMS = [
     ("tab14",    "🛒", "المبيعات | Sales"),
     ("tab_dash", "📊", "داشبورد المبيعات | Dashboard"),
     ("tab9",     "📦", "المخزون | Inventory"),
+    ("tab_wh",   "🏭", "مخزون المستودع | Warehouse Stockout"),
     ("tab16",    "🗂️", "مخزون بدون بيع | No Sales"),
     ("tab_ads",  "📢", "الإعلانات | Ads"),
 ]
@@ -2255,6 +2359,7 @@ with st.container(key="mobile_topnav"):
 tab14    = st.container(key="navpanel_tab14")
 tab_dash = st.container(key="navpanel_tab_dash")
 tab9     = st.container(key="navpanel_tab9")
+tab_wh   = st.container(key="navpanel_tab_wh")
 tab16    = st.container(key="navpanel_tab16")
 tab_ads  = st.container(key="navpanel_tab_ads")
 
@@ -2366,6 +2471,81 @@ with tab9:
                 st.divider()
 
     # ══ TAB 10 — مراجعة المخزون ══
+
+# ══ TAB WH — توقع نفاد مخزون المستودع (على مستوى كود التكويد) ══
+with tab_wh:
+    if _tab_gate("tab_wh", "🏭 مخزون المستودع | Warehouse Stockout"):
+        st.subheader("🏭 توقع نفاد مخزون المستودع | Warehouse Stockout Forecast")
+        st.caption(
+            "الكمية المتوفرة بالمستودع مسجلة على مستوى كود التكويد، وكود واحد ممكن "
+            "يشمل أكتر من SKU — فمعدل السحب هنا بيتحسب من مجموع مبيعات كل الـ SKUs "
+            "المشتركة في نفس الكود (فعليًا من DailyOrders)، مش SKU لوحده. الفترة/مدة "
+            "التوريد/هامش الأمان بتتغير من شيت الإعدادات (Settings) بإضافة/تعديل "
+            "الصفوف: warehouse_sales_window_days, warehouse_lead_time_days, "
+            "warehouse_reorder_safety_days."
+        )
+
+        wh_settings_now = load_settings()
+        wcol1, wcol2, wcol3, wcol4 = st.columns(4)
+        wcol1.metric("نافذة حساب السحب | Sales Window",
+                      f"{wh_settings_now.get('warehouse_sales_window_days','30')} يوم")
+        wcol2.metric("مدة التوريد | Lead Time",
+                      f"{wh_settings_now.get('warehouse_lead_time_days','7')} يوم")
+        wcol3.metric("هامش الأمان | Safety Margin",
+                      f"{wh_settings_now.get('warehouse_reorder_safety_days','3')} يوم")
+        with wcol4:
+            st.write("")
+            if st.button("🔄 إعادة الحساب | Recalculate", use_container_width=True, key="wh_recalc_btn"):
+                st.session_state.pop("warehouse_stockout_rows", None)
+                st.session_state.pop("warehouse_stockout_sku_lookup", None)
+                st.rerun()
+
+        wh_rows = st.session_state.get("warehouse_stockout_rows", [])
+        if not wh_rows:
+            st.info("لا توجد بيانات مخزون مستودع مرفوعة — ارفع ملف التكويد وملف جرد "
+                     "المستودع من تاب المخزون أولاً | No warehouse stock data uploaded yet "
+                     "— upload the Tacweed and Warehouse Stock files from the Inventory tab first")
+        else:
+            urgent_n = sum(1 for r in wh_rows if r["status"].startswith("🚨"))
+            soon_n   = sum(1 for r in wh_rows if r["status"].startswith("🟠"))
+            st.markdown(
+                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">'
+                f'<span class="tacweed-badge" style="background:#7f1d1d;color:#fecaca;">🚨 محتاج طلب الآن: {urgent_n}</span>'
+                f'<span class="tacweed-badge" style="background:#78350f;color:#fde68a;">🟠 قرب موعد الطلب: {soon_n}</span>'
+                f'<span class="tacweed-badge" style="background:#14532d;color:#bbf7d0;">📦 إجمالي الأكواد: {len(wh_rows)}</span>'
+                '</div>', unsafe_allow_html=True)
+
+            status_filter = st.radio(
+                "فلترة حسب الحالة | Filter by status",
+                ["الكل | All", "🚨 محتاج طلب الآن", "🟠 قرب موعد الطلب", "🟢 آمن"],
+                horizontal=True, key="wh_status_filter")
+
+            for r in wh_rows:
+                if status_filter != "الكل | All" and not r["status"].startswith(status_filter.split(" ")[0]):
+                    continue
+                dts_txt = f"{r['days_to_stockout']} يوم" if r["days_to_stockout"] is not None else "—"
+                c1, c2 = st.columns([1, 5])
+                with c1:
+                    show_img(r["img"], 60)
+                with c2:
+                    st.markdown(
+                        f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ كود: {r["code"]}</span> '
+                        f'<span class="tacweed-badge" style="background:{r["color"]}22;color:{r["color"]};border:1px solid {r["color"]}55;">{r["status"]}</span>',
+                        unsafe_allow_html=True)
+                    st.markdown(
+                        f"📦 **الكمية المتوفرة:** {r['qty']:,.0f} &nbsp;|&nbsp; "
+                        f"📉 **معدل السحب اليومي:** {r['daily_draw']:g} &nbsp;|&nbsp; "
+                        f"⏳ **نفاد خلال:** {dts_txt}")
+                    if r["reorder_in"] is not None:
+                        rin = r["reorder_in"]
+                        rin_txt = f"اليوم أو فات ({rin})" if rin <= 0 else f"{rin} يوم"
+                        st.markdown(f"🗓️ **الأيام المتبقية لموعد الطلب:** {rin_txt}")
+                    if r["suggested_qty"] > 0:
+                        st.markdown(f"💡 **الكمية المقترحة للطلب:** {r['suggested_qty']:,}")
+                    with st.expander(f"📋 الـ SKUs التابعة لهذا الكود ({len(r['skus'])})"):
+                        st.write(", ".join(r["skus"]) if r["skus"] else "—")
+                st.divider()
+
     # ══ TAB 14 — المبيعات ══
 with tab14:
     if _tab_gate("tab14", "🛒 المبيعات | Sales"):
