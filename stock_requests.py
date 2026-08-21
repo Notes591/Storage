@@ -3868,6 +3868,65 @@ def _render_sales_dashboard_body(counts_fn, prices_fn, family_stats_fn, key_suff
         else:
             st.caption(f"لا توجد أصناف مخزون Xdock عندها {xdock_threshold_dash} قطعة أو أقل حالياً")
 
+    def _render_wh_alert_row(r):
+        """يعرض صف كود مستودع واحد جوه تفاصيل تنبيه — نفس شكل عرضه في تاب مخزون
+        المستودع بالظبط | Renders one warehouse code row inside an alert detail —
+        matching the exact same layout used in the Warehouse Stockout tab."""
+        dts_txt_wh = f"{r['days_to_stockout']} يوم" if r["days_to_stockout"] is not None else "—"
+        c1_wh, c2_wh = st.columns([1, 5])
+        with c1_wh:
+            show_img(r["img"], 55)
+        with c2_wh:
+            st.markdown(
+                f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ كود: {r["code"]}</span> '
+                f'<span class="tacweed-badge" style="background:{r["color"]}22;color:{r["color"]};border:1px solid {r["color"]}55;">{r["status"]}</span>',
+                unsafe_allow_html=True)
+            st.markdown(
+                f"📦 **الكمية المتوفرة:** {r['qty']:,.0f} &nbsp;|&nbsp; "
+                f"📉 **معدل السحب اليومي:** {r['daily_draw']:g} &nbsp;|&nbsp; "
+                f"⏳ **نفاد خلال:** {dts_txt_wh}")
+            if r["reorder_in"] is not None:
+                rin_wh = r["reorder_in"]
+                rin_txt_wh = f"اليوم أو فات ({rin_wh})" if rin_wh <= 0 else f"{rin_wh} يوم"
+                st.markdown(f"🗓️ **الأيام المتبقية لموعد الطلب:** {rin_txt_wh}")
+            if r["suggested_qty"] > 0:
+                st.markdown(f"💡 **الكمية المقترحة للطلب:** {r['suggested_qty']:,}")
+            st.caption(", ".join(r["skus"]) if r["skus"] else "—")
+        st.divider()
+
+    wh_order_now_rows = sorted(
+        [r for r in wh_urgent_rows_dash if "🚨" in r["status"]], key=lambda r: -r["daily_draw"])
+    wh_reorder_soon_rows = sorted(
+        [r for r in wh_urgent_rows_dash if "🟠" in r["status"]], key=lambda r: -r["daily_draw"])
+
+    with st.expander(f"🚨 عرض أكواد مستودع محتاجة طلب الآن ({len(wh_order_now_rows):,}) | Show warehouse codes to order now"):
+        st.caption("ℹ️ مرتبة من الأعلى معدل سحب (مبيعات) للأقل — الكود الأكثر بيعاً يظهر أولاً | Sorted by daily draw rate (highest → lowest) — the best-selling code appears first")
+        if wh_order_now_rows:
+            df_wh1 = pd.DataFrame([{
+                "الكود | Code": r["code"], "الكمية المتوفرة | Qty": r["qty"],
+                "معدل السحب اليومي | Daily Draw": r["daily_draw"],
+                "الكمية المقترحة | Suggested Qty": r["suggested_qty"],
+            } for r in wh_order_now_rows])
+            dl_btn(df_wh1, "alert_wh_order_now", key=f"dl_alert_wh_now_td_{key_suffix}")
+            for r in wh_order_now_rows:
+                _render_wh_alert_row(r)
+        else:
+            st.caption("لا توجد أكواد مستودع محتاجة طلب الآن حالياً")
+
+    with st.expander(f"🟠 عرض أكواد مستودع قرب موعد الطلب ({len(wh_reorder_soon_rows):,}) | Show warehouse codes reordering soon"):
+        st.caption("ℹ️ مرتبة من الأعلى معدل سحب (مبيعات) للأقل — الكود الأكثر بيعاً يظهر أولاً | Sorted by daily draw rate (highest → lowest) — the best-selling code appears first")
+        if wh_reorder_soon_rows:
+            df_wh2 = pd.DataFrame([{
+                "الكود | Code": r["code"], "الكمية المتوفرة | Qty": r["qty"],
+                "معدل السحب اليومي | Daily Draw": r["daily_draw"],
+                "الأيام المتبقية لموعد الطلب | Days to Reorder": r["reorder_in"],
+            } for r in wh_reorder_soon_rows])
+            dl_btn(df_wh2, "alert_wh_reorder_soon", key=f"dl_alert_wh_soon_td_{key_suffix}")
+            for r in wh_reorder_soon_rows:
+                _render_wh_alert_row(r)
+        else:
+            st.caption("لا توجد أكواد مستودع قرب موعد الطلب حالياً")
+
     st.write("")
 
     # ── كارت أعلى SKU مع صورة | Top SKU card with image ──
