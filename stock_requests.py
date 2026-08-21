@@ -11,6 +11,27 @@ import gspread.exceptions
 
 st.set_page_config(page_title="🏢 عالم الرشاقة للتجارة | Fitness World Trading", page_icon="🏢", layout="wide")
 
+# ══ منع إيماءة "اسحب للرجوع" (swipe-back) من متصفح الموبايل | Prevent the
+#    mobile browser's own edge swipe-back/forward gesture ══
+# لمس/سحب قريب من حافة الشاشة (زي حافة القايمة الجانبية) بيخلي المتصفح يفسّرها
+# كإيماءة "ارجع للصفحة اللي قبلها"، فبيعرض لمحة سريعة من صفحة تانية (شكلها شبه
+# صفحتنا لأنها نفس الصفحة بحالة قبل كده) قبل م يرجع — وده اللي كان حاسس إنه
+# "قفزة" بتغطي فورم الدخول. الإيماءة دي مالهاش علاقة بالسكريبت بتاعنا، هي جزء
+# من المتصفح نفسه | A tap/drag near the screen edge (like the sidebar's edge)
+# gets read by the mobile browser as a "go back" swipe gesture, which briefly
+# previews another page (looking like ours since it's the same page in an
+# earlier state) before snapping back — that's the "jump" that appeared to
+# cover the login form. This gesture is a browser-level feature, unrelated to
+# our own script.
+st.markdown("""
+<style>
+html, body {
+    overscroll-behavior-x: none;
+    touch-action: pan-y;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ══ قفل القايمة الجانبية تلقائياً على الموبايل لما تدوس على أي حاجة برا | Auto-close
 #    the sidebar on mobile when tapping outside it, instead of only via the toggle
 #    button ══
