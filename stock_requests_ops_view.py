@@ -463,19 +463,46 @@ def get_live_map():
             "stock_xdock_net": _to_int(col(row, "stock_xdock_net")),
             "noon_title": col(row, "noon_title"),
             "noon_status": col(row, "noon_status"),
-            "fulfillment_model": col(row, "fulfillment_model"),
         }
     return m
 
-def is_fbp_sku(sku_up, live_map):
-    """يتحقق هل الـ SKU ده Fulfilled by Partner (FBP) حسب عمود fulfillment_model في تاب LIVE —
-    لو كذلك، يُستبعد من تابي مراجعة المخزون / مراجعة المبيعات لأنه مش مسؤولية المخزون عندنا."""
-    if not live_map:
+def get_fulfillment_model_map():
+    """يرجع {SKU (upper) -> fulfillment_model} من تاب DailyOrders (عمود fulfillment_model لو موجود).
+    بياخد أول قيمة غير فاضية يلاقيها لكل SKU. المفتاح ده بيتستخدم لاستبعاد أي SKU من نوع
+    Fulfilled by Partner (FBP) من تابي مراجعة المخزون / مراجعة المبيعات (بما فيها قسم
+    'مخزون منتهي بالكامل') لأنه مش مسؤولية المخزون عندنا."""
+    data = get_cached(daily_orders_sheet)
+    m = {}
+    if len(data) <= 1:
+        return m
+    header = [h.strip() for h in data[0]]
+    fm_idx = None
+    for ci, h in enumerate(header):
+        if h.strip().lower() == "fulfillment_model":
+            fm_idx = ci
+            break
+    if fm_idx is None:
+        return m
+    for row in data[1:]:
+        if not row:
+            continue
+        sku = row[0].strip() if len(row) > 0 else ""
+        if not sku:
+            continue
+        sku_up = sku.upper()
+        if m.get(sku_up):
+            continue
+        val = row[fm_idx].strip() if len(row) > fm_idx else ""
+        if val:
+            m[sku_up] = val
+    return m
+
+def is_fbp_sku(sku_up, fulfillment_map):
+    """يتحقق هل الـ SKU ده Fulfilled by Partner (FBP) حسب خريطة fulfillment_model
+    (من get_fulfillment_model_map) — لو كذلك، يُستبعد من تابي مراجعة المخزون / مراجعة المبيعات."""
+    if not fulfillment_map:
         return False
-    info = live_map.get(sku_up)
-    if not info:
-        return False
-    val = str(info.get("fulfillment_model", "")).strip().upper()
+    val = str(fulfillment_map.get(sku_up, "")).strip().upper()
     return "FBP" in val or "FULFILLED BY PARTNER" in val
 
 def get_base_price(sku_up, live_map, fallback_price=None):
@@ -1364,12 +1391,12 @@ def compute_stock_sales_rows(target_date, display_dates=None):
     daily_qty = build_daily_orders_map(target_date)
     display_dates = display_dates or [target_date]
     multi_counts = build_daily_orders_counts(display_dates)
-    live_map_css = get_live_map()
+    fulfillment_map_css = get_fulfillment_model_map()
     rows = []
     for sku_up, qty in daily_qty.items():
         if is_sku_only_in_excluded_warehouses(sku_up, excluded_wh):
             continue
-        if is_fbp_sku(sku_up, live_map_css):
+        if is_fbp_sku(sku_up, fulfillment_map_css):
             continue
         info        = inv_map.get(sku_up, {})
         stock       = info.get("total_stock", 0)
@@ -1411,12 +1438,12 @@ def compute_missing_inventory_rows(display_dates):
     —  مخزونها انتهى بالكامل وخرجت من ملف المخزون. تظهر بنفس تفاصيل تابي المراجعة."""
     multi_counts = build_daily_orders_counts(display_dates)
     links_map_local = get_links_map()
-    live_map_cmir = get_live_map()
+    fulfillment_map_cmir = get_fulfillment_model_map()
     rows = []
     for sku_up, day_counts in multi_counts.items():
         if sku_up in inv_map:
             continue
-        if is_fbp_sku(sku_up, live_map_cmir):
+        if is_fbp_sku(sku_up, fulfillment_map_cmir):
             continue
         total_recent = sum(day_counts.values())
         if total_recent <= 0:
@@ -2831,11 +2858,11 @@ with tab10:
         # إضافة المرحلين من تاب المبيعات (محتاج جدولة فقط)
         transferred_from_sales = st.session_state.get("transferred_skus_t14", [])
         existing_skus_in_review = {r["sku_up"] for r in stock_review_rows}
-        live_map_t10_tr = get_live_map()
+        fulfillment_map_t10_tr = get_fulfillment_model_map()
         for tr in transferred_from_sales:
             if is_sku_only_in_excluded_warehouses(tr["sku_up"], excluded_wh):
                 continue
-            if is_fbp_sku(tr["sku_up"], live_map_t10_tr):
+            if is_fbp_sku(tr["sku_up"], fulfillment_map_t10_tr):
                 continue
             if tr["sku_up"] in recent_sched_map_t10_all:
                 continue
