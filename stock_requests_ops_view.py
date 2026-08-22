@@ -478,7 +478,8 @@ def get_fulfillment_model_map():
     header = [h.strip() for h in data[0]]
     fm_idx = None
     for ci, h in enumerate(header):
-        if h.strip().lower() == "fulfillment_model":
+        h_norm = h.strip().lower().replace(" ", "_")
+        if h_norm == "fulfillment_model":
             fm_idx = ci
             break
     if fm_idx is None:
