@@ -1499,16 +1499,23 @@ def render_recent_expired_note(sku, days_back=4):
         f'Was scheduled but expired</span>',
         unsafe_allow_html=True)
 
-def get_recent_schedule_rows(days_back=4):
-    """يرجع dict: sku_upper -> أحدث سجل جدولة (من Scheduled/Check/Expired) وقع تاريخ جدولته
-    خلال آخر days_back يوم (يعني: أمس/أول أمس/أول أول أمس/قبل 4 أيام).
+def get_recent_schedule_rows(days_back=4, include_expired=True):
+    """يرجع dict: sku_upper -> أحدث سجل جدولة (من Scheduled/Check، وكمان Expired لو
+    include_expired=True) وقع تاريخ جدولته خلال آخر days_back يوم (يعني: أمس/أول
+    أمس/أول أول أمس/قبل 4 أيام).
     الهدف: الـ SKU ده لسه في فترة انتظار وصول المخزون بعد الجدولة — حتى لو الجدولة
-    خلاص اتنقلت لتاب Expired — فلازم يفضل ظاهر في تابات المراجعة عشان محدش يطلبه تاني بالغلط."""
+    خلاص اتنقلت لتاب Expired — فلازم يفضل ظاهر في تابات المراجعة عشان محدش يطلبه تاني بالغلط.
+    ملحوظة مهمة: include_expired=False بيستخدم في قرار "استبعاد الصنف من مراجعة
+    المخزون/المبيعات" — لأن جدولة Expired معناها إنها فعلاً ماوصلتش ولسه محتاجة
+    جدولة تانية، فمينفعش تستخدم كسبب لإخفاء الصنف من المراجعة. الاستخدام بـ
+    include_expired=True (الافتراضي) لسكشن العرض الإعلامي 'مجدولة خلال آخر 4 أيام'
+    اللي غرضه إظهار كل حاجة اتحركت مؤخرًا (حتى المنتهية) للمعلومية بس."""
     cutoff = datetime.now().date() - timedelta(days=days_back)
     today_ = datetime.now().date()
     src_label_map = {"Scheduled": "الجدولة | Scheduled", "Check": "تشييك | Check", "Expired": "منتهية | Expired"}
+    sheet_keys = ("Scheduled", "Check", "Expired") if include_expired else ("Scheduled", "Check")
     by_sku = {}
-    for sheet_key in ("Scheduled", "Check", "Expired"):
+    for sheet_key in sheet_keys:
         data = get_scheduled_normalized() if sheet_key == "Scheduled" else get_cached(sheets[sheet_key])
         if len(data) <= 1:
             continue
@@ -2838,9 +2845,14 @@ with tab10:
         st.caption(f"📅 بيانات يوم | Data for: **{d1.strftime('%Y-%m-%d')}** (أمس | yesterday) — التنبيه نفسه مبني على أمس فقط، والأيام التانية للعرض فقط | Alert itself is based on yesterday only; the other days are for display")
 
         delay_days = int(load_settings().get("schedule_delay_days","3") or 3)
-        # SKUs ليها جدولة (أو جدولة منتهية) خلال آخر 4 أيام ولسه في فترة الوصول —
-        # دي أموره تمام بالفعل، فمينفعش تظهر في مراجعة المخزون خالص
-        recent_sched_map_t10_all = get_recent_schedule_rows(days_back=4)
+        # SKUs ليها جدولة نشطة (Scheduled/Check) خلال آخر 4 أيام ولسه في فترة الوصول —
+        # دي أموره تمام بالفعل، فمينفعش تظهر في مراجعة المخزون خالص. ملحوظة: هنا
+        # include_expired=False عمدًا — جدولة اتنقلت لـ Expired معناها إنها فعلاً
+        # ماوصلتش، فمينفعش تُستخدم كسبب لإخفاء صنف لسه محتاج جدولة تانية فعليًا
+        # (كان بيحصل قبل كده تناقض: البادچ بيقول "محتاج جدولة الآن" والصنف مستبعد
+        # من القايمة في نفس الوقت بسبب جدولة قديمة منتهية). صنف زي ده لسه هيظهر هنا
+        # مع ملاحظة "كانت مجدولة لكن انتهت" (render_recent_expired_note تحت).
+        recent_sched_map_t10_all = get_recent_schedule_rows(days_back=4, include_expired=False)
         all_review_rows = compute_stock_sales_rows(d1, day_dates)
         stock_review_rows = []
         for r in all_review_rows:
@@ -3157,10 +3169,11 @@ with tab13:
         st.caption(f"📅 بيانات يوم | Data for: **{e1.strftime('%Y-%m-%d')}** (أمس | yesterday) — التنبيه نفسه مبني على أمس فقط، والأيام التانية للعرض فقط | Alert itself is based on yesterday only; the other days are for display")
 
         delay_days2 = int(load_settings().get("schedule_delay_days","3") or 3)
-        # SKUs ليها جدولة (أو جدولة منتهية) خلال آخر 4 أيام ولسه في فترة الوصول —
-        # دي أموره تمام بالفعل، فمينفعش تظهر في مراجعة المبيعات خالص (شايفينها بس في سكشن
-        # "مجدولة خلال آخر 4 أيام" تحت)
-        recent_sched_map_t13_all = get_recent_schedule_rows(days_back=4)
+        # نفس المنطق المصحّح في مراجعة المخزون: بنستبعد بس على أساس جدولة نشطة
+        # (Scheduled/Check) خلال آخر 4 أيام — مش جدولة Expired، عشان صنف جدولته
+        # انتهت من غير ما توصل يفضل يظهر ويحتاج مراجعة فعلاً، مش يختفي بالغلط
+        # (شايفينها بس في سكشن "مجدولة خلال آخر 4 أيام" تحت لو لسه نشطة)
+        recent_sched_map_t13_all = get_recent_schedule_rows(days_back=4, include_expired=False)
         # أي SKU ظاهر بالفعل في مراجعة المخزون (تاب 10) مينفعش يتكرر هنا كمان —
         # كل تاب له وظيفة مختلفة والسكو يظهر في تاب واحد بس
         stock_review_skus_t10_for_t13 = {r["sku_up"] for r in stock_review_rows}
