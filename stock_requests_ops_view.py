@@ -1764,8 +1764,16 @@ def compute_transferred_from_sales():
             })
     return result
 
-if "transferred_skus_t14" not in st.session_state:
-    st.session_state["transferred_skus_t14"] = compute_transferred_from_sales()
+# ملحوظة: بيتحسب من كل render (مش متخزن مرة واحدة بس في الجلسة) عشان يفضل
+# متزامن مع نفس الأرقام اللي بتظهر في تاب المبيعات، بدل ما ياخد لقطة من أول
+# ما اتفتحت الجلسة ويفضل عليها لحد ما حد يعمل refresh. الحساب نفسه رخيص —
+# البيانات الخام (DailyOrders/Inventory/Settings) متخزنة بالفعل في get_cached،
+# فمفيش استهلاك إضافي لـ Google Sheets API هنا. | Recomputed every render
+# (not frozen once per session) so it stays in sync with the Sales tab's live
+# numbers instead of showing a stale snapshot from whenever the session first
+# loaded. This is cheap — the raw sheet reads are already cached via
+# get_cached(), so this adds no extra Google Sheets API calls.
+st.session_state["transferred_skus_t14"] = compute_transferred_from_sales()
 
 tabs = st.tabs([
     "📋 الطلبات | Requests",
