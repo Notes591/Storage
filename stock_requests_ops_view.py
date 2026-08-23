@@ -1388,10 +1388,32 @@ def is_sku_only_in_excluded_warehouses(sku_up, excluded_wh):
 
 def compute_stock_sales_rows(target_date, display_dates=None):
     """يحسب لكل SKU ظهر في أوردرز اليوم المحدد نفس مخرجات استعلامي مراجعة مخزون / مراجعة مبيعات.
-    display_dates (اختياري): قائمة تواريخ إضافية تتعرض جنب كل SKU (مثلاً أمس/أول أمس/أول أول أمس)."""
+    display_dates (اختياري): قائمة تواريخ إضافية تتعرض جنب كل SKU (مثلاً أمس/أول أمس/أول أول أمس).
+
+    ⏳ نفاد خلال / 💡 اقتراح الكمية بيتحسبوا هنا بمتوسط المبيع الفعلي في آخر
+    sales_display_days يوم (نفس نافذة الإعداد اللي تاب المبيعات — تاب14 —
+    بيستخدمها)، ومارجعش لـ "مبيع شهري"/30 إلا لو مفيش مبيع فعلي خالص في
+    النافذة دي. قبل كده الدالة كانت بتحسب على "مبيع شهري"/30 بس (رقم شهري
+    ثابت من ملف المخزون)، من غير ما تبص على المبيعات الفعلية الأخيرة، وده
+    كان بيخلي تابي مراجعة المخزون ومراجعة المبيعات (اللي بيستخدموا نفس
+    الدالة دي) يوروا رقم "نفاد خلال" مختلف عن تاب المبيعات لنفس الـ SKU في
+    نفس اللحظة. | Days to stockout / Suggested Qty now use the actual sales
+    average over the last sales_display_days days (same window setting the
+    main app's Sales tab — tab14 — uses), falling back to monthly/30 only
+    when there's no recent actual sales at all. Previously this function
+    used monthly/30 alone, ignoring recent actual sales entirely, which is
+    why Stock Review and Sales Review (both powered by this function) could
+    disagree with the Sales tab for the same SKU at the same moment."""
     daily_qty = build_daily_orders_map(target_date)
     display_dates = display_dates or [target_date]
-    multi_counts = build_daily_orders_counts(display_dates)
+
+    settings_css   = load_settings()
+    sales_days_css = int(settings_css.get("sales_display_days", "7") or 7)
+    today_css      = datetime.now().date()
+    eff_dates_css  = [today_css - timedelta(days=i) for i in range(1, sales_days_css + 1)]
+    all_dates_css  = list({*display_dates, *eff_dates_css})
+    multi_counts   = build_daily_orders_counts(all_dates_css)
+
     fulfillment_map_css = get_fulfillment_model_map()
     rows = []
     for sku_up, qty in daily_qty.items():
@@ -1404,9 +1426,14 @@ def compute_stock_sales_rows(target_date, display_dates=None):
         sales_month = info.get("sales", 0)
         sku_disp    = info.get("sku", sku_up)
         img         = info.get("img", "")
-        threshold_10d = sales_month/30*10
-        stock_alert = (stock - threshold_10d) < 0
-        day_counts = multi_counts.get(sku_up, {dd:0 for dd in display_dates})
+        day_counts  = multi_counts.get(sku_up, {dd: 0 for dd in all_dates_css})
+
+        total_recent_eff = sum(day_counts.get(dd, 0) for dd in eff_dates_css)
+        avg_daily_eff     = (total_recent_eff / sales_days_css) if sales_days_css > 0 else 0
+        effective_avg     = avg_daily_eff if avg_daily_eff > 0 else (sales_month / 30 if sales_month > 0 else 0)
+
+        threshold_10d = effective_avg * 10
+        stock_alert = (effective_avg > 0) and ((stock - threshold_10d) < 0)
 
         # ══ مبيعات أعلى من المعتاد — بمتوسط آخر 3 أيام (مش يوم واحد بس) عشان نقلل
         #    الـ noise من طلبية كبيرة عشوائية في يوم واحد، وبشرط إن الارتفاع
@@ -1422,8 +1449,8 @@ def compute_stock_sales_rows(target_date, display_dates=None):
             and elevated_days >= 2
         )
 
-        suggested_qty = round(sales_month/30*18) if stock_alert else 0
-        days_to_stockout       = round(stock/(sales_month/30)) if sales_month > 0 else 0
+        suggested_qty = round(effective_avg * 18) if (stock_alert and effective_avg > 0) else 0
+        days_to_stockout       = round(stock / effective_avg) if effective_avg > 0 else 0
         days_to_stockout_today = round(stock/abs(qty)) if abs(qty) > 0 else 0
         rows.append({
             "sku": sku_disp, "sku_up": sku_up, "qty": qty, "stock": stock, "sales_month": sales_month,
