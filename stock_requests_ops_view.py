@@ -3294,7 +3294,7 @@ with tab13:
             df_sales = pd.DataFrame([{
                 "SKU": r["sku"], "Yesterday": r["day_counts"].get(e1,0), "Day Before": r["day_counts"].get(e2,0),
                 "3 Days Ago": r["day_counts"].get(e3,0), "Stock": r["stock"], "Monthly Sales": r["sales_month"],
-                "Days to Stockout (Today's Rate)": r["days_to_stockout_today"]
+                "Days to Stockout": r["days_to_stockout"]
             } for r in sales_review_rows])
             c1,c2 = st.columns(2)
             with c1: dl_btn(df_sales,"sales_review")
@@ -3310,7 +3310,7 @@ with tab13:
                         st.markdown(tc_badge_t13, unsafe_allow_html=True)
                     st.markdown(f"📦 **المخزون | Stock:** {r['stock']} &nbsp;|&nbsp; 📈 **مبيع شهري | Monthly:** {r['sales_month']}")
                     st.markdown("🛒 " + render_day_counts_md(r["day_counts"], day_dates2, day_labels2))
-                    st.markdown(f"⚡ **نفاد خلال بيع اليوم | Days to stockout (today's rate):** {r['days_to_stockout_today']} يوم")
+                    st.markdown(f"⏳ **نفاد خلال | Days to stockout:** {r['days_to_stockout']} يوم")
                     st.markdown(f'<span class="status-badge-lg" style="background:{r["_cov_badge_color"]};">{r["_cov_badge_text"]}</span>', unsafe_allow_html=True)
                     if r["sku_up"] in pending_approval_skus_t13:
                         st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
