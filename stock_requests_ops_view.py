@@ -1526,15 +1526,18 @@ def compute_stock_sales_rows(target_date, display_dates=None):
 
 def compute_missing_inventory_rows(display_dates):
     """SKUs ظهرت في الأوردرز خلال آخر كذا يوم (أمس/أول أمس/أول أول أمس) لكن مالهاش سجل في شيت Inventory
-    —  مخزونها انتهى بالكامل وخرجت من ملف المخزون. تظهر بنفس تفاصيل تابي المراجعة."""
-    multi_counts = build_daily_orders_counts(display_dates)
+    —  مخزونها انتهى بالكامل وخرجت من ملف المخزون. تظهر بنفس تفاصيل تابي المراجعة.
+
+    بتستخدم build_daily_orders_counts_fbn (نفس سبب compute_stock_sales_rows فوق) عشان
+    طلبات FBP ماتضخّمش "مبيع شهري تقديري" لسكو اتشحن جزء من طلباته من مخزون الـ Partner
+    مش من المخزون اللي بنراقبه | Uses the FBN-filtered counts (same reasoning as
+    compute_stock_sales_rows above) so FBP orders don't inflate the estimated monthly
+    sales for a SKU that was partly fulfilled from the partner's own stock, not ours."""
+    multi_counts = build_daily_orders_counts_fbn(display_dates)
     links_map_local = get_links_map()
-    fulfillment_map_cmir = get_fulfillment_model_map()
     rows = []
     for sku_up, day_counts in multi_counts.items():
         if sku_up in inv_map:
-            continue
-        if is_fbp_sku(sku_up, fulfillment_map_cmir):
             continue
         total_recent = sum(day_counts.values())
         if total_recent <= 0:
