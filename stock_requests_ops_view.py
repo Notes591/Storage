@@ -1198,8 +1198,15 @@ def confirm_clear(key, sheet, label=""):
 # ══ مراجعة المخزون / مراجعة المبيعات — نفس منطق استعلامي Access ══
 # ══════════════════════════════════════════════
 def build_daily_orders_map(target_date):
-    """يرجع dict: sku_upper -> عدد صفوف الأوردرز لليوم المحدد (= Sum(QTY) بافتراض كل صف = قطعة واحدة)."""
+    """يرجع dict: sku_upper -> عدد صفوف الأوردرز لليوم المحدد (= Sum(QTY) بافتراض كل صف = قطعة واحدة).
+    بيستبعد صفوف FBP (Fulfilled by Partner) — نفس سبب build_daily_orders_counts_fbn تحت،
+    عشان مينفعش طلب اتشحن من مخزون الـ Partner يفتح مراجعة مخزون على مخزون الـ FBN اللي احنا
+    مش شايلينه أصلاً | Excludes FBP (Fulfilled by Partner) rows too — same reasoning as
+    build_daily_orders_counts_fbn below, so a partner-fulfilled order can't trigger a stock
+    review against FBN stock it never touched."""
     data = get_cached(daily_orders_sheet)
+    hdr = data[0] if data else []
+    fulfillment_col_idx_bdm = _find_fulfillment_col_idx(hdr)
     counts = {}
     if len(data) <= 1:
         return counts
@@ -1207,6 +1214,8 @@ def build_daily_orders_map(target_date):
         while len(row) < 2: row.append("")
         sku, ts = row[0].strip(), row[1].strip()
         if not sku or not ts:
+            continue
+        if _row_is_fbp(row, fulfillment_col_idx_bdm):
             continue
         d = parse_excel_date(ts)
         if d and d.date() == target_date:
@@ -1225,6 +1234,60 @@ def build_daily_orders_counts(dates):
         while len(row) < 2: row.append("")
         sku, ts = row[0].strip(), row[1].strip()
         if not sku or not ts:
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() in dates_set:
+            sku_up = sku.upper()
+            if sku_up not in counts:
+                counts[sku_up] = {dd: 0 for dd in dates}
+            counts[sku_up][d.date()] += 1
+    return counts
+
+def _find_fulfillment_col_idx(header):
+    for ci, h in enumerate(header):
+        if str(h).strip().lower() in ("fulfillment model", "fulfillment_model", "fulfillment"):
+            return ci
+    return None
+
+def _row_is_fbp(row, fulfillment_col_idx):
+    """يرجع True لو الصف (الطلب) ده Fulfillment Model بتاعه FBP (Fulfilled by
+    Partner) — يعني اتشحن من مخزون الـ Partner نفسه مش من المخزون اللي بنراقبه
+    هنا. نفس منطق _row_is_fbb في البرنامج الرئيسي بالظبط. | Same per-row check
+    as the main app: True when this order's Fulfillment Model is FBP
+    (Fulfilled by Partner) — shipped from the partner's own stock, not the
+    warehouse stock this app tracks."""
+    if fulfillment_col_idx is None or len(row) <= fulfillment_col_idx:
+        return False
+    fulfillment_val = str(row[fulfillment_col_idx]).strip().upper()
+    return "FBP" in fulfillment_val or "PARTNER" in fulfillment_val
+
+def build_daily_orders_counts_fbn(dates):
+    """نفس build_daily_orders_counts بالظبط، لكن بيستبعد أي صف (طلب) واحد
+    Fulfillment Model بتاعه FBP — حتى لو نفس الـ SKU عنده طلبات تانية FBN.
+    ده الفرق عن is_fbp_sku() اللي بتاخد قرار واحد على مستوى الـ SKU كله (أول
+    قيمة تلاقيها)، فلو SKU مختلط (بعض طلباته FBN وبعضها FBP)، is_fbp_sku()
+    ممكن ميستبعدوش خالص فتفضل طلبات الـ FBP بتتحسب غلط ضمن معدل استهلاك
+    مخزون الـ FBN. الدالة دي بتفلتر على مستوى كل صف لوحده عشان تطابق بالظبط
+    نفس منطق تاب المبيعات (تاب14) في البرنامج الرئيسي. | Same as
+    build_daily_orders_counts, but excludes any single FBP-fulfilled order
+    row — even when the same SKU also has FBN orders. This differs from
+    is_fbp_sku(), which makes one SKU-level decision from the first value it
+    finds, so a SKU with a mix of FBN/FBP orders might not get excluded at
+    all, leaving its FBP orders wrongly counted against FBN stock depletion.
+    This row-level filter matches the main app's Sales tab (tab14) exactly."""
+    data = get_cached(daily_orders_sheet)
+    dates_set = set(dates)
+    counts = {}
+    if len(data) <= 1:
+        return counts
+    hdr = data[0] if data else []
+    fulfillment_col_idx = _find_fulfillment_col_idx(hdr)
+    for row in data[1:]:
+        while len(row) < 2: row.append("")
+        sku, ts = row[0].strip(), row[1].strip()
+        if not sku or not ts:
+            continue
+        if _row_is_fbp(row, fulfillment_col_idx):
             continue
         d = parse_excel_date(ts)
         if d and d.date() in dates_set:
@@ -1412,7 +1475,7 @@ def compute_stock_sales_rows(target_date, display_dates=None):
     today_css      = datetime.now().date()
     eff_dates_css  = [today_css - timedelta(days=i) for i in range(1, sales_days_css + 1)]
     all_dates_css  = list({*display_dates, *eff_dates_css})
-    multi_counts   = build_daily_orders_counts(all_dates_css)
+    multi_counts   = build_daily_orders_counts_fbn(all_dates_css)
 
     fulfillment_map_css = get_fulfillment_model_map()
     rows = []
@@ -1758,7 +1821,7 @@ def compute_transferred_from_sales():
     cov_days_now    = int(settings_now.get("schedule_coverage_days","15") or 15)
     today_now = datetime.now().date()
     dates_now = [today_now - timedelta(days=i) for i in range(1, sales_days_now + 1)]
-    counts_now  = build_daily_orders_counts(dates_now)
+    counts_now  = build_daily_orders_counts_fbn(dates_now)
     result = []
     for sku_up, info in inv_map.items():
         stock        = info.get("total_stock", 0)
