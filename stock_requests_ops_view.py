@@ -1514,7 +1514,8 @@ def compute_stock_sales_rows(target_date, display_dates=None):
 
         suggested_qty = round(effective_avg * 18) if (stock_alert and effective_avg > 0) else 0
         days_to_stockout       = round(stock / effective_avg) if effective_avg > 0 else 0
-        days_to_stockout_today = round(stock/abs(qty)) if abs(qty) > 0 else 0
+        # نفاد خلال بمعدل الشهري (مش بيع أمس بس) — daily_avg_normal = sales_month / 30
+        days_to_stockout_today = round(stock / daily_avg_normal) if daily_avg_normal > 0 else 0
         rows.append({
             "sku": sku_disp, "sku_up": sku_up, "qty": qty, "stock": stock, "sales_month": sales_month,
             "img": img, "stock_alert": stock_alert, "sales_alert": sales_alert,
