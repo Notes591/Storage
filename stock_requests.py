@@ -3529,8 +3529,10 @@ def _render_ads_performance_tab():
             f'{delta_html}</div>'
         )
 
-    # ── ربحية الإعلانات لكل SKU (نفس منطق تاب المبيعات: صافي الربح الكلي من طلبات الإعلان
-    #    مقابل إجمالي المصروف عليه) — عشان تظهر في التنبيهات السريعة تحت ──
+    # ── ربحية الإعلانات لكل SKU (نفس منطق تاب المبيعات: صافي الربح الفعلي بعد خصم
+    #    تكلفة المنتج من طلبات الإعلان، مقابل إجمالي المصروف عليه) — عشان تظهر في
+    #    التنبيهات السريعة تحت | Same logic as the Sales tab: actual net profit
+    #    after subtracting product cost from ad orders, vs total ad spend ──
     ads_map_dash = get_ads_map()
     com_map_dash = get_com_map()
 
@@ -3569,9 +3571,20 @@ def _render_ads_performance_tab():
         if latest_price_ad is None:
             continue
         _, net_tax_ad = compute_net_price_after_fees(latest_price_ad, com_info_ad)
+        # ── تكلفة الوحدة من تاب التكويد (لو مسجلة) وصافي الربح الفعلي بعدها، زي
+        #    بالظبط منطق تاب المبيعات — لو التكلفة مش مسجلة بتتحط صفر مع تنبيه،
+        #    بدل ما تختفي بصمت من الحساب | Unit cost from the Tacweed sheet (if
+        #    recorded) and the actual net profit after subtracting it — same
+        #    logic as the Sales tab. Missing cost defaults to zero with a flag,
+        #    instead of silently dropping out of the calculation ──
+        cost_ad = get_sku_cost(sku_up_ad)
+        cost_missing_ad = cost_ad is None
+        if cost_missing_ad:
+            cost_ad = 0.0
+        net_profit_ad = net_tax_ad - cost_ad
         total_spends_ad = sum(a["spends"] for a in ads_entries_ad)
         total_orders_ad = sum(a["orders"] for a in ads_entries_ad)
-        total_net_ad = total_orders_ad * net_tax_ad
+        total_net_ad = total_orders_ad * net_profit_ad
         result_ad = total_net_ad - total_spends_ad
         inv_info_ad = inv_map.get(sku_up_ad, {})
         # الصورة من المخزون لو الـ SKU موجود فيه، وإلا من شيت links n مباشرة |
@@ -3581,7 +3594,8 @@ def _render_ads_performance_tab():
         entry_ad = {"sku_up": sku_up_ad, "sku": inv_info_ad.get("sku", sku_up_ad),
                     "img": img_ad,
                     "spends": total_spends_ad, "orders": total_orders_ad,
-                    "net_total": total_net_ad, "result": result_ad}
+                    "net_total": total_net_ad, "result": result_ad,
+                    "cost": cost_ad, "cost_missing": cost_missing_ad}
         if total_orders_ad <= 0 or result_ad < 0:
             ads_loss_rows_ap.append(entry_ad)
         else:
@@ -3618,22 +3632,33 @@ def _render_ads_performance_tab():
                 st.markdown(badges_html, unsafe_allow_html=True)
 
     def _ads_insight_html(r):
+        # ── سطر التكلفة + تنبيه لو غير مسجلة | Cost line + warning if unrecorded ──
+        cost_note_ad = f' &nbsp;|&nbsp; 📦 التكلفة | Cost: <b>{r["cost"]:,.2f}</b> ريال'
+        missing_note_ad = ""
+        if r.get("cost_missing"):
+            missing_note_ad = (' <span style="color:#fbbf24;">⚠️ تكلفة المنتج غير مسجلة '
+                                '(تاب التكويد) — اعتُبرت صفر</span>')
         if r["orders"] <= 0:
             return (f'<span style="color:#f87171;font-size:12px;font-weight:700;">🚨 مفدتش لحد دلوقتي: '
-                    f'اتصرف {r["spends"]:,.2f} ريال ولسه ما جابش أي طلبات فعلية</span>')
+                    f'اتصرف {r["spends"]:,.2f} ريال ولسه ما جابش أي طلبات فعلية</span>'
+                    f'{cost_note_ad}{missing_note_ad}')
         if r["result"] >= 0:
             return (f'<span style="color:#4ade80;font-size:12px;font-weight:700;">🎯 الاعلان مربح: '
-                    f'عدد طلبات الاعلان {r["orders"]:,.0f} طلب بصافي ربح إجمالي {r["net_total"]:,.2f} ريال مقابل '
-                    f'{r["spends"]:,.2f} ريال مدفوع — حقق {r["result"]:,.2f} ريال 👌</span>')
+                    f'عدد طلبات الاعلان {r["orders"]:,.0f} طلب بصافي ربح فعلي بعد التكلفة إجمالي {r["net_total"]:,.2f} ريال مقابل '
+                    f'{r["spends"]:,.2f} ريال مدفوع — حقق {r["result"]:,.2f} ريال 👌</span>'
+                    f'{cost_note_ad}{missing_note_ad}')
         return (f'<span style="color:#f87171;font-size:12px;font-weight:700;">🚨 الاعلان غير مربح: '
-                f'مدفوع {r["spends"]:,.2f} ريال، لكن صافي الربح من {r["orders"]:,.0f} طلب بس {r["net_total"]:,.2f} ريال — '
-                f'خسران {abs(r["result"]):,.2f} ريال إجمالي</span>')
+                f'مدفوع {r["spends"]:,.2f} ريال، لكن صافي الربح الفعلي بعد التكلفة من {r["orders"]:,.0f} طلب بس {r["net_total"]:,.2f} ريال — '
+                f'خسران {abs(r["result"]):,.2f} ريال إجمالي</span>'
+                f'{cost_note_ad}{missing_note_ad}')
 
     with st.expander(f"🎯 عرض منتجات ربحانة من الإعلانات ({len(ads_profit_rows_ap):,}) | Show profitable-ads SKUs"):
         if ads_profit_rows_ap:
             df_al5 = pd.DataFrame([{
                 "SKU": r["sku"], "طلبات الإعلان | Ad Orders": r["orders"],
-                "المصروف | Spends": round(r["spends"], 2), "صافي الربح | Net Total": round(r["net_total"], 2),
+                "المصروف | Spends": round(r["spends"], 2),
+                "التكلفة | Cost": round(r["cost"], 2),
+                "صافي الربح بعد التكلفة | Net Total After Cost": round(r["net_total"], 2),
                 "النتيجة | Result": round(r["result"], 2),
             } for r in ads_profit_rows_ap])
             dl_btn(df_al5, "alert_ads_profit", key="dl_alert_ads_profit_ap")
@@ -3646,7 +3671,9 @@ def _render_ads_performance_tab():
         if ads_loss_rows_ap:
             df_al6 = pd.DataFrame([{
                 "SKU": r["sku"], "طلبات الإعلان | Ad Orders": r["orders"],
-                "المصروف | Spends": round(r["spends"], 2), "صافي الربح | Net Total": round(r["net_total"], 2),
+                "المصروف | Spends": round(r["spends"], 2),
+                "التكلفة | Cost": round(r["cost"], 2),
+                "صافي الربح بعد التكلفة | Net Total After Cost": round(r["net_total"], 2),
                 "النتيجة | Result": round(r["result"], 2),
             } for r in ads_loss_rows_ap])
             dl_btn(df_al6, "alert_ads_loss", key="dl_alert_ads_loss_ap")
