@@ -98,10 +98,16 @@ def get_or_create_worksheet(tab, headers, retries=5, delay=2):
     for attempt in range(retries):
         try:
             ws = ss.worksheet(tab)
-            # sync header: أضيف الأعمدة الجديدة لو ناقصة
+            # sync header: أضيف الأعمدة الجديدة لو ناقصة فعلاً — المقارنة بتتجاهل حالة
+            # الحروف والمسافات الزيادة، عشان عمود موجود فعلاً (زي "Cost") متتضافش نسخة
+            # منه تاني في كل جلسة جديدة بسبب فرق بسيط في التنسيق | Header-sync check
+            # ignores case/extra whitespace, so a column that already exists (e.g. "Cost")
+            # doesn't get a duplicate appended every new session just from a formatting
+            # mismatch.
             try:
                 existing_hdr = ws.row_values(1)
-                missing = [h for h in headers if h not in existing_hdr]
+                existing_hdr_norm = {str(h).strip().lower() for h in existing_hdr}
+                missing = [h for h in headers if h.strip().lower() not in existing_hdr_norm]
                 if missing:
                     for h in missing:
                         ws.append_cols([[h]], value_input_option="RAW")
