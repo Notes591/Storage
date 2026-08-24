@@ -253,6 +253,25 @@ def clear_cache(sheet):
     if key in st.session_state:
         del st.session_state[key]
 
+# ══ كاش لأي "خريطة مشتقة" من شيت معيّن (زي SKU -> كود، أو كود -> كمية) — بيتم إعادة
+#    بنائها بس أول مرة بعد ما بيانات الشيت الخام تتغيّر (بعد clear_cache)، مش في كل مرة
+#    الدالة بتتنادى. من غير الكاش ده، أي دالة زي دي بتتنادى جوه loop بيلف على كل الـ SKUs
+#    المعروضة (زي تاب المبيعات) كانت بتعيد بناء نفس الخريطة من الصفر مرة لكل SKU، وده
+#    اللي بيسبب بطء ملحوظ لما يزيد عدد الـ SKUs | Cache for any "derived map" built from a
+#    sheet's raw rows. It's only rebuilt the first time after the underlying raw data
+#    changes (after clear_cache), not on every call. Without this, a map-building function
+#    called inside a per-SKU loop (like the Sales tab) would re-scan the whole sheet from
+#    scratch for every single SKU rendered — the actual cause of the slowdown.
+def _memo_from_sheet(sheet, cache_key, builder):
+    raw = get_cached(sheet)
+    src_key = f"{cache_key}__src"
+    if src_key in st.session_state and st.session_state[src_key] is raw:
+        return st.session_state[cache_key]
+    result = builder(raw)
+    st.session_state[cache_key] = result
+    st.session_state[src_key] = raw
+    return result
+
 # ══ إعدادات ══
 def load_settings():
     data = get_cached(settings_sheet)
@@ -371,34 +390,46 @@ def get_links_map():
     return m
 
 # ══ tacweed data (SKU -> {code, cost}) — مبني على أسماء الأعمدة (مش ترتيبها) عشان يفضل
-#    شغال حتى لو اتغير ترتيب الأعمدة في الشيت | Built from column names (not position),
-#    so it keeps working even if the sheet's column order changes ══
+#    شغال حتى لو اتغير ترتيب الأعمدة في الشيت، ومكاش بـ _memo_from_sheet عشان متتبنيش
+#    الخريطة من الصفر لكل SKU بيتعرض | Built from column names (not position), so it keeps
+#    working even if the sheet's column order changes, and cached via _memo_from_sheet so
+#    it isn't rebuilt from scratch for every displayed SKU ══
+def _build_tacweed_bundle(raw):
+    data_map, code_map, cost_map, code_cost_map = {}, {}, {}, {}
+    if raw and len(raw) >= 2:
+        header = [h.strip() for h in raw[0]]
+        idx = {h: i for i, h in enumerate(header)}
+        def col(row, *names):
+            for name in names:
+                i = idx.get(name)
+                if i is not None and i < len(row):
+                    return row[i]
+            return ""
+        for row in raw[1:]:
+            sku_raw = col(row, "SKU", "Sku", "sku")
+            if not str(sku_raw).strip():
+                continue
+            sku_up = str(sku_raw).strip().upper()
+            code = str(col(row, "Code01", "code01", "Code 01")).strip()
+            cost = _f2_or_none(col(row, "Cost", "cost", "التكلفة", "تكلفة"))
+            data_map[sku_up] = {"code": code, "cost": cost}
+            if code:
+                code_map[sku_up] = code
+            if cost is not None:
+                cost_map[sku_up] = cost
+            if code and cost is not None and code not in code_cost_map:
+                code_cost_map[code] = cost
+    return {"data": data_map, "code_map": code_map, "cost_map": cost_map, "code_cost_map": code_cost_map}
+
+def _get_tacweed_bundle():
+    return _memo_from_sheet(tacweed_sheet, "tacweed_bundle", _build_tacweed_bundle)
+
 def get_tacweed_data():
-    data = get_cached(tacweed_sheet)
-    if not data or len(data) < 2:
-        return {}
-    header = [h.strip() for h in data[0]]
-    idx = {h: i for i, h in enumerate(header)}
-    def col(row, *names):
-        for name in names:
-            i = idx.get(name)
-            if i is not None and i < len(row):
-                return row[i]
-        return ""
-    m = {}
-    for row in data[1:]:
-        sku_raw = col(row, "SKU", "Sku", "sku")
-        if not str(sku_raw).strip():
-            continue
-        sku_up = str(sku_raw).strip().upper()
-        code = str(col(row, "Code01", "code01", "Code 01")).strip()
-        cost = _f2_or_none(col(row, "Cost", "cost", "التكلفة", "تكلفة"))
-        m[sku_up] = {"code": code, "cost": cost}
-    return m
+    return _get_tacweed_bundle()["data"]
 
 # ══ tacweed map (SKU -> الكود 01) ══
 def get_tacweed_map():
-    return {sku_up: info["code"] for sku_up, info in get_tacweed_data().items() if info.get("code")}
+    return _get_tacweed_bundle()["code_map"]
 
 def get_tacweed_reverse_map():
     """يرجع dict: كود -> قائمة SKUs المرتبطة بيه (عكس get_tacweed_map) — لأن نفس
@@ -413,31 +444,27 @@ def get_tacweed_reverse_map():
 def get_tacweed_cost_map():
     """SKU (upper) -> تكلفة مسجلة مباشرة على نفس صف الـ SKU (لو موجودة) | SKU -> cost
     recorded directly on that SKU's own row (if present)."""
-    return {sku_up: info["cost"] for sku_up, info in get_tacweed_data().items() if info.get("cost") is not None}
+    return _get_tacweed_bundle()["cost_map"]
 
 def get_tacweed_code_cost_map():
     """كود01 -> تكلفة (بتاخد أول تكلفة مسجلة لأي SKU مرتبط بالكود ده) | Code01 -> cost
     (first recorded cost among the SKUs sharing that code)."""
-    m = {}
-    for info in get_tacweed_data().values():
-        code, cost = info.get("code"), info.get("cost")
-        if code and cost is not None and code not in m:
-            m[code] = cost
-    return m
+    return _get_tacweed_bundle()["code_cost_map"]
 
 def get_sku_cost(sku_up):
     """يرجع تكلفة الوحدة لهذا الـ SKU: تكلفة مسجلة على نفس الـ SKU في تاب التكويد أولاً،
     ولو مش موجودة بيرجع لتكلفة الكود01 المرتبط بيه (لو أي SKU تاني بنفس الكود ليه تكلفة
     مسجلة) — وإلا بيرجع None | Unit cost for this SKU: a cost recorded directly against
     the SKU first, falling back to the cost recorded for its shared Code01, else None."""
-    info = get_tacweed_data().get(sku_up)
+    bundle = _get_tacweed_bundle()
+    info = bundle["data"].get(sku_up)
     if not info:
         return None
     if info.get("cost") is not None:
         return info["cost"]
     code = info.get("code")
     if code:
-        return get_tacweed_code_cost_map().get(code)
+        return bundle["code_cost_map"].get(code)
     return None
 
 def big_note_html(text):
@@ -707,14 +734,18 @@ def render_tacweed_upload(key_prefix):
             except Exception as e:
                 st.error(f"❌ {e}")
 
-# ══ warehouse stock map (Code -> Quantity) — مربوط بالكود 01 من التكويد ══
-def get_warehouse_stock_map():
-    data = get_cached(warehouse_stock_sheet)
+# ══ warehouse stock map (Code -> Quantity) — مربوط بالكود 01 من التكويد، ومكاش برضه
+#    عشان مبيتبنيش من الصفر لكل SKU بيتعرض | Code -> Quantity, tied to the Tacweed
+#    Code01, and cached too so it isn't rebuilt from scratch for every displayed SKU ══
+def _build_warehouse_stock_map(raw):
     m = {}
-    for row in data[1:]:
+    for row in raw[1:]:
         if len(row) >= 2 and row[0].strip():
             m[row[0].strip()] = row[1].strip()
     return m
+
+def get_warehouse_stock_map():
+    return _memo_from_sheet(warehouse_stock_sheet, "wh_stock_map", _build_warehouse_stock_map)
 
 def tacweed_cost_badge_html(sku_up):
     """شارة صغيرة لتكلفة الوحدة لهذا الـ SKU (مباشرة من صفه في تاب التكويد، أو عن طريق
