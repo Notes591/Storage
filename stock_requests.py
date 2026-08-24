@@ -663,14 +663,17 @@ def render_price_profit_block_t14(r, com_map_t14, live_map_t14, sales_dates, ads
 
     # ── تكلفة الوحدة من تاب التكويد (لو مسجلة) وصافي الربح الفعلي بعدها | Unit
     #    cost from the Tacweed sheet (if recorded) and the actual net profit
-    #    after subtracting it ──
+    #    after subtracting it — لو التكلفة مش مسجلة بتتحط صفر مع تنبيه، بدل ما
+    #    سطر التكلفة يختفي بصمت زي قبل كده | if cost isn't recorded it defaults
+    #    to zero with a warning, instead of the cost line silently disappearing ──
     cost_t14 = get_sku_cost(r["sku_up"])
-    net_profit_t14 = (net_tax_t14 - cost_t14) if cost_t14 is not None else None
-    # الرقم المستخدم في مقارنة أداء الإعلان: صافي الربح الفعلي بعد التكلفة لو
-    # متوفرة، وإلا الصافي بعد الضريبة بس (زي قبل كده) | Figure used for the ad
-    # ROI comparison: actual net profit after cost when available, else just
-    # the after-tax net (same as before).
-    profit_basis_t14 = net_profit_t14 if net_profit_t14 is not None else net_tax_t14
+    cost_missing_t14 = cost_t14 is None
+    if cost_missing_t14:
+        cost_t14 = 0.0
+    net_profit_t14 = net_tax_t14 - cost_t14
+    # الرقم المستخدم في مقارنة أداء الإعلان: صافي الربح الفعلي بعد التكلفة | Figure
+    # used for the ad ROI comparison: the actual net profit after cost.
+    profit_basis_t14 = net_profit_t14
 
     # ── فلوس الإعلان دي مفديه ولا لأ؟ | Did the ad spend pay off overall? ──
     # مقارنة إجمالية: صافي الربح الكلي من الطلبات اللي جابها الإعلان مقابل
@@ -709,22 +712,22 @@ def render_price_profit_block_t14(r, com_map_t14, live_map_t14, sales_dates, ads
         offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض (معلومة فقط، غير مستخدم في الحسابات): <b>{offer_price_t14:,.2f}</b> ريال'
     price_label_t14 = "سعر البيع الأساسي" if price_from_live_t14 else "سعر البيع (سعر العرض)"
 
-    cost_line_t14 = ""
-    if cost_t14 is not None:
-        profit_color_t14 = "#4ade80" if net_profit_t14 >= 0 else "#f87171"
-        cost_line_t14 = (
-            f'<br><span style="color:#94a3b8;font-size:13px;">📦 التكلفة | Cost: <b>{cost_t14:,.2f}</b> ريال</span>'
-            f'<br><span style="color:{profit_color_t14};font-size:14px;font-weight:bold;">🧮 صافي الربح الفعلي بعد التكلفة | Net Profit After Cost: {net_profit_t14:,.2f} ريال</span>'
-        )
+    profit_color_t14 = "#4ade80" if net_profit_t14 >= 0 else "#f87171"
+    cost_line_t14 = (
+        f'<br><span style="color:#94a3b8;font-size:13px;">📦 التكلفة | Cost: <b>{cost_t14:,.2f}</b> ريال</span>'
+        f'<br><span style="color:{profit_color_t14};font-size:14px;font-weight:bold;">🧮 صافي الربح الفعلي بعد التكلفة | Net Profit After Cost: {net_profit_t14:,.2f} ريال</span>'
+    )
 
-    # ── تنبيه واضح لو أي جزء من البيانات (سعر أو عمولة/توصيل) كان ناقص واتحط صفر
-    #    بدلاً منه | Visible warning when price or COM data was missing and defaulted
-    #    to zero ──
+    # ── تنبيه واضح لو أي جزء من البيانات (سعر / عمولة وتوصيل / تكلفة المنتج) كان
+    #    ناقص واتحط صفر بدلاً منه | Visible warning when price, COM data, or product
+    #    cost was missing and defaulted to zero ──
     missing_parts_t14 = []
     if price_missing_t14:
         missing_parts_t14.append("سعر بيع (LIVE/الطلبات)")
     if com_missing_t14:
         missing_parts_t14.append("عمولة وتوصيل (تاب COM)")
+    if cost_missing_t14:
+        missing_parts_t14.append("تكلفة المنتج (تاب التكويد)")
     missing_note_t14 = ""
     if missing_parts_t14:
         missing_note_t14 = (
@@ -4041,10 +4044,14 @@ if st.session_state["nav_page"] == "tab14":
 
                             # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
                             ads_entries_t14 = ads_map_t14.get(r["sku_up"])
+                            # ── الإجماليات دي بتتحسب دايمًا (صفر لو مفيش إعلانات) عشان متفضلش
+                            #    قيم قديمة من الـ SKU اللي قبله في اللستة | Always computed
+                            #    (zero when no ads) so stale values from the previous SKU in
+                            #    the loop never leak through ──
+                            total_spends_t14  = sum(a["spends"]  for a in ads_entries_t14) if ads_entries_t14 else 0.0
+                            total_revenue_t14 = sum(a["revenue"] for a in ads_entries_t14) if ads_entries_t14 else 0.0
+                            total_orders_t14  = sum(a["orders"]  for a in ads_entries_t14) if ads_entries_t14 else 0.0
                             if ads_entries_t14:
-                                total_spends_t14  = sum(a["spends"] for a in ads_entries_t14)
-                                total_revenue_t14 = sum(a["revenue"] for a in ads_entries_t14)
-                                total_orders_t14  = sum(a["orders"] for a in ads_entries_t14)
                                 with st.expander(f"📢 أداء الإعلانات | Ads Performance — {len(ads_entries_t14)} حملة | campaign(s)"):
                                     st.markdown(
                                         f"💸 **إجمالي المصروف:** {total_spends_t14:,.2f} ريال &nbsp;|&nbsp; "
@@ -4060,6 +4067,7 @@ if st.session_state["nav_page"] == "tab14":
                                             f"CPC: {ad['cpc']:.2f} &nbsp;|&nbsp; CPS: {ad['cps']:.2f} &nbsp;|&nbsp; CVR: {ad['cvr']:.2f}%",
                                             unsafe_allow_html=True)
                                         st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
+
 
                             # ══ مخزون Xdock (من تاب LIVE) — مخزون منفصل عن Inventory، لو قرب يخلص محتاج تزويد ══
                             live_info_t14 = live_map_t14.get(r["sku_up"])
@@ -4438,10 +4446,14 @@ if st.session_state["nav_page"] == "tab14":
 
                             # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
                             ads_entries_t14 = ads_map_t14.get(r["sku_up"])
+                            # ── الإجماليات دي بتتحسب دايمًا (صفر لو مفيش إعلانات) عشان متفضلش
+                            #    قيم قديمة من الـ SKU اللي قبله في اللستة | Always computed
+                            #    (zero when no ads) so stale values from the previous SKU in
+                            #    the loop never leak through ──
+                            total_spends_t14  = sum(a["spends"]  for a in ads_entries_t14) if ads_entries_t14 else 0.0
+                            total_revenue_t14 = sum(a["revenue"] for a in ads_entries_t14) if ads_entries_t14 else 0.0
+                            total_orders_t14  = sum(a["orders"]  for a in ads_entries_t14) if ads_entries_t14 else 0.0
                             if ads_entries_t14:
-                                total_spends_t14  = sum(a["spends"] for a in ads_entries_t14)
-                                total_revenue_t14 = sum(a["revenue"] for a in ads_entries_t14)
-                                total_orders_t14  = sum(a["orders"] for a in ads_entries_t14)
                                 with st.expander(f"📢 أداء الإعلانات | Ads Performance — {len(ads_entries_t14)} حملة | campaign(s)"):
                                     st.markdown(
                                         f"💸 **إجمالي المصروف:** {total_spends_t14:,.2f} ريال &nbsp;|&nbsp; "
@@ -4457,6 +4469,7 @@ if st.session_state["nav_page"] == "tab14":
                                             f"CPC: {ad['cpc']:.2f} &nbsp;|&nbsp; CPS: {ad['cps']:.2f} &nbsp;|&nbsp; CVR: {ad['cvr']:.2f}%",
                                             unsafe_allow_html=True)
                                         st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
+
 
                             # ══ مخزون Xdock (من تاب LIVE) — مخزون منفصل عن Inventory، لو قرب يخلص محتاج تزويد ══
                             live_info_t14 = live_map_t14.get(r["sku_up"])
