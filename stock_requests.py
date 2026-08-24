@@ -69,7 +69,7 @@ TABS_CONFIG = {
     "Settings":          ["Key","Value"],
     "Check":             ["ASN","SKU","Quantity","Schedule Date","Image URL","Date Added","Notes","Flag"],
     "CancelNotifications": ["ASN","SKUs","Schedule Date","Reason","Timestamp"],
-    "Tacweed":           ["SKU","Code01","Date Uploaded"],
+    "Tacweed":           ["SKU","Code01","Cost","Date Uploaded"],
     "WarehouseStock":    ["Code","Quantity","Item Name","Date Uploaded"],
     # تاب "قيد الموافقة" بيتكتب فيه من برنامج الجدولة المكتبي (schedule_entry_app) لما تتحدد
     # علامة Approval — نفس أعمدة تاب Scheduled الجديدة. هنا بنقراه بس (حسب اسم العمود مش
@@ -98,10 +98,16 @@ def get_or_create_worksheet(tab, headers, retries=5, delay=2):
     for attempt in range(retries):
         try:
             ws = ss.worksheet(tab)
-            # sync header: أضيف الأعمدة الجديدة لو ناقصة
+            # sync header: أضيف الأعمدة الجديدة لو ناقصة فعلاً — المقارنة بتتجاهل حالة
+            # الحروف والمسافات الزيادة، عشان عمود موجود فعلاً (زي "Cost") متتضافش نسخة
+            # منه تاني في كل جلسة جديدة بسبب فرق بسيط في التنسيق | Header-sync check
+            # ignores case/extra whitespace, so a column that already exists (e.g. "Cost")
+            # doesn't get a duplicate appended every new session just from a formatting
+            # mismatch.
             try:
                 existing_hdr = ws.row_values(1)
-                missing = [h for h in headers if h not in existing_hdr]
+                existing_hdr_norm = {str(h).strip().lower() for h in existing_hdr}
+                missing = [h for h in headers if h.strip().lower() not in existing_hdr_norm]
                 if missing:
                     for h in missing:
                         ws.append_cols([[h]], value_input_option="RAW")
@@ -253,6 +259,25 @@ def clear_cache(sheet):
     if key in st.session_state:
         del st.session_state[key]
 
+# ══ كاش لأي "خريطة مشتقة" من شيت معيّن (زي SKU -> كود، أو كود -> كمية) — بيتم إعادة
+#    بنائها بس أول مرة بعد ما بيانات الشيت الخام تتغيّر (بعد clear_cache)، مش في كل مرة
+#    الدالة بتتنادى. من غير الكاش ده، أي دالة زي دي بتتنادى جوه loop بيلف على كل الـ SKUs
+#    المعروضة (زي تاب المبيعات) كانت بتعيد بناء نفس الخريطة من الصفر مرة لكل SKU، وده
+#    اللي بيسبب بطء ملحوظ لما يزيد عدد الـ SKUs | Cache for any "derived map" built from a
+#    sheet's raw rows. It's only rebuilt the first time after the underlying raw data
+#    changes (after clear_cache), not on every call. Without this, a map-building function
+#    called inside a per-SKU loop (like the Sales tab) would re-scan the whole sheet from
+#    scratch for every single SKU rendered — the actual cause of the slowdown.
+def _memo_from_sheet(sheet, cache_key, builder):
+    raw = get_cached(sheet)
+    src_key = f"{cache_key}__src"
+    if src_key in st.session_state and st.session_state[src_key] is raw:
+        return st.session_state[cache_key]
+    result = builder(raw)
+    st.session_state[cache_key] = result
+    st.session_state[src_key] = raw
+    return result
+
 # ══ إعدادات ══
 def load_settings():
     data = get_cached(settings_sheet)
@@ -370,16 +395,47 @@ def get_links_map():
             m[row[0].strip().upper()] = row[1].strip()
     return m
 
+# ══ tacweed data (SKU -> {code, cost}) — مبني على أسماء الأعمدة (مش ترتيبها) عشان يفضل
+#    شغال حتى لو اتغير ترتيب الأعمدة في الشيت، ومكاش بـ _memo_from_sheet عشان متتبنيش
+#    الخريطة من الصفر لكل SKU بيتعرض | Built from column names (not position), so it keeps
+#    working even if the sheet's column order changes, and cached via _memo_from_sheet so
+#    it isn't rebuilt from scratch for every displayed SKU ══
+def _build_tacweed_bundle(raw):
+    data_map, code_map, cost_map, code_cost_map = {}, {}, {}, {}
+    if raw and len(raw) >= 2:
+        header = [h.strip() for h in raw[0]]
+        idx = {h: i for i, h in enumerate(header)}
+        def col(row, *names):
+            for name in names:
+                i = idx.get(name)
+                if i is not None and i < len(row):
+                    return row[i]
+            return ""
+        for row in raw[1:]:
+            sku_raw = col(row, "SKU", "Sku", "sku")
+            if not str(sku_raw).strip():
+                continue
+            sku_up = str(sku_raw).strip().upper()
+            code = str(col(row, "Code01", "code01", "Code 01")).strip()
+            cost = _f2_or_none(col(row, "Cost", "cost", "التكلفة", "تكلفة"))
+            data_map[sku_up] = {"code": code, "cost": cost}
+            if code:
+                code_map[sku_up] = code
+            if cost is not None:
+                cost_map[sku_up] = cost
+            if code and cost is not None and code not in code_cost_map:
+                code_cost_map[code] = cost
+    return {"data": data_map, "code_map": code_map, "cost_map": cost_map, "code_cost_map": code_cost_map}
+
+def _get_tacweed_bundle():
+    return _memo_from_sheet(tacweed_sheet, "tacweed_bundle", _build_tacweed_bundle)
+
+def get_tacweed_data():
+    return _get_tacweed_bundle()["data"]
+
 # ══ tacweed map (SKU -> الكود 01) ══
 def get_tacweed_map():
-    data = get_cached(tacweed_sheet)
-    m = {}
-    for row in data[1:]:
-        if len(row) >= 2 and row[0].strip():
-            code = row[1].strip()
-            if code:
-                m[row[0].strip().upper()] = code
-    return m
+    return _get_tacweed_bundle()["code_map"]
 
 def get_tacweed_reverse_map():
     """يرجع dict: كود -> قائمة SKUs المرتبطة بيه (عكس get_tacweed_map) — لأن نفس
@@ -389,15 +445,47 @@ def get_tacweed_reverse_map():
         rev.setdefault(code, []).append(sku_up)
     return rev
 
+# ══ تكلفة الوحدة من تاب التكويد — عن طريق الـ SKU مباشرة، أو عن طريق الكود01 المشترك ══
+# ══ Unit cost from the Tacweed sheet — directly by SKU, or via the shared Code01 ══
+def get_tacweed_cost_map():
+    """SKU (upper) -> تكلفة مسجلة مباشرة على نفس صف الـ SKU (لو موجودة) | SKU -> cost
+    recorded directly on that SKU's own row (if present)."""
+    return _get_tacweed_bundle()["cost_map"]
+
+def get_tacweed_code_cost_map():
+    """كود01 -> تكلفة (بتاخد أول تكلفة مسجلة لأي SKU مرتبط بالكود ده) | Code01 -> cost
+    (first recorded cost among the SKUs sharing that code)."""
+    return _get_tacweed_bundle()["code_cost_map"]
+
+def get_sku_cost(sku_up):
+    """يرجع تكلفة الوحدة لهذا الـ SKU: تكلفة مسجلة على نفس الـ SKU في تاب التكويد أولاً،
+    ولو مش موجودة بيرجع لتكلفة الكود01 المرتبط بيه (لو أي SKU تاني بنفس الكود ليه تكلفة
+    مسجلة) — وإلا بيرجع None | Unit cost for this SKU: a cost recorded directly against
+    the SKU first, falling back to the cost recorded for its shared Code01, else None."""
+    bundle = _get_tacweed_bundle()
+    info = bundle["data"].get(sku_up)
+    if not info:
+        return None
+    if info.get("cost") is not None:
+        return info["cost"]
+    code = info.get("code")
+    if code:
+        return bundle["code_cost_map"].get(code)
+    return None
+
 def big_note_html(text):
     """نص ملاحظة (غير متوفر سابقاً / تم طلبه سابقاً) بخط أكبر وأسود بولد بدل الكابشن الصغير الرمادي."""
     return f'<span class="status-badge-lg" style="background:#e5e7eb;">{text}</span>'
 
 # ══ خريطة الإعلانات (SKU -> قائمة كامبينات) | Ads map (SKU -> list of campaigns) ══
 def _f2(v, default=0.0):
-    """تحويل آمن لأي قيمة نصية لرقم عشري | Safe float conversion."""
+    """تحويل آمن لأي قيمة نصية لرقم عشري | Safe float conversion.
+    بيتعامل مع الفاصلة العشرية/فاصلة الآلاف العربية (٫ / ٬) زي اللي بتظهر في خلايا
+    جوجل شيت المنسقة بالعربي | Also handles the Arabic decimal/thousands separators
+    (٫ / ٬) that show up in Arabic-formatted Google Sheet cells."""
     try:
         s = str(v).strip().replace(",", "").replace("%", "")
+        s = s.replace("\u066b", ".").replace("\u066c", "")
         return float(s) if s not in ("", "nan", "none") else default
     except Exception:
         return default
@@ -466,6 +554,7 @@ def _f2_or_none(v):
     """زي _f2 بس بترجع None لو الخلية فاضية/مش رقم بدل ما ترجع صفر — عشان صفر حقيقي (سعر=0)
     ميتلخبطش مع "مفيش سعر مسجل"."""
     s = str(v).strip().replace(",", "")
+    s = s.replace("\u066b", ".").replace("\u066c", "")
     if s == "" or s.lower() in ("nan", "none"):
         return None
     try:
@@ -584,13 +673,15 @@ def render_tacweed_upload(key_prefix):
                             chosen_sheet = sheet_names[0]
                     df_tc = pd.read_excel(upl_tc, sheet_name=chosen_sheet, dtype=str).fillna("")
 
-                sku_col_tc = code_col_tc = None
+                sku_col_tc = code_col_tc = cost_col_tc = None
                 for c in df_tc.columns:
                     cl = str(c).strip().lower()
                     if sku_col_tc is None and "sku" in cl:
                         sku_col_tc = c
                     if code_col_tc is None and (("كود" in str(c) and "01" in str(c)) or cl in ("code01", "code 01")):
                         code_col_tc = c
+                    if cost_col_tc is None and ("cost" in cl or "تكلفة" in str(c)):
+                        cost_col_tc = c
                 if not sku_col_tc:
                     sku_col_tc = df_tc.columns[0]
                 if not code_col_tc:
@@ -600,8 +691,9 @@ def render_tacweed_upload(key_prefix):
                             code_col_tc = c
                             break
 
-                st.info(f"📊 {len(df_tc)} صف | SKU: `{sku_col_tc}` | الكود 01: `{code_col_tc}`")
-                st.dataframe(df_tc[[sku_col_tc] + ([code_col_tc] if code_col_tc else [])].head(10),
+                st.info(f"📊 {len(df_tc)} صف | SKU: `{sku_col_tc}` | الكود 01: `{code_col_tc}` | التكلفة: `{cost_col_tc or '—'}`")
+                _preview_cols_tc = [sku_col_tc] + ([code_col_tc] if code_col_tc else []) + ([cost_col_tc] if cost_col_tc else [])
+                st.dataframe(df_tc[_preview_cols_tc].head(10),
                              use_container_width=True, height=180)
 
                 def do_upload_tc(replace=True):
@@ -610,8 +702,11 @@ def render_tacweed_upload(key_prefix):
                     for _, row in df_tc.iterrows():
                         sku = str(row[sku_col_tc]).strip()
                         code = str(row[code_col_tc]).strip() if code_col_tc else ""
+                        cost = str(row[cost_col_tc]).strip() if cost_col_tc else ""
+                        if cost.lower() == "nan":
+                            cost = ""
                         if sku and sku.lower() != "nan":
-                            to_add.append([sku, code, dn])
+                            to_add.append([sku, code, cost, dn])
                     if replace:
                         safe_delete_all(tacweed_sheet)
                     safe_batch_append(tacweed_sheet, to_add)
@@ -645,23 +740,39 @@ def render_tacweed_upload(key_prefix):
             except Exception as e:
                 st.error(f"❌ {e}")
 
-# ══ warehouse stock map (Code -> Quantity) — مربوط بالكود 01 من التكويد ══
-def get_warehouse_stock_map():
-    data = get_cached(warehouse_stock_sheet)
+# ══ warehouse stock map (Code -> Quantity) — مربوط بالكود 01 من التكويد، ومكاش برضه
+#    عشان مبيتبنيش من الصفر لكل SKU بيتعرض | Code -> Quantity, tied to the Tacweed
+#    Code01, and cached too so it isn't rebuilt from scratch for every displayed SKU ══
+def _build_warehouse_stock_map(raw):
     m = {}
-    for row in data[1:]:
+    for row in raw[1:]:
         if len(row) >= 2 and row[0].strip():
             m[row[0].strip()] = row[1].strip()
     return m
 
+def get_warehouse_stock_map():
+    return _memo_from_sheet(warehouse_stock_sheet, "wh_stock_map", _build_warehouse_stock_map)
+
+def tacweed_cost_badge_html(sku_up):
+    """شارة صغيرة لتكلفة الوحدة لهذا الـ SKU (مباشرة من صفه في تاب التكويد، أو عن طريق
+    الكود01 المشترك) — وترجع سلسلة فاضية لو مفيش تكلفة مسجلة | Small badge for this SKU's
+    unit cost (directly, or via its shared Code01) — empty string if none recorded."""
+    cost = get_sku_cost(sku_up)
+    if cost is None:
+        return ""
+    return f'<span class="tacweed-badge" style="background:#0c4a6e;color:#7dd3fc;">💰 التكلفة: {cost:,.2f} ريال</span>'
+
 def warehouse_available_badge(sku_up):
-    """يعرض الكود 01 + الكمية المتوفرة بالمستودع (لو الكود موجود ف ملف المستودع) جنب الSKU
-    + شارة توقع النفاد/موعد الطلب لو محسوبة (compute_warehouse_stockout_rows) — الشارة دي
-    محسوبة على مستوى الكود ككل (مجموع مبيعات كل الـ SKUs المشتركة فيه)، مش على SKU لوحده."""
+    """يعرض الكود 01 + تكلفته (لو مسجلة في تاب التكويد) + الكمية المتوفرة بالمستودع (لو
+    الكود موجود ف ملف المستودع) جنب الSKU + شارة توقع النفاد/موعد الطلب لو محسوبة
+    (compute_warehouse_stockout_rows) — الشارة دي محسوبة على مستوى الكود ككل (مجموع
+    مبيعات كل الـ SKUs المشتركة فيه)، مش على SKU لوحده."""
     code = get_tacweed_map().get(sku_up, "")
     if not code:
         return ""
     qty = get_warehouse_stock_map().get(code, "")
+    cost_badge_html = tacweed_cost_badge_html(sku_up)
+    cost_part = f" {cost_badge_html}" if cost_badge_html else ""
 
     stockout_html = ""
     wh_row = st.session_state.get("warehouse_stockout_sku_lookup", {}).get(sku_up)
@@ -676,9 +787,9 @@ def warehouse_available_badge(sku_up):
         )
 
     if qty == "":
-        return f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>{stockout_html}'
+        return f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>{cost_part}{stockout_html}'
     return (
-        f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span> '
+        f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {code}</span>{cost_part} '
         f'<span class="tacweed-badge" style="background:#78350f;color:#fde68a;">📦 المتوفر بالمستودع: {qty}</span>'
         f'{stockout_html}'
     )
@@ -2750,6 +2861,17 @@ with tab14:
                             if latest_price_t14 is not None:
                                 net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
 
+                                # ── تكلفة الوحدة من تاب التكويد (لو مسجلة) وصافي الربح الفعلي بعدها | Unit
+                                #    cost from the Tacweed sheet (if recorded) and the actual net profit
+                                #    after subtracting it ──
+                                cost_t14 = get_sku_cost(r["sku_up"])
+                                net_profit_t14 = (net_tax_t14 - cost_t14) if cost_t14 is not None else None
+                                # الرقم المستخدم في مقارنة أداء الإعلان: صافي الربح الفعلي بعد التكلفة لو
+                                # متوفرة، وإلا الصافي بعد الضريبة بس (زي قبل كده) | Figure used for the ad
+                                # ROI comparison: actual net profit after cost when available, else just
+                                # the after-tax net (same as before).
+                                profit_basis_t14 = net_profit_t14 if net_profit_t14 is not None else net_tax_t14
+
                                 # ── فلوس الإعلان دي مفديه ولا لأ؟ | Did the ad spend pay off overall? ──
                                 # مقارنة إجمالية: صافي الربح الكلي من الطلبات اللي جابها الإعلان مقابل
                                 # إجمالي اللي اتصرف على الإعلان — مش مقارنة لكل طلب لوحده
@@ -2763,7 +2885,7 @@ with tab14:
                                             f'اتصرف {total_spends_t14:,.2f} ريال على الإعلان ده ولسه ما جابش أي طلبات فعلية — يستاهل تراجع التفاصيل فوق 👆</span>'
                                             '</div>')
                                     else:
-                                        total_net_from_ads_t14 = total_orders_t14 * net_tax_t14
+                                        total_net_from_ads_t14 = total_orders_t14 * profit_basis_t14
                                         net_result_t14 = total_net_from_ads_t14 - total_spends_t14
                                         if net_result_t14 >= 0:
                                             ad_insight_t14 = (
@@ -2786,6 +2908,15 @@ with tab14:
                                 if offer_price_t14 is not None and (not price_from_live_t14 or round(offer_price_t14, 2) != round(latest_price_t14, 2)):
                                     offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض (معلومة فقط، غير مستخدم في الحسابات): <b>{offer_price_t14:,.2f}</b> ريال'
                                 price_label_t14 = "سعر البيع الأساسي" if price_from_live_t14 else "سعر البيع (سعر العرض)"
+
+                                cost_line_t14 = ""
+                                if cost_t14 is not None:
+                                    profit_color_t14 = "#4ade80" if net_profit_t14 >= 0 else "#f87171"
+                                    cost_line_t14 = (
+                                        f'<br><span style="color:#94a3b8;font-size:13px;">📦 التكلفة | Cost: <b>{cost_t14:,.2f}</b> ريال</span>'
+                                        f'<br><span style="color:{profit_color_t14};font-size:14px;font-weight:bold;">🧮 صافي الربح الفعلي بعد التكلفة | Net Profit After Cost: {net_profit_t14:,.2f} ريال</span>'
+                                    )
+
                                 st.markdown(
                                     f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
                                     f'padding:8px 14px;margin:4px 0;">'
@@ -2795,6 +2926,7 @@ with tab14:
                                     f'&nbsp;|&nbsp; 🏷️ عمولة: <b>{com_info_t14["commission_pct"]:,.0f}%</b></span><br>'
                                     f'<span style="color:#4ade80;font-size:14px;font-weight:bold;">💳 الصافي بعد خصم العمولة والتوصيل: {net_fees_t14:,.2f} ريال</span><br>'
                                     f'<span style="color:#fbbf24;font-size:14px;font-weight:bold;">🧾 الصافي بعد خصم 15% ضريبة: {net_tax_t14:,.2f} ريال</span>'
+                                    f'{cost_line_t14}'
                                     f'{ad_insight_t14}'
                                     f'</div>',
                                     unsafe_allow_html=True)
@@ -3203,6 +3335,17 @@ with tab14:
                             if latest_price_t14 is not None:
                                 net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
 
+                                # ── تكلفة الوحدة من تاب التكويد (لو مسجلة) وصافي الربح الفعلي بعدها | Unit
+                                #    cost from the Tacweed sheet (if recorded) and the actual net profit
+                                #    after subtracting it ──
+                                cost_t14 = get_sku_cost(r["sku_up"])
+                                net_profit_t14 = (net_tax_t14 - cost_t14) if cost_t14 is not None else None
+                                # الرقم المستخدم في مقارنة أداء الإعلان: صافي الربح الفعلي بعد التكلفة لو
+                                # متوفرة، وإلا الصافي بعد الضريبة بس (زي قبل كده) | Figure used for the ad
+                                # ROI comparison: actual net profit after cost when available, else just
+                                # the after-tax net (same as before).
+                                profit_basis_t14 = net_profit_t14 if net_profit_t14 is not None else net_tax_t14
+
                                 # ── فلوس الإعلان دي مفديه ولا لأ؟ | Did the ad spend pay off overall? ──
                                 # مقارنة إجمالية: صافي الربح الكلي من الطلبات اللي جابها الإعلان مقابل
                                 # إجمالي اللي اتصرف على الإعلان — مش مقارنة لكل طلب لوحده
@@ -3216,7 +3359,7 @@ with tab14:
                                             f'اتصرف {total_spends_t14:,.2f} ريال على الإعلان ده ولسه ما جابش أي طلبات فعلية — يستاهل تراجع التفاصيل فوق 👆</span>'
                                             '</div>')
                                     else:
-                                        total_net_from_ads_t14 = total_orders_t14 * net_tax_t14
+                                        total_net_from_ads_t14 = total_orders_t14 * profit_basis_t14
                                         net_result_t14 = total_net_from_ads_t14 - total_spends_t14
                                         if net_result_t14 >= 0:
                                             ad_insight_t14 = (
@@ -3239,6 +3382,15 @@ with tab14:
                                 if offer_price_t14 is not None and (not price_from_live_t14 or round(offer_price_t14, 2) != round(latest_price_t14, 2)):
                                     offer_price_line_t14 = f' &nbsp;|&nbsp; 🏷️ سعر العرض (معلومة فقط، غير مستخدم في الحسابات): <b>{offer_price_t14:,.2f}</b> ريال'
                                 price_label_t14 = "سعر البيع الأساسي" if price_from_live_t14 else "سعر البيع (سعر العرض)"
+
+                                cost_line_t14 = ""
+                                if cost_t14 is not None:
+                                    profit_color_t14 = "#4ade80" if net_profit_t14 >= 0 else "#f87171"
+                                    cost_line_t14 = (
+                                        f'<br><span style="color:#94a3b8;font-size:13px;">📦 التكلفة | Cost: <b>{cost_t14:,.2f}</b> ريال</span>'
+                                        f'<br><span style="color:{profit_color_t14};font-size:14px;font-weight:bold;">🧮 صافي الربح الفعلي بعد التكلفة | Net Profit After Cost: {net_profit_t14:,.2f} ريال</span>'
+                                    )
+
                                 st.markdown(
                                     f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;'
                                     f'padding:8px 14px;margin:4px 0;">'
@@ -3248,6 +3400,7 @@ with tab14:
                                     f'&nbsp;|&nbsp; 🏷️ عمولة: <b>{com_info_t14["commission_pct"]:,.0f}%</b></span><br>'
                                     f'<span style="color:#4ade80;font-size:14px;font-weight:bold;">💳 الصافي بعد خصم العمولة والتوصيل: {net_fees_t14:,.2f} ريال</span><br>'
                                     f'<span style="color:#fbbf24;font-size:14px;font-weight:bold;">🧾 الصافي بعد خصم 15% ضريبة: {net_tax_t14:,.2f} ريال</span>'
+                                    f'{cost_line_t14}'
                                     f'{ad_insight_t14}'
                                     f'</div>',
                                     unsafe_allow_html=True)
