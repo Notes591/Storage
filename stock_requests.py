@@ -5028,7 +5028,7 @@ if st.session_state["nav_page"] == "tab_sales_amazon":
                             # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة (يعرض دايمًا، وبيحط صفر في أي
                             #    قيمة ناقصة مع تنبيه) | Net price after commission/delivery/VAT (always shown;
                             #    missing values default to zero with a warning) ══
-                            render_price_profit_block_tamz(
+                            render_price_profit_block_t14(
                                 r, com_map_tamz, live_map_tamz, sales_dates,
                                 ads_entries_tamz, total_orders_tamz, total_spends_tamz)
 
@@ -5430,7 +5430,7 @@ if st.session_state["nav_page"] == "tab_sales_amazon":
                             # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة (يعرض دايمًا، وبيحط صفر في أي
                             #    قيمة ناقصة مع تنبيه) | Net price after commission/delivery/VAT (always shown;
                             #    missing values default to zero with a warning) ══
-                            render_price_profit_block_tamz(
+                            render_price_profit_block_t14(
                                 r, com_map_tamz, live_map_tamz, sales_dates,
                                 ads_entries_tamz, total_orders_tamz, total_spends_tamz)
 
