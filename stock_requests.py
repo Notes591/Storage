@@ -185,6 +185,33 @@ def get_or_create_links_ws(retries=5, delay=2):
 
 links_ws = get_or_create_links_ws()
 
+def get_or_create_links_asin_ws(retries=5, delay=2):
+    """شيت روابط صور أمازون — مفتاح بالـ ASIN (مش SKU زي 'links n' فوق)، عشان
+    ده المعرّف الحقيقي لمنتج أمازون وصورته واحدة بغض النظر عن الـ MSKU |
+    Amazon image-links sheet keyed by ASIN (not SKU like 'links n' above),
+    since ASIN is Amazon's real product identity and its photo is the same
+    regardless of which MSKU sold it."""
+    for attempt in range(retries):
+        try:
+            return ss.worksheet("links a")
+        except gspread.exceptions.WorksheetNotFound:
+            try:
+                ws = ss.add_worksheet(title="links a", rows="2000", cols="2")
+                ws.append_row(["Asin","Image"])
+                return ws
+            except gspread.exceptions.APIError as e:
+                if attempt < retries - 1:
+                    time.sleep(delay * (2 ** attempt))
+                else:
+                    raise e
+        except gspread.exceptions.APIError as e:
+            if attempt < retries - 1:
+                time.sleep(delay * (2 ** attempt))
+            else:
+                raise e
+
+links_asin_ws = get_or_create_links_asin_ws()
+
 requests_sheet    = sheets["Requests"]
 approved_sheet    = sheets["Approved"]
 unavailable_sheet = sheets["Unavailable"]
@@ -415,6 +442,17 @@ def get_excluded_warehouses():
 # ══ links map ══
 def get_links_map():
     data = get_cached(links_ws)
+    m = {}
+    for row in data[1:]:
+        if len(row) >= 2 and row[0].strip():
+            m[row[0].strip().upper()] = row[1].strip()
+    return m
+
+def get_links_map_asin():
+    """خريطة ASIN -> رابط صورة من شيت 'links a' — المصدر الأساسي لصور تابات
+    مبيعات أمازون | ASIN -> image URL map from the 'links a' sheet — the
+    primary image source for the Amazon Sales tabs."""
+    data = get_cached(links_asin_ws)
     m = {}
     for row in data[1:]:
         if len(row) >= 2 and row[0].strip():
@@ -1094,6 +1132,54 @@ def build_amazon_stock_map():
             stock_map[sku_up]["asin"] = asin
     return stock_map
 
+def build_amazon_stock_map_by_asin():
+    """يبني خريطة مخزون أمازون من شيت StockAmazon لكن مجمّعة على أساس ASIN
+    (مش MSKU زي build_amazon_stock_map فوق) — ده المعرّف الحقيقي لمنتج
+    أمازون، فلو نفس الـ ASIN ظاهر تحت أكتر من MSKU (FBA/FBM مختلفين مثلاً)
+    مخزونهم بيتجمع مع بعض بدل ما يتقسّم على صفوف منفصلة. تاب مبيعات أمازون
+    بيستخدم النسخة دي عشان الأرقام (مخزون/شهري/يومي/نفاد) تطلع صح | Amazon
+    stock map from StockAmazon aggregated by ASIN (not MSKU like
+    build_amazon_stock_map above) — ASIN is Amazon's real product identity,
+    so if the same ASIN appears under more than one MSKU (e.g. different
+    FBA/FBM listings) their stock is summed together instead of being split
+    across separate rows. The Amazon Sales tabs use this version so the
+    numbers (stock/monthly/daily/stockout) come out correct."""
+    data = get_cached(stock_amazon_sheet)
+    asin_map = {}
+    if len(data) <= 1:
+        return asin_map
+    hdr = data[0]
+    idx_sku   = _find_col_idx_amz(hdr, ["seller-sku", "msku"])
+    idx_asin  = _find_col_idx_amz(hdr, ["asin"])
+    idx_fnsku = _find_col_idx_amz(hdr, ["fulfillment-channel-sku", "fnsku"])
+    idx_qty   = _find_col_idx_amz(hdr, ["quantity available", "quantity"])
+    if idx_asin is None:
+        return asin_map
+    known_idx = [i for i in (idx_sku, idx_asin, idx_fnsku, idx_qty) if i is not None]
+    need = (max(known_idx) + 1) if known_idx else 1
+    for row in data[1:]:
+        if len(row) < need:
+            row = row + [""] * (need - len(row))
+        asin = row[idx_asin].strip() if len(row) > idx_asin else ""
+        if not asin:
+            continue  # لازم ASIN عشان التجميع يبقى صح
+        asin_up = asin.upper()
+        sku   = row[idx_sku].strip()   if idx_sku   is not None and len(row) > idx_sku   else ""
+        fnsku = row[idx_fnsku].strip() if idx_fnsku is not None and len(row) > idx_fnsku else ""
+        qty_raw = row[idx_qty] if (idx_qty is not None and len(row) > idx_qty) else "0"
+        try:
+            qty = int(float(str(qty_raw).replace(",", "").strip() or 0))
+        except Exception:
+            qty = 0
+        if asin_up not in asin_map:
+            asin_map[asin_up] = {"asin": asin, "fnsku": fnsku, "stock": 0, "skus": []}
+        asin_map[asin_up]["stock"] += qty
+        if not asin_map[asin_up]["fnsku"] and fnsku:
+            asin_map[asin_up]["fnsku"] = fnsku
+        if sku and sku not in asin_map[asin_up]["skus"]:
+            asin_map[asin_up]["skus"].append(sku)
+    return asin_map
+
 
     for attempt in range(retries):
         try:
@@ -1763,9 +1849,14 @@ def build_amazon_orders_asin_map():
             asin_map[sku_up] = asin
     return asin_map
 
-def build_daily_orders_counts_amazon(dates, mode="all"):
+def build_daily_orders_counts_amazon(dates, mode="all", group_by="sku"):
     """نفس منطق build_daily_orders_counts بالظبط، لكن من شيت DailyOrdersAmazon
-    وبأعمدة بتتلاقى بالاسم، مع فلترة اختيارية على عمود حاوية كاملة الحمولة."""
+    وبأعمدة بتتلاقى بالاسم، مع فلترة اختيارية على عمود حاوية كاملة الحمولة.
+    group_by='sku' (زي ما كانت دايمًا) أو 'asin' — التجميع بيبقى على عمود
+    ASIN في الشيت بدل MSKU، عشان صفوف تاب مبيعات أمازون تتجمع صح | group_by
+    controls the aggregation key: 'sku' (unchanged, default) or 'asin' —
+    groups by the sheet's own ASIN column instead of MSKU, so the Amazon
+    Sales tab rows aggregate correctly by ASIN."""
     data = get_cached(daily_orders_amazon_sheet)
     dates_set = set(dates)
     counts = {}
@@ -1775,7 +1866,9 @@ def build_daily_orders_counts_amazon(dates, mode="all"):
     idx = _amz_col_indexes(hdr)
     if idx["sku"] is None or idx["ts"] is None:
         return counts
-    need = max(idx["sku"], idx["ts"]) + 1
+    if group_by == "asin" and idx["asin"] is None:
+        return counts
+    need = max(idx["sku"], idx["ts"], idx["asin"] if idx["asin"] is not None else 0) + 1
     for row in data[1:]:
         if len(row) < need:
             row = row + [""] * (need - len(row))
@@ -1785,18 +1878,26 @@ def build_daily_orders_counts_amazon(dates, mode="all"):
             continue
         if not _amz_row_matches(row, idx["cont"], mode):
             continue
+        if group_by == "asin":
+            key_raw = row[idx["asin"]].strip() if len(row) > idx["asin"] else ""
+            if not key_raw:
+                continue
+        else:
+            key_raw = sku
         d = parse_excel_date(ts)
         if d and d.date() in dates_set:
-            sku_up = sku.upper()
-            if sku_up not in counts:
-                counts[sku_up] = {dd: 0 for dd in dates}
-            counts[sku_up][d.date()] += 1
+            key_up = key_raw.upper()
+            if key_up not in counts:
+                counts[key_up] = {dd: 0 for dd in dates}
+            counts[key_up][d.date()] += 1
     return counts
 
-def build_daily_orders_prices_amazon(dates, mode="all"):
+def build_daily_orders_prices_amazon(dates, mode="all", group_by="sku"):
     """نفس منطق build_daily_orders_prices بالظبط، لكن من شيت DailyOrdersAmazon.
     عمود "مبلغ المنتج" بيتاخد زي ما هو (سعر الحبة الواحدة) من غير أي قسمة على
-    الكمية — بالظبط زي ما بيحصل مع سعر مبيعات نون فوق."""
+    الكمية — بالظبط زي ما بيحصل مع سعر مبيعات نون فوق. group_by زي الدالة
+    اللي فوق بالظبط | Same idea as the function above; group_by works the
+    same way ('sku' default or 'asin')."""
     data = get_cached(daily_orders_amazon_sheet)
     dates_set = set(dates)
     prices = {}
@@ -1806,7 +1907,9 @@ def build_daily_orders_prices_amazon(dates, mode="all"):
     idx = _amz_col_indexes(hdr)
     if idx["sku"] is None or idx["ts"] is None:
         return prices
-    need = max(idx["sku"], idx["ts"]) + 1
+    if group_by == "asin" and idx["asin"] is None:
+        return prices
+    need = max(idx["sku"], idx["ts"], idx["asin"] if idx["asin"] is not None else 0) + 1
     for row in data[1:]:
         if len(row) < need:
             row = row + [""] * (need - len(row))
@@ -1816,9 +1919,15 @@ def build_daily_orders_prices_amazon(dates, mode="all"):
             continue
         if not _amz_row_matches(row, idx["cont"], mode):
             continue
+        if group_by == "asin":
+            key_raw = row[idx["asin"]].strip() if len(row) > idx["asin"] else ""
+            if not key_raw:
+                continue
+        else:
+            key_raw = sku
         d = parse_excel_date(ts)
         if d and d.date() in dates_set:
-            sku_up = sku.upper()
+            key_up = key_raw.upper()
             price_val = ""
             if idx["price"] is not None and len(row) > idx["price"]:
                 raw = str(row[idx["price"]]).strip()
@@ -1831,9 +1940,9 @@ def build_daily_orders_prices_amazon(dates, mode="all"):
                     qty_val = 1
             if qty_val < 1:
                 qty_val = 1
-            if sku_up not in prices:
-                prices[sku_up] = {dd: [] for dd in dates}
-            prices[sku_up][d.date()].append((price_val, qty_val))
+            if key_up not in prices:
+                prices[key_up] = {dd: [] for dd in dates}
+            prices[key_up][d.date()].append((price_val, qty_val))
     return prices
 
 def build_daily_orders_counts_amazon_all(dates):    return build_daily_orders_counts_amazon(dates, "all")
@@ -1842,6 +1951,97 @@ def build_daily_orders_counts_amazon_fba(dates):    return build_daily_orders_co
 def build_daily_orders_prices_amazon_all(dates):    return build_daily_orders_prices_amazon(dates, "all")
 def build_daily_orders_prices_amazon_normal(dates): return build_daily_orders_prices_amazon(dates, "normal")
 def build_daily_orders_prices_amazon_fba(dates):    return build_daily_orders_prices_amazon(dates, "fba")
+# ── نسخ مجمّعة على ASIN — تاب مبيعات أمازون (عادي/FBA) بيستخدمها بدل النسخ
+#    اللي فوق المجمّعة على MSKU | ASIN-grouped versions — used by the Amazon
+#    Sales tab (normal/FBA) instead of the MSKU-grouped ones above ──
+def build_daily_orders_counts_amazon_normal_asin(dates): return build_daily_orders_counts_amazon(dates, "normal", "asin")
+def build_daily_orders_counts_amazon_fba_asin(dates):    return build_daily_orders_counts_amazon(dates, "fba", "asin")
+def build_daily_orders_prices_amazon_normal_asin(dates): return build_daily_orders_prices_amazon(dates, "normal", "asin")
+def build_daily_orders_prices_amazon_fba_asin(dates):    return build_daily_orders_prices_amazon(dates, "fba", "asin")
+
+def build_amazon_asin_sales_rows(multi_counts, prices_map, sales_dates, sales_display_days):
+    """يبني صفوف تاب مبيعات أمازون (عادي/FBA) مجمّعة على أساس ASIN — المعرّف
+    الحقيقي لمنتج أمازون، مش MSKU. المخزون بييجي من amz_inv_map_asin (مجمّع
+    من كل الـ MSKUs بتاعت نفس الـ ASIN)، والمبيعات من counts_fn/prices_fn
+    (مجمّعة بنفس الطريقة من عمود ASIN في DailyOrdersAmazon). أي ASIN باع في
+    الفترة المعروضة بيظهر حتى لو مالوش صف مخزون مرفوع في StockAmazon (يبقى
+    مخزونه 0 مع علامة توضيحية) — بالظبط زي تابات نون | Builds Amazon
+    sales-tab rows (normal/FBA) aggregated by ASIN — Amazon's real product
+    identity, not MSKU. Stock comes from amz_inv_map_asin (summed across
+    every MSKU sharing that ASIN); sales come from counts_fn/prices_fn
+    (grouped the same way, by DailyOrdersAmazon's own ASIN column). Any
+    ASIN with sales in the displayed window shows up even without an
+    uploaded StockAmazon row for it (stock shown as 0 with a note) — same
+    as the Noon tabs' behaviour."""
+    links_map_asin = get_links_map_asin()
+    links_map_sku  = get_links_map()
+    # MSKU -> ASIN من DailyOrdersAmazon نفسه — بنعكسها لـ ASIN -> MSKUs عشان
+    # صفوف الـ ASIN اليتيمة (اللي مالهاش صف في StockAmazon) تفضل عارضة الـ
+    # MSKU الحقيقي بتاعها (لشارات المستودع/الجدولة/الإعلانات...إلخ) | MSKU ->
+    # ASIN from DailyOrdersAmazon itself — inverted to ASIN -> MSKUs so
+    # orphan ASIN rows (no StockAmazon row) still carry their real MSKU for
+    # the warehouse/schedule/ads... badges below.
+    asin_to_mskus = {}
+    for sku_o, asin_o in build_amazon_orders_asin_map().items():
+        asin_to_mskus.setdefault(asin_o.upper(), []).append(sku_o)
+
+    rows = []
+    for asin_up, info in amz_inv_map_asin.items():
+        stock = info.get("stock", 0)
+        mskus = list(info.get("skus", []))
+        for extra_sku in asin_to_mskus.get(asin_up, []):
+            if extra_sku not in mskus:
+                mskus.append(extra_sku)
+        sku_disp    = ", ".join(mskus) if mskus else asin_up
+        primary_sku = mskus[0] if mskus else asin_up
+        img = links_map_asin.get(asin_up, "") or links_map_sku.get(primary_sku.upper(), "")
+        day_counts = multi_counts.get(asin_up, {d: 0 for d in sales_dates})
+        day_prices = prices_map.get(asin_up, {d: [] for d in sales_dates})
+        total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
+        avg_daily = (total_recent / sales_display_days) if sales_display_days > 0 else 0
+        effective_avg = avg_daily
+        days_to_stockout = round(stock / effective_avg) if effective_avg > 0 else 9999
+        rows.append({
+            "sku": sku_disp, "sku_up": primary_sku.upper(), "asin": info.get("asin", asin_up),
+            "mskus": mskus,
+            "stock": stock, "sales_month": round(effective_avg * 30), "img": img,
+            "day_counts": day_counts, "day_prices": day_prices,
+            "total_recent": total_recent,
+            "effective_avg": effective_avg,
+            "days_to_stockout": days_to_stockout,
+        })
+
+    # ── ASINs باعت في الفترة المعروضة لكن مالهاش صف مخزون مرفوع في
+    #    StockAmazon — بتتضاف كمان عشان كل مبيعة تظهر في القائمة | ASINs
+    #    with sales in the displayed window but no uploaded StockAmazon row
+    #    — added too so every sale shows up.
+    asins_seen = set(amz_inv_map_asin.keys())
+    for asin_up, day_counts in multi_counts.items():
+        if asin_up in asins_seen:
+            continue
+        total_recent_orphan = sum(day_counts.get(d, 0) for d in sales_dates)
+        if total_recent_orphan <= 0:
+            continue
+        mskus = asin_to_mskus.get(asin_up, [])
+        sku_disp    = ", ".join(mskus) if mskus else asin_up
+        primary_sku = mskus[0] if mskus else asin_up
+        day_prices_orphan = prices_map.get(asin_up, {d: [] for d in sales_dates})
+        avg_daily_orphan = (total_recent_orphan / sales_display_days) if sales_display_days > 0 else 0
+        rows.append({
+            "sku": sku_disp, "sku_up": primary_sku.upper(), "asin": asin_up,
+            "mskus": mskus,
+            "stock": 0, "sales_month": round(avg_daily_orphan * 30),
+            "img": links_map_asin.get(asin_up, ""),
+            "day_counts": day_counts, "day_prices": day_prices_orphan,
+            "total_recent": total_recent_orphan,
+            "effective_avg": avg_daily_orphan,
+            "days_to_stockout": 9999,
+            "not_in_inventory": True,
+        })
+
+    # ترتيب: الأكتر مبيعاً أمس أولاً — نفس ترتيب تابات نون بالظبط
+    rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
+    return rows
 
 # ══ داشبورد أمازون — مفيش عمود Family في شيت DailyOrdersAmazon، فبنرجع إحصائية
 #    أقسام فاضية دايمًا (نفس فكرة "لو العمود مش موجود الكود بيكمل عادي" تحت) ══
@@ -1879,7 +2079,12 @@ def asin_link_html(asin: str, extra_style: str = ""):
 
 # ══ خريطة مخزون أمازون (StockAmazon) — بتتبنى مرة واحدة بس زي inv_map بالظبط،
 #    وهي مصدر قايمة منتجات تاب مبيعات امازون المستقل عن inv_map بتاع نون ══
-amz_inv_map = build_amazon_stock_map()
+# ══ خريطة مخزون أمازون مجمّعة على ASIN — المصدر اللي تاب مبيعات أمازون
+#    (عادي/FBA) بيبني منه صفوفه، عشان مخزون نفس الـ ASIN يتجمع حتى لو ظاهر
+#    تحت أكتر من MSKU | Amazon stock map aggregated by ASIN — what the
+#    Amazon Sales tab (normal/FBA) builds its rows from, so the same ASIN's
+#    stock is combined even when it appears under more than one MSKU ══
+amz_inv_map_asin = build_amazon_stock_map_by_asin()
 
 # ══ الأقسام | Departments (عمود Family في DailyOrders — اختياري، لو مش موجود الكود بيكمل عادي) ══
 FAMILY_HOME_GROUP = {"kitchen_dining", "home_improvement", "gardening", "home_decor", "furniture", "bedding"}
@@ -4996,62 +5201,19 @@ if st.session_state["nav_page"] == "tab_sales_amazon":
                 delay_days_tamz = int(load_settings().get("schedule_delay_days","3") or 3)
                 coverage_days_tamz = int(load_settings().get("schedule_coverage_days","15") or 15)
 
-                if not amz_inv_map:
+                if not amz_inv_map_asin:
                     st.info("ارفع ملف مخزون أمازون (StockAmazon) أولاً | Upload Amazon Stock (StockAmazon) first")
                 else:
-                    multi_counts_tamz = build_daily_orders_counts_amazon_normal(sales_dates)
-                    prices_map_tamz   = build_daily_orders_prices_amazon_normal(sales_dates)
-                    links_map_tamz    = get_links_map()
-                    asin_orders_map_tamz = build_amazon_orders_asin_map()
-
-                    # بناء صفوف — كل MSKU موجود في مخزون أمازون (StockAmazon)، مش في
-                    # مخزون نون | Rows built from Amazon's own stock file, not Noon's
-                    sales_tab_rows = []
-                    for sku_up, info in amz_inv_map.items():
-                        stock       = info.get("stock", 0)
-                        sales_month = 0
-                        img         = links_map_tamz.get(sku_up, "")
-                        sku_disp    = info.get("sku", sku_up)
-                        asin_disp   = info.get("asin", "") or asin_orders_map_tamz.get(sku_up, "")
-                        day_counts  = multi_counts_tamz.get(sku_up, {d: 0 for d in sales_dates})
-                        day_prices  = prices_map_tamz.get(sku_up, {d: [] for d in sales_dates})
-                        total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
-                        avg_daily_tamz = (total_recent / sales_display_days) if sales_display_days > 0 else 0
-                        effective_avg_tamz = avg_daily_tamz
-                        days_to_stockout_tamz = round(stock / effective_avg_tamz) if effective_avg_tamz > 0 else 9999
-                        sales_tab_rows.append({
-                            "sku": sku_disp, "sku_up": sku_up, "asin": asin_disp,
-                            "stock": stock, "sales_month": sales_month, "img": img,
-                            "day_counts": day_counts, "day_prices": day_prices,
-                            "total_recent": total_recent,
-                            "effective_avg": effective_avg_tamz,
-                            "days_to_stockout": days_to_stockout_tamz,
-                        })
-
-                    # ── MSKUs باعت طلبات عادي (FSAB) لكن مش موجودة في StockAmazon —
-                    #    بتتضاف كمان عشان كل مبيعة تظهر في القائمة | MSKUs with normal
-                    #    (FSAB) orders that aren't in the StockAmazon file — added too
-                    #    so every sale shows up.
-                    amz_skus_seen_normal = set(amz_inv_map.keys())
-                    for sku_up, day_counts in multi_counts_tamz.items():
-                        if sku_up in amz_skus_seen_normal:
-                            continue
-                        total_recent_orphan = sum(day_counts.get(d, 0) for d in sales_dates)
-                        if total_recent_orphan <= 0:
-                            continue
-                        day_prices_orphan = prices_map_tamz.get(sku_up, {d: [] for d in sales_dates})
-                        sales_tab_rows.append({
-                            "sku": sku_up, "sku_up": sku_up, "asin": asin_orders_map_tamz.get(sku_up, ""),
-                            "stock": 0, "sales_month": 0, "img": links_map_tamz.get(sku_up, ""),
-                            "day_counts": day_counts, "day_prices": day_prices_orphan,
-                            "total_recent": total_recent_orphan,
-                            "effective_avg": 0,
-                            "days_to_stockout": 9999,
-                            "not_in_inventory": True,
-                        })
-
-                    # ترتيب: الأكتر مبيعاً أمس أولاً
-                    sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
+                    # الصفوف بقت مجمّعة على ASIN (مش MSKU) — مخزونها ومبيعاتها الشهرية
+                    # واليومية جايين من كل الـ MSKUs بتاعت نفس الـ ASIN مع بعض، وأي ASIN
+                    # باع خلال الفترة بيظهر حتى لو مالوش صف في StockAmazon | Rows are now
+                    # aggregated by ASIN (not MSKU) — stock, monthly, and daily figures
+                    # combine every MSKU sharing that ASIN, and any ASIN with sales in the
+                    # window shows up even without a StockAmazon row.
+                    multi_counts_tamz = build_daily_orders_counts_amazon_normal_asin(sales_dates)
+                    prices_map_tamz   = build_daily_orders_prices_amazon_normal_asin(sales_dates)
+                    sales_tab_rows = build_amazon_asin_sales_rows(
+                        multi_counts_tamz, prices_map_tamz, sales_dates, sales_display_days)
 
                     # ══ إجماليات اليومية في الأعلى — بتتحسب من كل صفوف الأوردرز الخام
                     #    (multi_counts_tamz)، مش بس الـ SKUs الموجودة في ملف المخزون
@@ -5086,7 +5248,9 @@ if st.session_state["nav_page"] == "tab_sales_amazon":
 
                     srch_tamz = st.text_input("🔍 بحث SKU | Search SKU", key="srch_tamz", placeholder="اكتب SKU...")
                     if srch_tamz.strip():
-                        sales_tab_rows = [r for r in sales_tab_rows if srch_tamz.strip().upper() in r["sku_up"]]
+                        sales_tab_rows = [r for r in sales_tab_rows if srch_tamz.strip().upper() in r["sku_up"]
+                                           or srch_tamz.strip().upper() in r.get("asin","").upper()
+                                           or srch_tamz.strip().upper() in r["sku"].upper()]
 
                     # جدول تحميل
                     if sales_tab_rows:
@@ -5388,65 +5552,19 @@ if st.session_state["nav_page"] == "tab_sales_amazon":
                 delay_days_tamz = int(load_settings().get("schedule_delay_days","3") or 3)
                 coverage_days_tamz = int(load_settings().get("schedule_coverage_days","15") or 15)
 
-                if not amz_inv_map:
+                if not amz_inv_map_asin:
                     st.info("ارفع ملف مخزون أمازون (StockAmazon) أولاً | Upload Amazon Stock (StockAmazon) first")
                 else:
-                    multi_counts_tamz = build_daily_orders_counts_amazon_fba(sales_dates)
-                    prices_map_tamz   = build_daily_orders_prices_amazon_fba(sales_dates)
-                    links_map_tamz    = get_links_map()
-                    asin_orders_map_tamz = build_amazon_orders_asin_map()
-
-                    # بناء صفوف — كل MSKU موجود في مخزون أمازون (StockAmazon)، مش في
-                    # مخزون نون | Rows built from Amazon's own stock file, not Noon's
-                    sales_tab_rows = []
-                    for sku_up, info in amz_inv_map.items():
-                        stock       = info.get("stock", 0)
-                        sales_month = 0
-                        img         = links_map_tamz.get(sku_up, "")
-                        sku_disp    = info.get("sku", sku_up)
-                        asin_disp   = info.get("asin", "") or asin_orders_map_tamz.get(sku_up, "")
-                        day_counts  = multi_counts_tamz.get(sku_up, {d: 0 for d in sales_dates})
-                        day_prices  = prices_map_tamz.get(sku_up, {d: [] for d in sales_dates})
-                        total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
-                        avg_daily_tamz = (total_recent / sales_display_days) if sales_display_days > 0 else 0
-                        effective_avg_tamz = avg_daily_tamz
-                        days_to_stockout_tamz = round(stock / effective_avg_tamz) if effective_avg_tamz > 0 else 9999
-                        sales_tab_rows.append({
-                            "sku": sku_disp, "sku_up": sku_up, "asin": asin_disp,
-                            "stock": stock, "sales_month": sales_month, "img": img,
-                            "day_counts": day_counts, "day_prices": day_prices,
-                            "total_recent": total_recent,
-                            "effective_avg": effective_avg_tamz,
-                            "days_to_stockout": days_to_stockout_tamz,
-                        })
-
-                    # ── MSKUs باعت طلبات FBA لكن مش موجودة في StockAmazon —
-                    #    بتتضاف كمان عشان كل مبيعات FBA تظهر في القائمة، مش بس اللي
-                    #    عندها مخزون مرفوع. المخزون بيتحط 0 (غير معروف) ومعاها علامة
-                    #    توضيحية | MSKUs with FBA orders that aren't in StockAmazon —
-                    #    added too so every FBA sale shows up. Stock shown as 0
-                    #    (unknown) with a note explaining why.
-                    amz_skus_seen_fba = set(amz_inv_map.keys())
-                    for sku_up, day_counts in multi_counts_tamz.items():
-                        if sku_up in amz_skus_seen_fba:
-                            continue
-                        total_recent_orphan = sum(day_counts.get(d, 0) for d in sales_dates)
-                        if total_recent_orphan <= 0:
-                            continue
-                        day_prices_orphan = prices_map_tamz.get(sku_up, {d: [] for d in sales_dates})
-                        sales_tab_rows.append({
-                            "sku": sku_up, "sku_up": sku_up, "asin": asin_orders_map_tamz.get(sku_up, ""),
-                            "stock": 0, "sales_month": 0, "img": links_map_tamz.get(sku_up, ""),
-                            "day_counts": day_counts, "day_prices": day_prices_orphan,
-                            "total_recent": total_recent_orphan,
-                            "effective_avg": 0,
-                            "days_to_stockout": 9999,
-                            "not_in_inventory": True,
-                        })
-
-
-                    # ترتيب: الأكتر مبيعاً أمس أولاً
-                    sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
+                    # الصفوف بقت مجمّعة على ASIN (مش MSKU) — مخزونها ومبيعاتها الشهرية
+                    # واليومية جايين من كل الـ MSKUs بتاعت نفس الـ ASIN مع بعض، وأي ASIN
+                    # باع FBA خلال الفترة بيظهر حتى لو مالوش صف في StockAmazon | Rows are
+                    # now aggregated by ASIN (not MSKU) — stock, monthly, and daily figures
+                    # combine every MSKU sharing that ASIN, and any ASIN with FBA sales in
+                    # the window shows up even without a StockAmazon row.
+                    multi_counts_tamz = build_daily_orders_counts_amazon_fba_asin(sales_dates)
+                    prices_map_tamz   = build_daily_orders_prices_amazon_fba_asin(sales_dates)
+                    sales_tab_rows = build_amazon_asin_sales_rows(
+                        multi_counts_tamz, prices_map_tamz, sales_dates, sales_display_days)
 
                     # ══ إجماليات اليومية في الأعلى — بتتحسب من كل صفوف الأوردرز الخام
                     #    (multi_counts_tamz)، مش بس الـ SKUs الموجودة في ملف المخزون
@@ -5481,7 +5599,9 @@ if st.session_state["nav_page"] == "tab_sales_amazon":
 
                     srch_tamz = st.text_input("🔍 بحث SKU | Search SKU", key="srch_tamz_fba", placeholder="اكتب SKU...")
                     if srch_tamz.strip():
-                        sales_tab_rows = [r for r in sales_tab_rows if srch_tamz.strip().upper() in r["sku_up"]]
+                        sales_tab_rows = [r for r in sales_tab_rows if srch_tamz.strip().upper() in r["sku_up"]
+                                           or srch_tamz.strip().upper() in r.get("asin","").upper()
+                                           or srch_tamz.strip().upper() in r["sku"].upper()]
 
                     # جدول تحميل
                     if sales_tab_rows:
