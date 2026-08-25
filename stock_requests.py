@@ -92,6 +92,20 @@ TABS_CONFIG = {
              "seller_price_max","price_engine_min","price_engine_max","sale_start_date",
              "sale_end_date","is_active","warranty","stock_fbn_net","stock_xdock_gross",
              "stock_xdock_net","mp_code","noon_status"],
+    # تاب مبيعات أمازون اليومية — بيتحدّث يدوي/من نظام أمازون، نفس فكرة DailyOrders
+    # بالظبط بس لشحنات أمازون. الأعمدة هنا بترتيب مختلف عن DailyOrders (نون)،
+    # فبنقراها دايمًا بالاسم مش بالمكان (شوف _amz_col_indexes تحت). عمود "حاوية
+    # كاملة الحمولة": لو قيمته FSAB يبقى تخزين عادي (Easy Ship/شحن مباشر من
+    # التاجر)، ولو أي قيمة تانية يبقى تخزين FBA (مخزون عند أمازون) | Daily Amazon
+    # orders sheet — same idea as DailyOrders (Noon) but for Amazon shipments.
+    # Column order here differs from DailyOrders, so columns are always looked
+    # up by name, not position (see _amz_col_indexes below). "حاوية كاملة
+    # الحمولة" column: FSAB = normal storage (merchant-shipped), anything else
+    # = FBA storage.
+    "DailyOrdersAmazon": ["تاريخ شحنة العميل", "رقم تخزين سلعة التاجر MSKU",
+                          "رقم تخزين السلعة لشبكة نظام الشحن (FNSKU)", "ASIN",
+                          "حاوية كاملة الحمولة", "الكمية", "رقم الطلب من أمازون",
+                          "العملة", "مبلغ المنتج"],
 }
 
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
@@ -214,6 +228,7 @@ reschedule_sheet  = sheets["Rescheduled"]
 expired_sheet     = sheets["Expired"]
 inventory_sheet      = sheets["Inventory"]
 daily_orders_sheet   = sheets["DailyOrders"]
+daily_orders_amazon_sheet = sheets["DailyOrdersAmazon"]
 settings_sheet       = sheets["Settings"]
 cancel_notif_sheet   = sheets["CancelNotifications"]
 tacweed_sheet        = sheets["Tacweed"]
@@ -303,7 +318,8 @@ def save_setting(key, value):
 # plain text in the Settings sheet like every other setting — this is a basic access
 # gate, not strong security.
 TAB_LOCK_OPTIONS = [
-    ("tab14",     "🛒 المبيعات | Sales"),
+    ("tab14",     "🛒 مبيعات نون | Noon Sales"),
+    ("tab_sales_amazon", "🛒 مبيعات امازون | Amazon Sales"),
     ("tab_dash",  "📊 داشبورد المبيعات | Sales Dashboard"),
     ("tab1",      "📋 الطلبات | Requests"),
     ("tab2",      "✅ الموافقة | Approved"),
@@ -1627,6 +1643,134 @@ def build_daily_orders_prices_fbb(dates):
             prices[sku_up][d.date()].append((price_val, qty_val))
     return prices
 
+# ══════════════════════════════════════════════════════════════════════════
+# ══ مبيعات أمازون — نسخة منفصلة تمامًا عن مبيعات نون فوق، بتقرا من شيت
+#    DailyOrdersAmazon (أعمدة عربي بترتيب مختلف تمامًا عن DailyOrders)، فكل
+#    عمود بيتلاقى بالاسم مش بمكانه. عمود "حاوية كاملة الحمولة": FSAB = تخزين
+#    عادي، أي قيمة تانية = تخزين FBA. مفيش أي تعديل على دوال نون فوق خالص |
+#    Amazon sales — fully separate from the Noon sales above, reads
+#    DailyOrdersAmazon (different Arabic headers, completely different column
+#    order), so every column is located by name, not position. "حاوية كاملة
+#    الحمولة" column: FSAB = normal storage, anything else = FBA storage. The
+#    Noon functions above are completely untouched.
+# ══════════════════════════════════════════════════════════════════════════
+def _find_col_idx_amz(header, names):
+    names_norm = {n.strip().lower() for n in names}
+    for ci, h in enumerate(header):
+        if str(h).strip().lower() in names_norm:
+            return ci
+    return None
+
+def _amz_col_indexes(hdr):
+    return {
+        "sku":   _find_col_idx_amz(hdr, ["رقم تخزين سلعة التاجر msku", "msku", "sku"]),
+        "ts":    _find_col_idx_amz(hdr, ["تاريخ شحنة العميل", "order timestamp"]),
+        "cont":  _find_col_idx_amz(hdr, ["حاوية كاملة الحمولة", "fulfillment center"]),
+        "qty":   _find_col_idx_amz(hdr, ["الكمية", "quantity", "qty"]),
+        "price": _find_col_idx_amz(hdr, ["مبلغ المنتج", "price", "amount"]),
+    }
+
+def _amz_row_is_fba(row, cont_idx):
+    """True = تخزين FBA (أي قيمة غير FSAB في عمود حاوية كاملة الحمولة)،
+    False = تخزين عادي (FSAB)."""
+    if cont_idx is None or len(row) <= cont_idx:
+        return False
+    val = str(row[cont_idx]).strip().upper()
+    return val != "FSAB" and val != ""
+
+def _amz_row_matches(row, cont_idx, mode):
+    """mode: 'all' (كل الصفوف) / 'normal' (FSAB بس) / 'fba' (أي حاجة غير FSAB)."""
+    if mode == "all":
+        return True
+    is_fba = _amz_row_is_fba(row, cont_idx)
+    return is_fba if mode == "fba" else not is_fba
+
+def build_daily_orders_counts_amazon(dates, mode="all"):
+    """نفس منطق build_daily_orders_counts بالظبط، لكن من شيت DailyOrdersAmazon
+    وبأعمدة بتتلاقى بالاسم، مع فلترة اختيارية على عمود حاوية كاملة الحمولة."""
+    data = get_cached(daily_orders_amazon_sheet)
+    dates_set = set(dates)
+    counts = {}
+    if len(data) <= 1:
+        return counts
+    hdr = data[0]
+    idx = _amz_col_indexes(hdr)
+    if idx["sku"] is None or idx["ts"] is None:
+        return counts
+    need = max(idx["sku"], idx["ts"]) + 1
+    for row in data[1:]:
+        if len(row) < need:
+            row = row + [""] * (need - len(row))
+        sku = row[idx["sku"]].strip()
+        ts  = row[idx["ts"]].strip()
+        if not sku or not ts:
+            continue
+        if not _amz_row_matches(row, idx["cont"], mode):
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() in dates_set:
+            sku_up = sku.upper()
+            if sku_up not in counts:
+                counts[sku_up] = {dd: 0 for dd in dates}
+            counts[sku_up][d.date()] += 1
+    return counts
+
+def build_daily_orders_prices_amazon(dates, mode="all"):
+    """نفس منطق build_daily_orders_prices بالظبط، لكن من شيت DailyOrdersAmazon.
+    عمود "مبلغ المنتج" بيتاخد زي ما هو (سعر الحبة الواحدة) من غير أي قسمة على
+    الكمية — بالظبط زي ما بيحصل مع سعر مبيعات نون فوق."""
+    data = get_cached(daily_orders_amazon_sheet)
+    dates_set = set(dates)
+    prices = {}
+    if len(data) <= 1:
+        return prices
+    hdr = data[0]
+    idx = _amz_col_indexes(hdr)
+    if idx["sku"] is None or idx["ts"] is None:
+        return prices
+    need = max(idx["sku"], idx["ts"]) + 1
+    for row in data[1:]:
+        if len(row) < need:
+            row = row + [""] * (need - len(row))
+        sku = row[idx["sku"]].strip()
+        ts  = row[idx["ts"]].strip()
+        if not sku or not ts:
+            continue
+        if not _amz_row_matches(row, idx["cont"], mode):
+            continue
+        d = parse_excel_date(ts)
+        if d and d.date() in dates_set:
+            sku_up = sku.upper()
+            price_val = ""
+            if idx["price"] is not None and len(row) > idx["price"]:
+                raw = str(row[idx["price"]]).strip()
+                price_val = raw if raw and raw.lower() not in ("nan","none","") else ""
+            qty_val = 1
+            if idx["qty"] is not None and len(row) > idx["qty"]:
+                try:
+                    qty_val = int(float(str(row[idx["qty"]]).strip()))
+                except Exception:
+                    qty_val = 1
+            if qty_val < 1:
+                qty_val = 1
+            if sku_up not in prices:
+                prices[sku_up] = {dd: [] for dd in dates}
+            prices[sku_up][d.date()].append((price_val, qty_val))
+    return prices
+
+def build_daily_orders_counts_amazon_all(dates):    return build_daily_orders_counts_amazon(dates, "all")
+def build_daily_orders_counts_amazon_normal(dates): return build_daily_orders_counts_amazon(dates, "normal")
+def build_daily_orders_counts_amazon_fba(dates):    return build_daily_orders_counts_amazon(dates, "fba")
+def build_daily_orders_prices_amazon_all(dates):    return build_daily_orders_prices_amazon(dates, "all")
+def build_daily_orders_prices_amazon_normal(dates): return build_daily_orders_prices_amazon(dates, "normal")
+def build_daily_orders_prices_amazon_fba(dates):    return build_daily_orders_prices_amazon(dates, "fba")
+
+# ══ داشبورد أمازون — مفيش عمود Family في شيت DailyOrdersAmazon، فبنرجع إحصائية
+#    أقسام فاضية دايمًا (نفس فكرة "لو العمود مش موجود الكود بيكمل عادي" تحت) ══
+def build_daily_orders_family_stats_amazon_all(dates, live_map=None):    return {}
+def build_daily_orders_family_stats_amazon_normal(dates, live_map=None): return {}
+def build_daily_orders_family_stats_amazon_fba(dates, live_map=None):    return {}
+
 # ══ الأقسام | Departments (عمود Family في DailyOrders — اختياري، لو مش موجود الكود بيكمل عادي) ══
 FAMILY_HOME_GROUP = {"kitchen_dining", "home_improvement", "gardening", "home_decor", "furniture", "bedding"}
 FAMILY_LABELS = {
@@ -2442,7 +2586,8 @@ if "warehouse_stockout_rows" not in st.session_state:
         st.session_state["warehouse_stockout_rows"])
 
 NAV_ITEMS = [
-    ("tab14",    "🛒", "المبيعات | Sales"),
+    ("tab14",    "🛒", "مبيعات نون | Noon Sales"),
+    ("tab_sales_amazon", "🛒", "مبيعات امازون | Amazon Sales"),
     ("tab_dash", "📊", "داشبورد المبيعات | Dashboard"),
     ("tab9",     "📦", "المخزون | Inventory"),
     ("tab_wh",   "🏭", "مخزون المستودع | Warehouse Stockout"),
@@ -2599,6 +2744,7 @@ with st.container(key="mobile_topnav"):
                 st.rerun()
 
 tab14    = st.container(key="navpanel_tab14")
+tab_sales_amazon = st.container(key="navpanel_tab_sales_amazon")
 tab_dash = st.container(key="navpanel_tab_dash")
 tab9     = st.container(key="navpanel_tab9")
 tab_wh   = st.container(key="navpanel_tab_wh")
@@ -3946,7 +4092,7 @@ def _render_ads_performance_tab():
 
 if st.session_state["nav_page"] == "tab14":
     with tab14:
-        if _tab_gate("tab14", "🛒 المبيعات | Sales"):
+        if _tab_gate("tab14", "🛒 مبيعات نون | Noon Sales"):
             _fbn_subtab_t14, _fbb_subtab_t14 = st.tabs(["🅽 مبيعات نون FBN | Noon FBN Sales", "🅱 مبيعات نون FBB | Noon FBB Sales"])
             with _fbn_subtab_t14:
                 st.subheader("🛒 المبيعات اليومية | Daily Sales")
@@ -4715,6 +4861,778 @@ if st.session_state["nav_page"] == "tab14":
                     # حفظ المرحلين في session_state بعد اكتمال العرض
                     st.session_state["transferred_skus_t14"] = _new_transferred
 
+if st.session_state["nav_page"] == "tab_sales_amazon":
+    with tab_sales_amazon:
+        if _tab_gate("tab_sales_amazon", "🛒 مبيعات امازون | Amazon Sales"):
+            _normal_subtab_tamz, _fba_subtab_tamz = st.tabs(["🅽 عادي (FSAB) | Normal (FSAB)", "📦 تخزين FBA | FBA Storage"])
+            with _normal_subtab_tamz:
+                st.subheader("🛒 مبيعات امازون — عادي (FSAB) | Amazon Sales — Normal (FSAB)")
+                st.caption("نفس تاب مبيعات نون بالظبط، لكن من شيت DailyOrdersAmazon ومقتصر على الطلبات اللي عمود 'حاوية كاملة الحمولة' بتاعها = FSAB (تخزين عادي) | Same as the Noon sales tab exactly, but reads DailyOrdersAmazon and is restricted to orders whose 'حاوية كاملة الحمولة' column = FSAB (normal storage)")
+                render_tacweed_upload("sales_amz_normal")
+                render_warehouse_stock_upload("sales_amz_normal")
+
+                sales_display_days = int(load_settings().get("sales_display_days","7") or 7)
+                today_tamz = datetime.now().date()
+                sales_dates = [today_tamz - timedelta(days=i) for i in range(1, sales_display_days + 1)]
+                sales_labels = []
+                for i, d in enumerate(sales_dates):
+                    if i == 0:
+                        sales_labels.append(f"أمس ({d.strftime('%m-%d')})")
+                    elif i == 1:
+                        sales_labels.append(f"أول أمس ({d.strftime('%m-%d')})")
+                    else:
+                        sales_labels.append(f"قبل {i+1} أيام ({d.strftime('%m-%d')})")
+
+                delay_days_tamz = int(load_settings().get("schedule_delay_days","3") or 3)
+                coverage_days_tamz = int(load_settings().get("schedule_coverage_days","15") or 15)
+
+                if not inv_map:
+                    st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
+                else:
+                    multi_counts_tamz = build_daily_orders_counts_amazon_normal(sales_dates)
+                    prices_map_tamz   = build_daily_orders_prices_amazon_normal(sales_dates)
+
+                    # بناء صفوف — كل SKU موجود في المخزون
+                    sales_tab_rows = []
+                    for sku_up, info in inv_map.items():
+                        stock       = info.get("total_stock", 0)
+                        sales_month = info.get("sales", 0)
+                        img         = info.get("img", "")
+                        sku_disp    = info.get("sku", sku_up)
+                        day_counts  = multi_counts_tamz.get(sku_up, {d: 0 for d in sales_dates})
+                        day_prices  = prices_map_tamz.get(sku_up, {d: [] for d in sales_dates})
+                        total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
+                        avg_daily_tamz = (total_recent / sales_display_days) if sales_display_days > 0 else (sales_month / 30 if sales_month > 0 else 0)
+                        effective_avg_tamz = avg_daily_tamz if avg_daily_tamz > 0 else (sales_month / 30 if sales_month > 0 else 0)
+                        days_to_stockout_tamz = round(stock / effective_avg_tamz) if effective_avg_tamz > 0 else 9999
+                        sales_tab_rows.append({
+                            "sku": sku_disp, "sku_up": sku_up,
+                            "stock": stock, "sales_month": sales_month, "img": img,
+                            "day_counts": day_counts, "day_prices": day_prices,
+                            "total_recent": total_recent,
+                            "effective_avg": effective_avg_tamz,
+                            "days_to_stockout": days_to_stockout_tamz,
+                        })
+
+                    # ترتيب: الأكتر مبيعاً أمس أولاً
+                    sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
+
+                    # ══ إجماليات اليومية في الأعلى — بتتحسب من كل صفوف الأوردرز الخام
+                    #    (multi_counts_tamz)، مش بس الـ SKUs الموجودة في ملف المخزون
+                    #    المرفوع، عشان الإجمالي يعكس العدد الحقيقي دايمًا | Daily totals
+                    #    are computed from the raw daily-orders counts, not only SKUs
+                    #    present in the uploaded inventory file, so the total always
+                    #    reflects the true order count ══
+                    totals_per_day = {d: sum(day_counts.get(d, 0) for day_counts in multi_counts_tamz.values()) for d in sales_dates}
+                    st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
+                    total_cols = st.columns(min(len(sales_dates), sales_display_days))
+                    for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
+                        if ci < len(total_cols):
+                            with total_cols[ci]:
+                                day_total = totals_per_day.get(d, 0)
+                                is_yesterday = (ci == 0)
+                                if is_yesterday:
+                                    bg    = "#14532d" if day_total > 0 else "#7f1d1d"
+                                    num_color = "#86efac" if day_total > 0 else "#fca5a5"
+                                    border = "border:2px solid #22c55e;" if day_total > 0 else "border:2px solid #ef4444;"
+                                else:
+                                    bg    = "#1e293b" if day_total == 0 else "#172554"
+                                    num_color = "#93c5fd" if day_total > 0 else "#64748b"
+                                    border = ""
+                                st.markdown(
+                                    f'<div style="background:{bg};border-radius:8px;padding:8px 10px;text-align:center;margin:2px;{border}">' +
+                                    f'<div style="font-size:11px;color:#94a3b8;">{"🔴 " if is_yesterday and day_total==0 else ("🟢 " if is_yesterday else "")}{lbl.split("(")[0].strip()}</div>' +
+                                    f'<div style="font-size:13px;color:#6b7280;">{d.strftime("%m-%d")}</div>' +
+                                    f'<div style="font-size:{"28" if is_yesterday else "22"}px;font-weight:bold;color:{num_color};">{day_total}</div>' +
+                                    '</div>',
+                                    unsafe_allow_html=True)
+                    st.divider()
+
+                    srch_tamz = st.text_input("🔍 بحث SKU | Search SKU", key="srch_tamz", placeholder="اكتب SKU...")
+                    if srch_tamz.strip():
+                        sales_tab_rows = [r for r in sales_tab_rows if srch_tamz.strip().upper() in r["sku_up"]]
+
+                    # جدول تحميل
+                    if sales_tab_rows:
+                        df_tamz = pd.DataFrame([
+                            {"SKU": r["sku"], **{sales_labels[i]: r["day_counts"].get(d, 0) for i, d in enumerate(sales_dates)},
+                             "مخزون | Stock": r["stock"], "مبيع شهري | Monthly Sales": r["sales_month"]}
+                            for r in sales_tab_rows
+                        ])
+                        c1, c2 = st.columns(2)
+                        with c1: dl_btn(df_tamz, "sales_daily_amazon_normal", key="dlbtn_tamz_normal")
+                        with c2: st.info(f"📦 SKUs: {len(sales_tab_rows)} | 📅 {sales_display_days} يوم")
+
+                    # ══ قائمة SKUs المرحلة من المبيعات (محتاج جدولة فقط) ══
+                    # تحديث المرحلين بعد بناء الصفوف الكاملة
+                    _new_transferred = []
+
+                    # ══ خريطة SKUs المجدولة خلال آخر 4 أيام (لعرض ASN + الكمية لو فعلاً ليها جدولة) ══
+                    recent_sched_map_tamz = get_recent_schedule_rows(days_back=4)
+                    pending_approval_skus_tamz = get_pending_approval_skus()
+                    ads_map_tamz = get_ads_map()
+                    com_map_tamz = get_com_map()
+                    live_map_tamz = get_live_map()
+                    xdock_threshold_tamz = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
+
+                    st.divider()
+                    for r in sales_tab_rows:
+                        c_img, c_info = st.columns([1, 7])
+                        with c_img:
+                            show_img(r["img"], 70)
+                        with c_info:
+                            st.markdown(f"**SKU:** {sku_link_html(r['sku'])}", unsafe_allow_html=True)
+                            tc_badge_tamz = warehouse_available_badge(r["sku_up"])
+                            if tc_badge_tamz:
+                                st.markdown(tc_badge_tamz, unsafe_allow_html=True)
+
+                            # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
+                            ads_entries_tamz = ads_map_tamz.get(r["sku_up"])
+                            # ── الإجماليات دي بتتحسب دايمًا (صفر لو مفيش إعلانات) عشان متفضلش
+                            #    قيم قديمة من الـ SKU اللي قبله في اللستة | Always computed
+                            #    (zero when no ads) so stale values from the previous SKU in
+                            #    the loop never leak through ──
+                            total_spends_tamz  = sum(a["spends"]  for a in ads_entries_tamz) if ads_entries_tamz else 0.0
+                            total_revenue_tamz = sum(a["revenue"] for a in ads_entries_tamz) if ads_entries_tamz else 0.0
+                            total_orders_tamz  = sum(a["orders"]  for a in ads_entries_tamz) if ads_entries_tamz else 0.0
+                            if ads_entries_tamz:
+                                with st.expander(f"📢 أداء الإعلانات | Ads Performance — {len(ads_entries_tamz)} حملة | campaign(s)"):
+                                    st.markdown(
+                                        f"💸 **إجمالي المصروف:** {total_spends_tamz:,.2f} ريال &nbsp;|&nbsp; "
+                                        f"💰 **إجمالي الإيراد:** {total_revenue_tamz:,.2f} ريال &nbsp;|&nbsp; "
+                                        f"🛒 **طلبات من الإعلان:** {total_orders_tamz:,.0f}")
+                                    for ad in ads_entries_tamz:
+                                        st.markdown(
+                                            f"**{ad['campaign']}**<br>"
+                                            f"👁️ ظهور: {ad['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {ad['clicks']:,.0f} &nbsp;|&nbsp; "
+                                            f"🛒 طلبات: {ad['orders']:,.0f} &nbsp;|&nbsp; ➕ سلة: {ad['atc']:,.0f}<br>"
+                                            f"💸 مصروف: {ad['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {ad['revenue']:,.2f} ريال<br>"
+                                            f"📊 CTR: {ad['ctr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {ad['roas']:.2f} &nbsp;|&nbsp; "
+                                            f"CPC: {ad['cpc']:.2f} &nbsp;|&nbsp; CPS: {ad['cps']:.2f} &nbsp;|&nbsp; CVR: {ad['cvr']:.2f}%",
+                                            unsafe_allow_html=True)
+                                        st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
+
+
+                            # ══ مخزون Xdock (من تاب LIVE) — مخزون منفصل عن Inventory، لو قرب يخلص محتاج تزويد ══
+                            live_info_tamz = live_map_tamz.get(r["sku_up"])
+                            if live_info_tamz is not None:
+                                xnet_tamz = live_info_tamz.get("stock_xdock_net", 0)
+                                xlow_tamz = xnet_tamz <= xdock_threshold_tamz
+                                st.markdown(
+                                    f'<span class="wh-badge" style="background:{"#7f1d1d" if xlow_tamz else "#3b0764"};'
+                                    f'color:{"#fca5a5" if xlow_tamz else "#e9d5ff"};">'
+                                    f'{"🔴" if xlow_tamz else "🟣"} مخزون Xdock: {xnet_tamz:,}'
+                                    f'{" — قارب على النفاد" if xlow_tamz else ""}</span>',
+                                    unsafe_allow_html=True)
+
+                            # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة (يعرض دايمًا، وبيحط صفر في أي
+                            #    قيمة ناقصة مع تنبيه) | Net price after commission/delivery/VAT (always shown;
+                            #    missing values default to zero with a warning) ══
+                            render_price_profit_block_tamz(
+                                r, com_map_tamz, live_map_tamz, sales_dates,
+                                ads_entries_tamz, total_orders_tamz, total_spends_tamz)
+
+                            # ══ أمس بارز ══
+                            yesterday_tamz = sales_dates[0] if sales_dates else None
+                            yesterday_cnt = r["day_counts"].get(yesterday_tamz, 0) if yesterday_tamz else 0
+                            yesterday_prices = r["day_prices"].get(yesterday_tamz, []) if yesterday_tamz else []
+
+                            def fmt_prices(prices_list):
+                                """يجمع الأسعار ويرتبها من الأعلى للأقل، ويتجاهل الفاضي.
+                                prices_list: قائمة من (price_str, qty) أو strings."""
+                                pc = {}  # price_str -> (total_qty, float_val)
+                                for item in prices_list:
+                                    if isinstance(item, tuple):
+                                        p, qty = item
+                                    else:
+                                        p, qty = item, 1
+                                    if not p or str(p).strip().lower() in ("","nan","none"):
+                                        # لو مفيش سعر، نعد الكمية بس بدون سعر
+                                        pc["__no_price__"] = (pc.get("__no_price__",(0,0))[0] + qty, -1)
+                                        continue
+                                    p_str = str(p).strip()
+                                    try:
+                                        key = float(p_str.replace(",",""))
+                                    except Exception:
+                                        key = 0.0
+                                    prev_qty, _ = pc.get(p_str, (0, key))
+                                    pc[p_str] = (prev_qty + qty, key)
+                                if not pc:
+                                    return ""
+                                # ترتيب من السعر الأعلى للأقل
+                                sorted_prices = sorted(pc.items(), key=lambda x: -x[1][1])
+                                parts = []
+                                for price_str, (total_qty, _) in sorted_prices:
+                                    if price_str == "__no_price__":
+                                        parts.append(f"{total_qty}")
+                                    else:
+                                        parts.append(f"{total_qty} × {price_str}")
+                                return " | ".join(parts)
+
+                            def get_min_max_price(prices_list):
+                                """يرجع (أقل سعر, أعلى سعر) كـ float من قائمة (price_str, qty)."""
+                                vals = []
+                                for item in prices_list:
+                                    p = item[0] if isinstance(item, tuple) else item
+                                    if p and str(p).strip().lower() not in ("","nan","none"):
+                                        try:
+                                            vals.append(float(str(p).replace(",","")))
+                                        except Exception:
+                                            pass
+                                if not vals:
+                                    return None, None
+                                return min(vals), max(vals)
+
+                            if yesterday_tamz:
+                                if yesterday_cnt > 0:
+                                    prices_str_y = fmt_prices(yesterday_prices)
+                                    min_p_y, max_p_y = get_min_max_price(yesterday_prices)
+                                    price_lines_y = prices_str_y.split(" | ") if prices_str_y else []
+                                    price_html_y = ""
+                                    if price_lines_y:
+                                        price_html_y = "<br>" + "<br>".join(
+                                            f'<span style="color:#bbf7d0;font-size:14px;font-weight:bold;">↳ {line}</span>'
+                                            for line in price_lines_y
+                                        )
+                                    minmax_html_y = ""
+                                    if min_p_y is not None and max_p_y is not None and min_p_y != max_p_y:
+                                        minmax_html_y = (
+                                            f'<br><span style="color:#fbaf24;font-size:14px;font-weight:bold;">📉 أقل: {min_p_y:g} &nbsp;|&nbsp; 📈 أعلى: {max_p_y:g}</span>'
+                                        )
+                                    elif min_p_y is not None:
+                                        minmax_html_y = f'<br><span style="color:#fbaf24;font-size:14px;font-weight:bold;">💰 سعر: {min_p_y:g}</span>'
+                                    yesterday_html = (
+                                        f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                                        f'<span style="color:#86efac;font-size:15px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
+                                        minmax_html_y +
+                                        price_html_y +
+                                        '</div>'
+                                    )
+                                else:
+                                    yesterday_html = (
+                                        '<div style="background:#7f1d1d;border:2px solid #ef4444;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                                        '<span style="color:#fca5a5;font-size:15px;font-weight:bold;">🔴 أمس: 0</span>' +
+                                        '</div>'
+                                    )
+                                st.markdown(yesterday_html, unsafe_allow_html=True)
+
+                            # باقي الأيام — كل يوم في سطر مع الأسعار تنازلياً + أعلى/أقل
+                            day_parts = []
+                            for i, d in enumerate(sales_dates):
+                                if i == 0:
+                                    continue  # أمس اتعرض فوق
+                                cnt = r["day_counts"].get(d, 0)
+                                day_prices_list = r["day_prices"].get(d, [])
+                                color = "#000000" if cnt > 0 else "#475569"
+                                lbl_short = sales_labels[i].split("(")[0].strip()
+                                prices_str_d = fmt_prices(day_prices_list)
+                                min_p_d, max_p_d = get_min_max_price(day_prices_list)
+                                minmax_d = ""
+                                if min_p_d is not None and max_p_d is not None and min_p_d != max_p_d:
+                                    minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">(📉{min_p_d:g}–📈{max_p_d:g})</span>'
+                                elif min_p_d is not None:
+                                    minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">({min_p_d:g})</span>'
+                                if prices_str_d:
+                                    price_lines_d = prices_str_d.split(" | ")
+                                    price_detail = " &nbsp; ".join(
+                                        f'<span style="color:#1d4ed8;font-size:13px;font-weight:bold;">↳ {line}</span>'
+                                        for line in price_lines_d
+                                    )
+                                    day_parts.append(
+                                        f'<span style="color:{color};font-size:15px;font-weight:bold;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>' +
+                                        f'<br><span style="padding-right:8px;">{price_detail}</span>'
+                                    )
+                                else:
+                                    day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>')
+                            if day_parts:
+                                st.markdown("<br>".join(day_parts), unsafe_allow_html=True)
+
+                            # مخزون + مبيع شهري
+                            st.markdown(
+                                f"📦 **مخزون:** {r['stock']} &nbsp;|&nbsp; "
+                                f"📈 **شهري:** {r['sales_month']} &nbsp;|&nbsp; "
+                                f"📊 **يومي أخير:** {r['effective_avg']:.1f} &nbsp;|&nbsp; "
+                                f"⏳ **نفاد خلال:** {r['days_to_stockout'] if r['days_to_stockout'] < 9999 else '—'} يوم"
+                            )
+
+                            # ══ حالة التغطية ══
+                            badge_text_tamz, badge_color_tamz, sched_tamz = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days_tamz)
+                            # لو مفيش أي متوسط بيع (لا حديث ولا شهري) يبقى المخزون مش بينزل خالص —
+                            # فمينفعش نعتبره "غير كافٍ" لمجرد إن مفيش بيانات بيع (كان ده الخلل قبل كده)
+                            stock_self_ok = (r["effective_avg"] <= 0) or (r["days_to_stockout"] >= coverage_days_tamz)
+                            un_notes = get_unavailable_ordered_note(r["sku"])
+                            # ══ مجدولة خلال آخر 4 أيام؟ (بنحسبها الأول عشان نستخدمها في قرار عرض شارة التغطية والترحيل) ══
+                            recent_sched_tamz = recent_sched_map_tamz.get(r["sku_up"])
+
+                            if stock_self_ok and not sched_tamz:
+                                if r["effective_avg"] <= 0:
+                                    cov_badge_text = "✅ لا توجد مبيعات حالياً — لا يحتاج جدولة | No sales recorded — no scheduling needed"
+                                else:
+                                    cov_badge_text = f"✅ مخزون كافٍ ({r['days_to_stockout']} يوم) — لا يحتاج جدولة الآن | Stock sufficient"
+                                cov_badge_color = "#15803d"
+                            elif stock_self_ok and sched_tamz:
+                                sched_src_tamz = "تشييك" if sched_tamz.get("source") == "Check" else "مجدول"
+                                arrival_tamz = (sched_tamz["parsed"] + timedelta(days=delay_days_tamz)).date() if sched_tamz.get("parsed") else None
+                                stockout_disp_tamz = f"{r['days_to_stockout']} يوم" if r["effective_avg"] > 0 else "لا توجد مبيعات"
+                                cov_badge_text  = (f"✅ مخزون كافٍ ({stockout_disp_tamz}) + ASN {sched_tamz['asn']} بتاريخ {sched_tamz['date']}"
+                                                   + (f" — وصول: {arrival_tamz}" if arrival_tamz else "") + f" [{sched_src_tamz}]")
+                                cov_badge_color = "#15803d"
+                            else:
+                                cov_badge_text  = badge_text_tamz
+                                cov_badge_color = badge_color_tamz
+
+                            # لو السكو فعلاً ليه جدولة خلال آخر 4 أيام، منعرضش شارة "محتاج جدولة الآن"
+                            # المتناقضة جنب شارة الجدولة الحديثة (البنفسجي) اللي هتتعرض تحت — عشان محدش يتلخبط
+                            show_normal_cov_badge_tamz = not (recent_sched_tamz and "محتاج جدولة" in cov_badge_text)
+                            if show_normal_cov_badge_tamz:
+                                st.markdown(
+                                    f'<span class="status-badge-lg" style="background:{cov_badge_color};">{cov_badge_text}</span>',
+                                    unsafe_allow_html=True)
+
+                            # ══ مجدولة خلال آخر 4 أيام؟ (لو فعلاً ليها جدولة) — تعرض ASN + الكمية + التاريخ ══
+                            if recent_sched_tamz:
+                                st.markdown(
+                                    f'<span class="status-badge-lg" style="background:#7c3aed;">'
+                                    f'📅 مجدولة خلال آخر 4 أيام | Scheduled in last 4 days — '
+                                    f'ASN <b>{recent_sched_tamz["asn"]}</b> &nbsp;|&nbsp; '
+                                    f'الكمية | Qty: <b>{recent_sched_tamz.get("qty","")}</b> &nbsp;|&nbsp; '
+                                    f'بتاريخ {recent_sched_tamz["date"]} [{recent_sched_tamz["source_label"]}]'
+                                    f'</span>',
+                                    unsafe_allow_html=True)
+
+                            if r["sku_up"] in pending_approval_skus_tamz:
+                                st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
+
+                            # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة
+                            #    وبدون تفاصيل أخرى وبدون جدولة حديثة (آخر 4 أيام) — لو ليه جدولة حديثة
+                            #    (حتى لو منتهية) يبقى أموره تمام ومينفعش يترحّل لمراجعة المخزون ══
+                            is_needs_sched_only = (
+                                not stock_self_ok
+                                and badge_text_tamz and "محتاج جدولة" in badge_text_tamz
+                                and not sched_tamz
+                                and not un_notes
+                                and not recent_sched_tamz
+                            )
+                            if is_needs_sched_only:
+                                _new_transferred.append({
+                                    "sku": r["sku"], "sku_up": r["sku_up"], "stock": r["stock"],
+                                    "sales_month": r["sales_month"], "img": r["img"],
+                                    "effective_avg": r["effective_avg"], "days_to_stockout": r["days_to_stockout"],
+                                    "day_counts": r["day_counts"],
+                                })
+                                st.caption("📌 مرحّل لتاب مراجعة المخزون | Transferred to Stock Review tab")
+
+                            if un_notes:
+                                for note in un_notes:
+                                    st.markdown(big_note_html(note), unsafe_allow_html=True)
+                            render_recent_expired_note(r["sku"])
+                        st.divider()
+                    # حفظ المرحلين في session_state بعد اكتمال العرض
+                    st.session_state["transferred_skus_tamz"] = _new_transferred
+
+            with _fba_subtab_tamz:
+                st.subheader("📦 مبيعات امازون — تخزين FBA | Amazon Sales — FBA Storage")
+                st.caption("نفس تاب مبيعات أمازون بالظبط، لكن مقتصر على الطلبات اللي عمود 'حاوية كاملة الحمولة' بتاعها أي قيمة غير FSAB (يعني تخزين عند أمازون FBA) | Same as the Amazon sales tab exactly, restricted to orders whose 'حاوية كاملة الحمولة' column is anything other than FSAB (i.e. stored with Amazon / FBA)")
+                render_tacweed_upload("sales_amz_fba")
+                render_warehouse_stock_upload("sales_amz_fba")
+
+                sales_display_days = int(load_settings().get("sales_display_days","7") or 7)
+                today_tamz = datetime.now().date()
+                sales_dates = [today_tamz - timedelta(days=i) for i in range(1, sales_display_days + 1)]
+                sales_labels = []
+                for i, d in enumerate(sales_dates):
+                    if i == 0:
+                        sales_labels.append(f"أمس ({d.strftime('%m-%d')})")
+                    elif i == 1:
+                        sales_labels.append(f"أول أمس ({d.strftime('%m-%d')})")
+                    else:
+                        sales_labels.append(f"قبل {i+1} أيام ({d.strftime('%m-%d')})")
+
+                delay_days_tamz = int(load_settings().get("schedule_delay_days","3") or 3)
+                coverage_days_tamz = int(load_settings().get("schedule_coverage_days","15") or 15)
+
+                if not inv_map:
+                    st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
+                else:
+                    multi_counts_tamz = build_daily_orders_counts_amazon_fba(sales_dates)
+                    prices_map_tamz   = build_daily_orders_prices_amazon_fba(sales_dates)
+
+                    # بناء صفوف — كل SKU موجود في المخزون
+                    sales_tab_rows = []
+                    for sku_up, info in inv_map.items():
+                        stock       = info.get("total_stock", 0)
+                        sales_month = info.get("sales", 0)
+                        img         = info.get("img", "")
+                        sku_disp    = info.get("sku", sku_up)
+                        day_counts  = multi_counts_tamz.get(sku_up, {d: 0 for d in sales_dates})
+                        day_prices  = prices_map_tamz.get(sku_up, {d: [] for d in sales_dates})
+                        total_recent = sum(day_counts.get(d, 0) for d in sales_dates)
+                        avg_daily_tamz = (total_recent / sales_display_days) if sales_display_days > 0 else (sales_month / 30 if sales_month > 0 else 0)
+                        effective_avg_tamz = avg_daily_tamz if avg_daily_tamz > 0 else (sales_month / 30 if sales_month > 0 else 0)
+                        days_to_stockout_tamz = round(stock / effective_avg_tamz) if effective_avg_tamz > 0 else 9999
+                        sales_tab_rows.append({
+                            "sku": sku_disp, "sku_up": sku_up,
+                            "stock": stock, "sales_month": sales_month, "img": img,
+                            "day_counts": day_counts, "day_prices": day_prices,
+                            "total_recent": total_recent,
+                            "effective_avg": effective_avg_tamz,
+                            "days_to_stockout": days_to_stockout_tamz,
+                        })
+
+                    # ── SKUs باعت طلبات FBA لكن مش موجودة في ملف المخزون المرفوع —
+                    #    بتتضاف كمان عشان كل مبيعات FBA تظهر في القائمة، مش بس اللي
+                    #    عندها مخزون مرفوع. المخزون بيتحط 0 (غير معروف) ومعاها علامة
+                    #    توضيحية. الصورة بتتجاب من شيت "links n" (نفس مصدر الصور في
+                    #    تاب المخزون) لأن الـ SKU ده أصلاً مش في ملف المخزون فمفيش
+                    #    عمود صورة نجيبها منه هناك | SKUs with FBA orders that
+                    #    aren't in the uploaded inventory file — added too so every
+                    #    FBA sale shows up, not only SKUs with uploaded stock.
+                    #    Stock shown as 0 (unknown) with a note explaining why. The
+                    #    image is looked up from the "links n" sheet (the same
+                    #    source Inventory itself pulls images from), since this SKU
+                    #    has no Inventory row to carry an image column at all.
+                    inv_skus_seen_fba = set(inv_map.keys())
+                    links_map_fba_orphan = get_links_map()
+                    for sku_up, day_counts in multi_counts_tamz.items():
+                        if sku_up in inv_skus_seen_fba:
+                            continue
+                        total_recent_orphan = sum(day_counts.get(d, 0) for d in sales_dates)
+                        if total_recent_orphan <= 0:
+                            continue
+                        day_prices_orphan = prices_map_tamz.get(sku_up, {d: [] for d in sales_dates})
+                        sales_tab_rows.append({
+                            "sku": sku_up, "sku_up": sku_up,
+                            "stock": 0, "sales_month": 0, "img": links_map_fba_orphan.get(sku_up, ""),
+                            "day_counts": day_counts, "day_prices": day_prices_orphan,
+                            "total_recent": total_recent_orphan,
+                            "effective_avg": 0,
+                            "days_to_stockout": 9999,
+                            "not_in_inventory": True,
+                        })
+
+
+                    # ترتيب: الأكتر مبيعاً أمس أولاً
+                    sales_tab_rows.sort(key=lambda r: -r["day_counts"].get(sales_dates[0], 0) if sales_dates else 0)
+
+                    # ══ إجماليات اليومية في الأعلى — بتتحسب من كل صفوف الأوردرز الخام
+                    #    (multi_counts_tamz)، مش بس الـ SKUs الموجودة في ملف المخزون
+                    #    المرفوع، عشان الإجمالي يعكس العدد الحقيقي دايمًا | Daily totals
+                    #    are computed from the raw daily-orders counts, not only SKUs
+                    #    present in the uploaded inventory file, so the total always
+                    #    reflects the true order count ══
+                    totals_per_day = {d: sum(day_counts.get(d, 0) for day_counts in multi_counts_tamz.values()) for d in sales_dates}
+                    st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
+                    total_cols = st.columns(min(len(sales_dates), sales_display_days))
+                    for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
+                        if ci < len(total_cols):
+                            with total_cols[ci]:
+                                day_total = totals_per_day.get(d, 0)
+                                is_yesterday = (ci == 0)
+                                if is_yesterday:
+                                    bg    = "#14532d" if day_total > 0 else "#7f1d1d"
+                                    num_color = "#86efac" if day_total > 0 else "#fca5a5"
+                                    border = "border:2px solid #22c55e;" if day_total > 0 else "border:2px solid #ef4444;"
+                                else:
+                                    bg    = "#1e293b" if day_total == 0 else "#172554"
+                                    num_color = "#93c5fd" if day_total > 0 else "#64748b"
+                                    border = ""
+                                st.markdown(
+                                    f'<div style="background:{bg};border-radius:8px;padding:8px 10px;text-align:center;margin:2px;{border}">' +
+                                    f'<div style="font-size:11px;color:#94a3b8;">{"🔴 " if is_yesterday and day_total==0 else ("🟢 " if is_yesterday else "")}{lbl.split("(")[0].strip()}</div>' +
+                                    f'<div style="font-size:13px;color:#6b7280;">{d.strftime("%m-%d")}</div>' +
+                                    f'<div style="font-size:{"28" if is_yesterday else "22"}px;font-weight:bold;color:{num_color};">{day_total}</div>' +
+                                    '</div>',
+                                    unsafe_allow_html=True)
+                    st.divider()
+
+                    srch_tamz = st.text_input("🔍 بحث SKU | Search SKU", key="srch_tamz_fba", placeholder="اكتب SKU...")
+                    if srch_tamz.strip():
+                        sales_tab_rows = [r for r in sales_tab_rows if srch_tamz.strip().upper() in r["sku_up"]]
+
+                    # جدول تحميل
+                    if sales_tab_rows:
+                        df_tamz = pd.DataFrame([
+                            {"SKU": r["sku"], **{sales_labels[i]: r["day_counts"].get(d, 0) for i, d in enumerate(sales_dates)},
+                             "مخزون | Stock": r["stock"], "مبيع شهري | Monthly Sales": r["sales_month"]}
+                            for r in sales_tab_rows
+                        ])
+                        c1, c2 = st.columns(2)
+                        with c1: dl_btn(df_tamz, "sales_daily_amazon_fba", key="dlbtn_tamz_fba")
+                        with c2: st.info(f"📦 SKUs: {len(sales_tab_rows)} | 📅 {sales_display_days} يوم")
+
+                    # ══ قائمة SKUs المرحلة من المبيعات (محتاج جدولة فقط) ══
+                    # تحديث المرحلين بعد بناء الصفوف الكاملة
+                    _new_transferred = []
+
+                    # ══ خريطة SKUs المجدولة خلال آخر 4 أيام (لعرض ASN + الكمية لو فعلاً ليها جدولة) ══
+                    recent_sched_map_tamz = get_recent_schedule_rows(days_back=4)
+                    pending_approval_skus_tamz = get_pending_approval_skus()
+                    ads_map_tamz = get_ads_map()
+                    com_map_tamz = get_com_map()
+                    live_map_tamz = get_live_map()
+                    xdock_threshold_tamz = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
+
+                    st.divider()
+                    for r in sales_tab_rows:
+                        c_img, c_info = st.columns([1, 7])
+                        with c_img:
+                            show_img(r["img"], 70)
+                        with c_info:
+                            st.markdown(f"**SKU:** {sku_link_html(r['sku'])}", unsafe_allow_html=True)
+                            if r.get("not_in_inventory"):
+                                st.markdown(
+                                    '<span style="background:#78350f;color:#fde68a;padding:2px 8px;'
+                                    'border-radius:6px;font-size:12px;">⚠️ مش موجود في ملف المخزون المرفوع | Not in uploaded inventory</span>',
+                                    unsafe_allow_html=True)
+                            tc_badge_tamz = warehouse_available_badge(r["sku_up"])
+                            if tc_badge_tamz:
+                                st.markdown(tc_badge_tamz, unsafe_allow_html=True)
+
+                            # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
+                            ads_entries_tamz = ads_map_tamz.get(r["sku_up"])
+                            # ── الإجماليات دي بتتحسب دايمًا (صفر لو مفيش إعلانات) عشان متفضلش
+                            #    قيم قديمة من الـ SKU اللي قبله في اللستة | Always computed
+                            #    (zero when no ads) so stale values from the previous SKU in
+                            #    the loop never leak through ──
+                            total_spends_tamz  = sum(a["spends"]  for a in ads_entries_tamz) if ads_entries_tamz else 0.0
+                            total_revenue_tamz = sum(a["revenue"] for a in ads_entries_tamz) if ads_entries_tamz else 0.0
+                            total_orders_tamz  = sum(a["orders"]  for a in ads_entries_tamz) if ads_entries_tamz else 0.0
+                            if ads_entries_tamz:
+                                with st.expander(f"📢 أداء الإعلانات | Ads Performance — {len(ads_entries_tamz)} حملة | campaign(s)"):
+                                    st.markdown(
+                                        f"💸 **إجمالي المصروف:** {total_spends_tamz:,.2f} ريال &nbsp;|&nbsp; "
+                                        f"💰 **إجمالي الإيراد:** {total_revenue_tamz:,.2f} ريال &nbsp;|&nbsp; "
+                                        f"🛒 **طلبات من الإعلان:** {total_orders_tamz:,.0f}")
+                                    for ad in ads_entries_tamz:
+                                        st.markdown(
+                                            f"**{ad['campaign']}**<br>"
+                                            f"👁️ ظهور: {ad['views']:,.0f} &nbsp;|&nbsp; 🖱️ نقرات: {ad['clicks']:,.0f} &nbsp;|&nbsp; "
+                                            f"🛒 طلبات: {ad['orders']:,.0f} &nbsp;|&nbsp; ➕ سلة: {ad['atc']:,.0f}<br>"
+                                            f"💸 مصروف: {ad['spends']:,.2f} ريال &nbsp;|&nbsp; 💰 إيراد: {ad['revenue']:,.2f} ريال<br>"
+                                            f"📊 CTR: {ad['ctr']:.2f}% &nbsp;|&nbsp; 🎯 ROAS: {ad['roas']:.2f} &nbsp;|&nbsp; "
+                                            f"CPC: {ad['cpc']:.2f} &nbsp;|&nbsp; CPS: {ad['cps']:.2f} &nbsp;|&nbsp; CVR: {ad['cvr']:.2f}%",
+                                            unsafe_allow_html=True)
+                                        st.markdown("<hr style='margin:6px 0;'>", unsafe_allow_html=True)
+
+
+                            # ══ مخزون Xdock (من تاب LIVE) — مخزون منفصل عن Inventory، لو قرب يخلص محتاج تزويد ══
+                            live_info_tamz = live_map_tamz.get(r["sku_up"])
+                            if live_info_tamz is not None:
+                                xnet_tamz = live_info_tamz.get("stock_xdock_net", 0)
+                                xlow_tamz = xnet_tamz <= xdock_threshold_tamz
+                                st.markdown(
+                                    f'<span class="wh-badge" style="background:{"#7f1d1d" if xlow_tamz else "#3b0764"};'
+                                    f'color:{"#fca5a5" if xlow_tamz else "#e9d5ff"};">'
+                                    f'{"🔴" if xlow_tamz else "🟣"} مخزون Xdock: {xnet_tamz:,}'
+                                    f'{" — قارب على النفاد" if xlow_tamz else ""}</span>',
+                                    unsafe_allow_html=True)
+
+                            # ══ صافي سعر البيع بعد العمولة والتوصيل والضريبة (يعرض دايمًا، وبيحط صفر في أي
+                            #    قيمة ناقصة مع تنبيه) | Net price after commission/delivery/VAT (always shown;
+                            #    missing values default to zero with a warning) ══
+                            render_price_profit_block_tamz(
+                                r, com_map_tamz, live_map_tamz, sales_dates,
+                                ads_entries_tamz, total_orders_tamz, total_spends_tamz)
+
+                            # ══ أمس بارز ══
+                            yesterday_tamz = sales_dates[0] if sales_dates else None
+                            yesterday_cnt = r["day_counts"].get(yesterday_tamz, 0) if yesterday_tamz else 0
+                            yesterday_prices = r["day_prices"].get(yesterday_tamz, []) if yesterday_tamz else []
+
+                            def fmt_prices(prices_list):
+                                """يجمع الأسعار ويرتبها من الأعلى للأقل، ويتجاهل الفاضي.
+                                prices_list: قائمة من (price_str, qty) أو strings."""
+                                pc = {}  # price_str -> (total_qty, float_val)
+                                for item in prices_list:
+                                    if isinstance(item, tuple):
+                                        p, qty = item
+                                    else:
+                                        p, qty = item, 1
+                                    if not p or str(p).strip().lower() in ("","nan","none"):
+                                        # لو مفيش سعر، نعد الكمية بس بدون سعر
+                                        pc["__no_price__"] = (pc.get("__no_price__",(0,0))[0] + qty, -1)
+                                        continue
+                                    p_str = str(p).strip()
+                                    try:
+                                        key = float(p_str.replace(",",""))
+                                    except Exception:
+                                        key = 0.0
+                                    prev_qty, _ = pc.get(p_str, (0, key))
+                                    pc[p_str] = (prev_qty + qty, key)
+                                if not pc:
+                                    return ""
+                                # ترتيب من السعر الأعلى للأقل
+                                sorted_prices = sorted(pc.items(), key=lambda x: -x[1][1])
+                                parts = []
+                                for price_str, (total_qty, _) in sorted_prices:
+                                    if price_str == "__no_price__":
+                                        parts.append(f"{total_qty}")
+                                    else:
+                                        parts.append(f"{total_qty} × {price_str}")
+                                return " | ".join(parts)
+
+                            def get_min_max_price(prices_list):
+                                """يرجع (أقل سعر, أعلى سعر) كـ float من قائمة (price_str, qty)."""
+                                vals = []
+                                for item in prices_list:
+                                    p = item[0] if isinstance(item, tuple) else item
+                                    if p and str(p).strip().lower() not in ("","nan","none"):
+                                        try:
+                                            vals.append(float(str(p).replace(",","")))
+                                        except Exception:
+                                            pass
+                                if not vals:
+                                    return None, None
+                                return min(vals), max(vals)
+
+                            if yesterday_tamz:
+                                if yesterday_cnt > 0:
+                                    prices_str_y = fmt_prices(yesterday_prices)
+                                    min_p_y, max_p_y = get_min_max_price(yesterday_prices)
+                                    price_lines_y = prices_str_y.split(" | ") if prices_str_y else []
+                                    price_html_y = ""
+                                    if price_lines_y:
+                                        price_html_y = "<br>" + "<br>".join(
+                                            f'<span style="color:#bbf7d0;font-size:14px;font-weight:bold;">↳ {line}</span>'
+                                            for line in price_lines_y
+                                        )
+                                    minmax_html_y = ""
+                                    if min_p_y is not None and max_p_y is not None and min_p_y != max_p_y:
+                                        minmax_html_y = (
+                                            f'<br><span style="color:#fbaf24;font-size:14px;font-weight:bold;">📉 أقل: {min_p_y:g} &nbsp;|&nbsp; 📈 أعلى: {max_p_y:g}</span>'
+                                        )
+                                    elif min_p_y is not None:
+                                        minmax_html_y = f'<br><span style="color:#fbaf24;font-size:14px;font-weight:bold;">💰 سعر: {min_p_y:g}</span>'
+                                    yesterday_html = (
+                                        f'<div style="background:#14532d;border:2px solid #22c55e;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                                        f'<span style="color:#86efac;font-size:15px;font-weight:bold;">🟢 أمس: {yesterday_cnt}</span>' +
+                                        minmax_html_y +
+                                        price_html_y +
+                                        '</div>'
+                                    )
+                                else:
+                                    yesterday_html = (
+                                        '<div style="background:#7f1d1d;border:2px solid #ef4444;border-radius:8px;padding:8px 14px;margin:4px 0;display:inline-block;">' +
+                                        '<span style="color:#fca5a5;font-size:15px;font-weight:bold;">🔴 أمس: 0</span>' +
+                                        '</div>'
+                                    )
+                                st.markdown(yesterday_html, unsafe_allow_html=True)
+
+                            # باقي الأيام — كل يوم في سطر مع الأسعار تنازلياً + أعلى/أقل
+                            day_parts = []
+                            for i, d in enumerate(sales_dates):
+                                if i == 0:
+                                    continue  # أمس اتعرض فوق
+                                cnt = r["day_counts"].get(d, 0)
+                                day_prices_list = r["day_prices"].get(d, [])
+                                color = "#000000" if cnt > 0 else "#475569"
+                                lbl_short = sales_labels[i].split("(")[0].strip()
+                                prices_str_d = fmt_prices(day_prices_list)
+                                min_p_d, max_p_d = get_min_max_price(day_prices_list)
+                                minmax_d = ""
+                                if min_p_d is not None and max_p_d is not None and min_p_d != max_p_d:
+                                    minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">(📉{min_p_d:g}–📈{max_p_d:g})</span>'
+                                elif min_p_d is not None:
+                                    minmax_d = f' <span style="color:#b45309;font-size:13px;font-weight:bold;">({min_p_d:g})</span>'
+                                if prices_str_d:
+                                    price_lines_d = prices_str_d.split(" | ")
+                                    price_detail = " &nbsp; ".join(
+                                        f'<span style="color:#1d4ed8;font-size:13px;font-weight:bold;">↳ {line}</span>'
+                                        for line in price_lines_d
+                                    )
+                                    day_parts.append(
+                                        f'<span style="color:{color};font-size:15px;font-weight:bold;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>' +
+                                        f'<br><span style="padding-right:8px;">{price_detail}</span>'
+                                    )
+                                else:
+                                    day_parts.append(f'<span style="color:{color};font-size:11px;">{lbl_short}: <b>{cnt}</b>{minmax_d}</span>')
+                            if day_parts:
+                                st.markdown("<br>".join(day_parts), unsafe_allow_html=True)
+
+                            # مخزون + مبيع شهري
+                            st.markdown(
+                                f"📦 **مخزون:** {r['stock']} &nbsp;|&nbsp; "
+                                f"📈 **شهري:** {r['sales_month']} &nbsp;|&nbsp; "
+                                f"📊 **يومي أخير:** {r['effective_avg']:.1f} &nbsp;|&nbsp; "
+                                f"⏳ **نفاد خلال:** {r['days_to_stockout'] if r['days_to_stockout'] < 9999 else '—'} يوم"
+                            )
+
+                            # ══ حالة التغطية ══
+                            badge_text_tamz, badge_color_tamz, sched_tamz = schedule_coverage_badge(r["sku"], r["days_to_stockout"], delay_days_tamz)
+                            # لو مفيش أي متوسط بيع (لا حديث ولا شهري) يبقى المخزون مش بينزل خالص —
+                            # فمينفعش نعتبره "غير كافٍ" لمجرد إن مفيش بيانات بيع (كان ده الخلل قبل كده)
+                            stock_self_ok = (r["effective_avg"] <= 0) or (r["days_to_stockout"] >= coverage_days_tamz)
+                            un_notes = get_unavailable_ordered_note(r["sku"])
+                            # ══ مجدولة خلال آخر 4 أيام؟ (بنحسبها الأول عشان نستخدمها في قرار عرض شارة التغطية والترحيل) ══
+                            recent_sched_tamz = recent_sched_map_tamz.get(r["sku_up"])
+
+                            if stock_self_ok and not sched_tamz:
+                                if r["effective_avg"] <= 0:
+                                    cov_badge_text = "✅ لا توجد مبيعات حالياً — لا يحتاج جدولة | No sales recorded — no scheduling needed"
+                                else:
+                                    cov_badge_text = f"✅ مخزون كافٍ ({r['days_to_stockout']} يوم) — لا يحتاج جدولة الآن | Stock sufficient"
+                                cov_badge_color = "#15803d"
+                            elif stock_self_ok and sched_tamz:
+                                sched_src_tamz = "تشييك" if sched_tamz.get("source") == "Check" else "مجدول"
+                                arrival_tamz = (sched_tamz["parsed"] + timedelta(days=delay_days_tamz)).date() if sched_tamz.get("parsed") else None
+                                stockout_disp_tamz = f"{r['days_to_stockout']} يوم" if r["effective_avg"] > 0 else "لا توجد مبيعات"
+                                cov_badge_text  = (f"✅ مخزون كافٍ ({stockout_disp_tamz}) + ASN {sched_tamz['asn']} بتاريخ {sched_tamz['date']}"
+                                                   + (f" — وصول: {arrival_tamz}" if arrival_tamz else "") + f" [{sched_src_tamz}]")
+                                cov_badge_color = "#15803d"
+                            else:
+                                cov_badge_text  = badge_text_tamz
+                                cov_badge_color = badge_color_tamz
+
+                            # لو السكو فعلاً ليه جدولة خلال آخر 4 أيام، منعرضش شارة "محتاج جدولة الآن"
+                            # المتناقضة جنب شارة الجدولة الحديثة (البنفسجي) اللي هتتعرض تحت — عشان محدش يتلخبط
+                            show_normal_cov_badge_tamz = not (recent_sched_tamz and "محتاج جدولة" in cov_badge_text)
+                            if show_normal_cov_badge_tamz:
+                                st.markdown(
+                                    f'<span class="status-badge-lg" style="background:{cov_badge_color};">{cov_badge_text}</span>',
+                                    unsafe_allow_html=True)
+
+                            # ══ مجدولة خلال آخر 4 أيام؟ (لو فعلاً ليها جدولة) — تعرض ASN + الكمية + التاريخ ══
+                            if recent_sched_tamz:
+                                st.markdown(
+                                    f'<span class="status-badge-lg" style="background:#7c3aed;">'
+                                    f'📅 مجدولة خلال آخر 4 أيام | Scheduled in last 4 days — '
+                                    f'ASN <b>{recent_sched_tamz["asn"]}</b> &nbsp;|&nbsp; '
+                                    f'الكمية | Qty: <b>{recent_sched_tamz.get("qty","")}</b> &nbsp;|&nbsp; '
+                                    f'بتاريخ {recent_sched_tamz["date"]} [{recent_sched_tamz["source_label"]}]'
+                                    f'</span>',
+                                    unsafe_allow_html=True)
+
+                            if r["sku_up"] in pending_approval_skus_tamz:
+                                st.markdown(pending_approval_badge_html(), unsafe_allow_html=True)
+
+                            # ══ ترحيل لتاب مخزون بدون بيع إذا كانت الحالة "محتاج جدولة" فقط بدون أي جدولة
+                            #    وبدون تفاصيل أخرى وبدون جدولة حديثة (آخر 4 أيام) — لو ليه جدولة حديثة
+                            #    (حتى لو منتهية) يبقى أموره تمام ومينفعش يترحّل لمراجعة المخزون ══
+                            is_needs_sched_only = (
+                                not stock_self_ok
+                                and badge_text_tamz and "محتاج جدولة" in badge_text_tamz
+                                and not sched_tamz
+                                and not un_notes
+                                and not recent_sched_tamz
+                            )
+                            if is_needs_sched_only:
+                                _new_transferred.append({
+                                    "sku": r["sku"], "sku_up": r["sku_up"], "stock": r["stock"],
+                                    "sales_month": r["sales_month"], "img": r["img"],
+                                    "effective_avg": r["effective_avg"], "days_to_stockout": r["days_to_stockout"],
+                                    "day_counts": r["day_counts"],
+                                })
+                                st.caption("📌 مرحّل لتاب مراجعة المخزون | Transferred to Stock Review tab")
+
+                            if un_notes:
+                                for note in un_notes:
+                                    st.markdown(big_note_html(note), unsafe_allow_html=True)
+                            render_recent_expired_note(r["sku"])
+                        st.divider()
+                    # حفظ المرحلين في session_state بعد اكتمال العرض
+                    st.session_state["transferred_skus_tamz"] = _new_transferred
+
+
 if st.session_state["nav_page"] == "tab_dash":
     with tab_dash:
         if _tab_gate("tab_dash", "📊 داشبورد المبيعات | Sales Dashboard"):
@@ -4724,10 +5642,14 @@ if st.session_state["nav_page"] == "tab_dash":
             if not inv_map:
                 st.info("ارفع ملف المخزون أولاً من تاب المخزون | Upload Inventory first")
             else:
-                _dash_all_subtab_td, _dash_fbn_subtab_td, _dash_fbb_subtab_td = st.tabs(
+                (_dash_all_subtab_td, _dash_fbn_subtab_td, _dash_fbb_subtab_td,
+                 _dash_amz_all_subtab_td, _dash_amz_normal_subtab_td, _dash_amz_fba_subtab_td) = st.tabs(
                     ["🔷 الكل (FBN+FBB) | All Combined",
                      "🅽 مبيعات نون FBN | Noon FBN Sales",
-                     "🅱 مبيعات نون FBB | Noon FBB Sales"])
+                     "🅱 مبيعات نون FBB | Noon FBB Sales",
+                     "🟠 امازون الكل | Amazon All",
+                     "🅽 امازون عادي (FSAB) | Amazon Normal",
+                     "📦 امازون تخزين FBA | Amazon FBA Storage"])
                 with _dash_all_subtab_td:
                     # ── الكل مع بعض: كل الطلبات (FBN + FBB) من غير أي فلترة على نوع
                     #    التنفيذ — عشان في النهاية هو متجر نون واحد ومبيعات واحدة | All
@@ -4749,6 +5671,23 @@ if st.session_state["nav_page"] == "tab_dash":
                     _render_sales_dashboard_body(
                         build_daily_orders_counts_fbb, build_daily_orders_prices_fbb,
                         build_daily_orders_family_stats_fbb, "fbb")
+                # ══ تحليلات أمازون — منفصلة تمامًا عن تحليلات نون فوق، بتقرا من شيت
+                #    DailyOrdersAmazon، ومقسّمة نفس فكرة الكل/عادي/FBA زي تاب مبيعات
+                #    امازون بالظبط | Amazon analytics — fully separate from the Noon
+                #    analytics above, reads DailyOrdersAmazon, split the same way
+                #    (All/Normal/FBA) as the Amazon Sales tab itself.
+                with _dash_amz_all_subtab_td:
+                    _render_sales_dashboard_body(
+                        build_daily_orders_counts_amazon_all, build_daily_orders_prices_amazon_all,
+                        build_daily_orders_family_stats_amazon_all, "amz_all")
+                with _dash_amz_normal_subtab_td:
+                    _render_sales_dashboard_body(
+                        build_daily_orders_counts_amazon_normal, build_daily_orders_prices_amazon_normal,
+                        build_daily_orders_family_stats_amazon_normal, "amz_normal")
+                with _dash_amz_fba_subtab_td:
+                    _render_sales_dashboard_body(
+                        build_daily_orders_counts_amazon_fba, build_daily_orders_prices_amazon_fba,
+                        build_daily_orders_family_stats_amazon_fba, "amz_fba")
 
         # ══ TAB 15 — تحليل الجدولة ══
         # ══ TAB 16 — مخزون بدون بيع ══
