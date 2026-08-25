@@ -1959,20 +1959,28 @@ def build_daily_orders_counts_amazon_fba_asin(dates):    return build_daily_orde
 def build_daily_orders_prices_amazon_normal_asin(dates): return build_daily_orders_prices_amazon(dates, "normal", "asin")
 def build_daily_orders_prices_amazon_fba_asin(dates):    return build_daily_orders_prices_amazon(dates, "fba", "asin")
 
-def build_amazon_asin_sales_rows(multi_counts, prices_map, sales_dates, sales_display_days):
+def build_amazon_asin_sales_rows(multi_counts, prices_map, monthly_counts, sales_dates, sales_display_days):
     """يبني صفوف تاب مبيعات أمازون (عادي/FBA) مجمّعة على أساس ASIN — المعرّف
     الحقيقي لمنتج أمازون، مش MSKU. المخزون بييجي من amz_inv_map_asin (مجمّع
-    من كل الـ MSKUs بتاعت نفس الـ ASIN)، والمبيعات من counts_fn/prices_fn
-    (مجمّعة بنفس الطريقة من عمود ASIN في DailyOrdersAmazon). أي ASIN باع في
-    الفترة المعروضة بيظهر حتى لو مالوش صف مخزون مرفوع في StockAmazon (يبقى
-    مخزونه 0 مع علامة توضيحية) — بالظبط زي تابات نون | Builds Amazon
-    sales-tab rows (normal/FBA) aggregated by ASIN — Amazon's real product
-    identity, not MSKU. Stock comes from amz_inv_map_asin (summed across
-    every MSKU sharing that ASIN); sales come from counts_fn/prices_fn
-    (grouped the same way, by DailyOrdersAmazon's own ASIN column). Any
-    ASIN with sales in the displayed window shows up even without an
-    uploaded StockAmazon row for it (stock shown as 0 with a note) — same
-    as the Noon tabs' behaviour."""
+    من كل الـ MSKUs بتاعت نفس الـ ASIN)، والمبيعات اليومية من multi_counts/
+    prices_map (مجمّعة بنفس الطريقة من عمود ASIN في DailyOrdersAmazon).
+    "شهري" بيتحسب من monthly_counts وهو مجموع حقيقي لآخر 30 يوم فعلي من
+    DailyOrdersAmazon — مش تقدير مبني على متوسط الأيام المعروضة (7 أيام
+    افتراضيًا)، عشان منتج بطيء الحركة ما بعش خلال آخر 7 أيام بس باع قبل كده
+    في نفس الشهر يفضل شهريه صحيح مش صفر. أي ASIN باع خلال آخر 30 يوم بيظهر
+    حتى لو مالوش صف مخزون مرفوع في StockAmazon (يبقى مخزونه 0 مع علامة
+    توضيحية) — بالظبط زي تابات نون | Builds Amazon sales-tab rows
+    (normal/FBA) aggregated by ASIN — Amazon's real product identity, not
+    MSKU. Stock comes from amz_inv_map_asin (summed across every MSKU
+    sharing that ASIN); daily figures come from multi_counts/prices_map
+    (grouped the same way, by DailyOrdersAmazon's own ASIN column).
+    "Monthly" is computed from monthly_counts — an actual trailing-30-day
+    sum from DailyOrdersAmazon, not an estimate extrapolated from the
+    (default 7-day) display window, so a slow-moving product with no sales
+    in the last 7 days but sales earlier in the month still shows its real
+    monthly total instead of 0. Any ASIN with sales in the last 30 days
+    shows up even without an uploaded StockAmazon row for it (stock shown
+    as 0 with a note) — same as the Noon tabs' behaviour."""
     links_map_asin = get_links_map_asin()
     links_map_sku  = get_links_map()
     # MSKU -> ASIN من DailyOrdersAmazon نفسه — بنعكسها لـ ASIN -> MSKUs عشان
@@ -1984,6 +1992,10 @@ def build_amazon_asin_sales_rows(multi_counts, prices_map, sales_dates, sales_di
     asin_to_mskus = {}
     for sku_o, asin_o in build_amazon_orders_asin_map().items():
         asin_to_mskus.setdefault(asin_o.upper(), []).append(sku_o)
+
+    def _monthly_total(asin_up):
+        mc = monthly_counts.get(asin_up)
+        return sum(mc.values()) if mc else 0
 
     rows = []
     for asin_up, info in amz_inv_map_asin.items():
@@ -2004,23 +2016,26 @@ def build_amazon_asin_sales_rows(multi_counts, prices_map, sales_dates, sales_di
         rows.append({
             "sku": sku_disp, "sku_up": primary_sku.upper(), "asin": info.get("asin", asin_up),
             "mskus": mskus,
-            "stock": stock, "sales_month": round(effective_avg * 30), "img": img,
+            "stock": stock, "sales_month": _monthly_total(asin_up), "img": img,
             "day_counts": day_counts, "day_prices": day_prices,
             "total_recent": total_recent,
             "effective_avg": effective_avg,
             "days_to_stockout": days_to_stockout,
         })
 
-    # ── ASINs باعت في الفترة المعروضة لكن مالهاش صف مخزون مرفوع في
-    #    StockAmazon — بتتضاف كمان عشان كل مبيعة تظهر في القائمة | ASINs
-    #    with sales in the displayed window but no uploaded StockAmazon row
-    #    — added too so every sale shows up.
+    # ── ASINs باعت خلال آخر 30 يوم (يومي أو شهري) لكن مالهاش صف مخزون مرفوع
+    #    في StockAmazon — بتتضاف كمان عشان كل مبيعة تظهر في القائمة، حتى لو
+    #    آخر بيعة ليها كانت قبل الـ 7 أيام المعروضة | ASINs with sales in
+    #    the last 30 days (recent or monthly) but no uploaded StockAmazon
+    #    row — added too so every sale shows up, even if its last sale was
+    #    before the displayed 7-day window.
     asins_seen = set(amz_inv_map_asin.keys())
-    for asin_up, day_counts in multi_counts.items():
-        if asin_up in asins_seen:
-            continue
+    orphan_asins = (set(multi_counts.keys()) | set(monthly_counts.keys())) - asins_seen
+    for asin_up in orphan_asins:
+        day_counts = multi_counts.get(asin_up, {d: 0 for d in sales_dates})
         total_recent_orphan = sum(day_counts.get(d, 0) for d in sales_dates)
-        if total_recent_orphan <= 0:
+        monthly_orphan = _monthly_total(asin_up)
+        if total_recent_orphan <= 0 and monthly_orphan <= 0:
             continue
         mskus = asin_to_mskus.get(asin_up, [])
         sku_disp    = ", ".join(mskus) if mskus else asin_up
@@ -2030,7 +2045,7 @@ def build_amazon_asin_sales_rows(multi_counts, prices_map, sales_dates, sales_di
         rows.append({
             "sku": sku_disp, "sku_up": primary_sku.upper(), "asin": asin_up,
             "mskus": mskus,
-            "stock": 0, "sales_month": round(avg_daily_orphan * 30),
+            "stock": 0, "sales_month": monthly_orphan,
             "img": links_map_asin.get(asin_up, ""),
             "day_counts": day_counts, "day_prices": day_prices_orphan,
             "total_recent": total_recent_orphan,
@@ -5204,16 +5219,24 @@ if st.session_state["nav_page"] == "tab_sales_amazon":
                 if not amz_inv_map_asin:
                     st.info("ارفع ملف مخزون أمازون (StockAmazon) أولاً | Upload Amazon Stock (StockAmazon) first")
                 else:
-                    # الصفوف بقت مجمّعة على ASIN (مش MSKU) — مخزونها ومبيعاتها الشهرية
-                    # واليومية جايين من كل الـ MSKUs بتاعت نفس الـ ASIN مع بعض، وأي ASIN
-                    # باع خلال الفترة بيظهر حتى لو مالوش صف في StockAmazon | Rows are now
-                    # aggregated by ASIN (not MSKU) — stock, monthly, and daily figures
-                    # combine every MSKU sharing that ASIN, and any ASIN with sales in the
-                    # window shows up even without a StockAmazon row.
+                    # الصفوف بقت مجمّعة على ASIN (مش MSKU) — مخزونها ومبيعاتها اليومية
+                    # جايين من كل الـ MSKUs بتاعت نفس الـ ASIN مع بعض، وأي ASIN باع خلال
+                    # آخر 30 يوم بيظهر حتى لو مالوش صف في StockAmazon | Rows are now
+                    # aggregated by ASIN (not MSKU) — stock and daily figures combine every
+                    # MSKU sharing that ASIN, and any ASIN with sales in the last 30 days
+                    # shows up even without a StockAmazon row.
                     multi_counts_tamz = build_daily_orders_counts_amazon_normal_asin(sales_dates)
                     prices_map_tamz   = build_daily_orders_prices_amazon_normal_asin(sales_dates)
+                    # "شهري" بيتحسب من مجموع حقيقي لآخر 30 يوم فعلي (مش تقدير من متوسط
+                    # آخر 7 أيام) — عشان منتج ما بعش خلال آخر 7 أيام بس باع قبل كده في
+                    # نفس الشهر يفضل شهريه صحيح مش صفر | "Monthly" is a real trailing-30-day
+                    # sum (not an estimate from the last 7 days) so a product with no sales
+                    # in the last 7 days but sales earlier in the month keeps a correct
+                    # monthly figure instead of 0.
+                    dates_30d_tamz = [today_tamz - timedelta(days=i) for i in range(1, 31)]
+                    monthly_counts_tamz = build_daily_orders_counts_amazon_normal_asin(dates_30d_tamz)
                     sales_tab_rows = build_amazon_asin_sales_rows(
-                        multi_counts_tamz, prices_map_tamz, sales_dates, sales_display_days)
+                        multi_counts_tamz, prices_map_tamz, monthly_counts_tamz, sales_dates, sales_display_days)
 
                     # ══ إجماليات اليومية في الأعلى — بتتحسب من كل صفوف الأوردرز الخام
                     #    (multi_counts_tamz)، مش بس الـ SKUs الموجودة في ملف المخزون
@@ -5555,16 +5578,22 @@ if st.session_state["nav_page"] == "tab_sales_amazon":
                 if not amz_inv_map_asin:
                     st.info("ارفع ملف مخزون أمازون (StockAmazon) أولاً | Upload Amazon Stock (StockAmazon) first")
                 else:
-                    # الصفوف بقت مجمّعة على ASIN (مش MSKU) — مخزونها ومبيعاتها الشهرية
-                    # واليومية جايين من كل الـ MSKUs بتاعت نفس الـ ASIN مع بعض، وأي ASIN
-                    # باع FBA خلال الفترة بيظهر حتى لو مالوش صف في StockAmazon | Rows are
-                    # now aggregated by ASIN (not MSKU) — stock, monthly, and daily figures
-                    # combine every MSKU sharing that ASIN, and any ASIN with FBA sales in
-                    # the window shows up even without a StockAmazon row.
+                    # الصفوف بقت مجمّعة على ASIN (مش MSKU) — مخزونها ومبيعاتها اليومية
+                    # جايين من كل الـ MSKUs بتاعت نفس الـ ASIN مع بعض، وأي ASIN باع FBA
+                    # خلال آخر 30 يوم بيظهر حتى لو مالوش صف في StockAmazon | Rows are now
+                    # aggregated by ASIN (not MSKU) — stock and daily figures combine every
+                    # MSKU sharing that ASIN, and any ASIN with FBA sales in the last 30
+                    # days shows up even without a StockAmazon row.
                     multi_counts_tamz = build_daily_orders_counts_amazon_fba_asin(sales_dates)
                     prices_map_tamz   = build_daily_orders_prices_amazon_fba_asin(sales_dates)
+                    # "شهري" بيتحسب من مجموع حقيقي لآخر 30 يوم فعلي (مش تقدير من متوسط
+                    # آخر 7 أيام) — نفس فكرة تاب العادي فوق | "Monthly" is a real
+                    # trailing-30-day sum, same idea as the Normal tab above.
+                    dates_30d_tamz = [today_tamz - timedelta(days=i) for i in range(1, 31)]
+                    monthly_counts_tamz = build_daily_orders_counts_amazon_fba_asin(dates_30d_tamz)
                     sales_tab_rows = build_amazon_asin_sales_rows(
-                        multi_counts_tamz, prices_map_tamz, sales_dates, sales_display_days)
+                        multi_counts_tamz, prices_map_tamz, monthly_counts_tamz, sales_dates, sales_display_days)
+
 
                     # ══ إجماليات اليومية في الأعلى — بتتحسب من كل صفوف الأوردرز الخام
                     #    (multi_counts_tamz)، مش بس الـ SKUs الموجودة في ملف المخزون
