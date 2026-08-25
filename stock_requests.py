@@ -1763,7 +1763,7 @@ def build_amazon_orders_asin_map():
             asin_map[sku_up] = asin
     return asin_map
 
-
+def build_daily_orders_counts_amazon(dates, mode="all"):
     """نفس منطق build_daily_orders_counts بالظبط، لكن من شيت DailyOrdersAmazon
     وبأعمدة بتتلاقى بالاسم، مع فلترة اختيارية على عمود حاوية كاملة الحمولة."""
     data = get_cached(daily_orders_amazon_sheet)
