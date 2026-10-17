@@ -316,6 +316,7 @@ TAB_LOCK_OPTIONS = [
     ("tab8",      "⚠️ تنبيهات | Alerts"),
     ("tab9",      "📊 المخزون | Inventory"),
     ("tab_wh",    "🏭 مخزون المستودع | Warehouse Stockout"),
+    ("tab_china", "🚢 شحنات الصين | China Shipments"),
     ("tab10",     "🔴 مراجعة المخزون | Stock Review"),
     ("tab11",     "🗂️ منتهية | Expired"),
     ("tab12",     "⚙️ الإعدادات | Settings"),
@@ -998,6 +999,749 @@ def render_warehouse_stock_upload(key_prefix):
                         st.rerun()
             except Exception as e:
                 st.error(f"❌ {e}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ══ 🚢 شحنات الصين | China Shipments ══
+# ملف إكسيل (Smart_Store_China_Data_Template) فيه 3 صفحات بيانات: SHIPMENTS / SKU_LINES /
+# CONTAINERS. بيتخزنوا في 3 تابات جديدة في نفس جوجل شيت (ChinaShipments / ChinaLines /
+# ChinaContainers) عشان يفضلوا محفوظين بين الجلسات. الربط مع المتجر بيتم عن طريق التكويد:
+# الكود01 في تاب التكويد = عمود barcode في صفحة SKU_LINES. كل ده إضافة فقط — مفيش أي
+# دالة أو تاب قديم اتغيّر منطقه | The China Excel's 3 data sheets are stored in 3 new Google
+# Sheet tabs. Linking is done through Tacweed: Code01 == the barcode column in SKU_LINES.
+# Purely additive — no existing function or tab had its logic changed.
+# ══════════════════════════════════════════════════════════════════════════════
+CHINA_SHIP_COLS = ["shipment_id","internal_order_no","po_no","supplier_name","buyer_company","shipment_mode",
+                   "incoterm","origin_location","port_of_loading","destination_port","final_destination",
+                   "shipping_line","bl_no","booking_no","container_count","currency","invoice_value",
+                   "freight_value","planned_etd","actual_etd","eta_port","eta_destination","shipment_status",
+                   "tracking_url","last_updated_at","updated_by","notes","row_state","invoice_no","record_key"]
+CHINA_LINE_COLS = ["shipment_id","line_id","container_no","sku","model_no","barcode","product_name_en",
+                   "product_name_ar","variant","cartons","units_per_carton","total_qty","unit_cost","currency",
+                   "line_amount","cbm","gross_weight_kg","net_weight_kg","stock_stage","production_ready_date",
+                   "actual_load_date","noon_sku","amazon_sku","trendyol_sku","image_url","notes","last_updated_at",
+                   "updated_by","record_key","row_state","internal_order_no","po_no"]
+CHINA_CONT_COLS = ["shipment_id","container_no","seal_no","container_type","shipping_line","vessel_name","voyage_no",
+                   "bl_no","port_of_loading","destination_port","actual_etd","eta_port","port_arrival_actual",
+                   "warehouse_arrival_actual","container_status","last_known_location","tracking_url",
+                   "gross_weight_kg","total_cbm","total_cartons","total_units","customs_status","delay_reason",
+                   "last_updated_at","updated_by","record_key","row_state","days_to_eta","delay_days","final_destination"]
+CHINA_TABS = {"ChinaShipments": CHINA_SHIP_COLS, "ChinaLines": CHINA_LINE_COLS, "ChinaContainers": CHINA_CONT_COLS}
+CHINA_DATE_FIELDS = {"planned_etd","actual_etd","eta_port","eta_destination","last_updated_at","production_ready_date",
+                     "actual_load_date","port_arrival_actual","warehouse_arrival_actual"}
+# حقول محسوبة بالإكسيل بتتأخر (متحسوبة وقت آخر حفظ) — بنحسبها إحنا لحظيًا بدلها
+CHINA_SKIP_COLS = {"days_to_eta", "delay_days"}
+# مراحل "في الطريق / شُحنت" مقابل "لسه في المصنع" — للإحصائيات بس
+CHINA_SHIPPED_STAGES = {"Loaded", "Shipped / In Transit", "Arrived at Port", "Customs Clearance", "Cleared"}
+
+def _china_get_or_create_ws(tab, cols, retries=5, delay=2):
+    for attempt in range(retries):
+        try:
+            return ss.worksheet(tab)
+        except gspread.exceptions.WorksheetNotFound:
+            try:
+                ws = ss.add_worksheet(title=tab, rows="1000", cols=str(len(cols)))
+                ws.append_row(cols, value_input_option="RAW")
+                return ws
+            except gspread.exceptions.APIError as e:
+                if attempt < retries - 1:
+                    time.sleep(delay * (2 ** attempt))
+                else:
+                    raise e
+        except gspread.exceptions.APIError as e:
+            if attempt < retries - 1:
+                time.sleep(delay * (2 ** attempt))
+            else:
+                raise e
+
+def get_china_sheets():
+    """تابات الصين الـ3 — بتتنشأ مرة واحدة بس لكل جلسة | The 3 China tabs, created once per session."""
+    if "china_sheets" not in st.session_state:
+        st.session_state["china_sheets"] = {tab: _china_get_or_create_ws(tab, cols) for tab, cols in CHINA_TABS.items()}
+    return st.session_state["china_sheets"]
+
+# ── تنظيف القيم / Value cleaning ──
+def _china_clean(v, field=""):
+    if v is None or isinstance(v, bool):
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, (int, float)):
+        if field in CHINA_DATE_FIELDS and 20000 < v < 80000:
+            return (datetime(1899, 12, 30) + timedelta(days=int(v))).strftime("%Y-%m-%d")
+        if float(v) == int(v):
+            return str(int(v))
+        return f"{v:.4f}".rstrip("0").rstrip(".")
+    s = str(v).strip()
+    if s.startswith("=") or (s.startswith("#") and s.endswith(("!", "?", "A"))):
+        return ""
+    return s
+
+def _china_norm_code(v):
+    """توحيد شكل الباركود/الكود للمقارنة (بدون مسافات/شرطات/.0 وبدون أصفار في الأول للأرقام) |
+    Normalises a barcode/code for matching."""
+    s = str(v if v is not None else "").strip()
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".")[0]
+    s = re.sub(r"[\s\-]", "", s).upper()
+    return s.lstrip("0") if s.isdigit() else s
+
+def _china_int(v):
+    try:
+        return int(float(str(v).replace(",", "")))
+    except Exception:
+        return 0
+
+def _china_date(s):
+    try:
+        return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+# ── مفاتيح السجلات (للتحديث بدل التكرار عند رفع نفس الملف تاني) | Row keys for upsert ──
+def _china_ship_key(r):
+    return r.get("record_key") or "|".join([r.get("internal_order_no", ""), r.get("po_no", ""), r.get("shipment_id", "")])
+
+def _china_line_key(r):
+    return r.get("line_id") or r.get("record_key") or "|".join(
+        [r.get("shipment_id", ""), r.get("container_no", ""), r.get("barcode", ""), r.get("sku", "")])
+
+def _china_cont_key(r):
+    return r.get("container_no") or r.get("record_key") or ""
+
+def _china_merge(existing, new, keyfn):
+    order, d = [], {}
+    for r in existing:
+        k = keyfn(r)
+        if k not in d:
+            order.append(k)
+        d[k] = r
+    for r in new:
+        k = keyfn(r)
+        if k not in d:
+            order.append(k)
+        d[k] = r
+    return [d[k] for k in order]
+
+# ── قراءة ملف الإكسيل | Parse the uploaded workbook ──
+def _china_parse_sheet(ws, cols):
+    rows = list(ws.iter_rows(values_only=True))
+    hdr_i = None
+    for i, r in enumerate(rows[:15]):
+        if r and str(r[0] if r[0] is not None else "").strip().lower() == "shipment_id":
+            hdr_i = i
+            break
+    if hdr_i is None:
+        return None
+    hdr = [str(h).strip() if h is not None else "" for h in rows[hdr_i]]
+    out = []
+    for r in rows[hdr_i + 1:]:
+        if not r or not any(c not in (None, "") for c in r):
+            continue
+        d = {}
+        for j, h in enumerate(hdr):
+            if h in cols and h not in CHINA_SKIP_COLS and j < len(r):
+                d[h] = _china_clean(r[j], h)
+        out.append(d)
+    return out
+
+@st.cache_data(show_spinner=False)
+def _china_parse_workbook(file_bytes):
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    by_name = {n.strip().upper(): n for n in wb.sheetnames}
+    res = {"schema": "", "ships": None, "lines": None, "conts": None}
+    for sheet_key, out_key, cols in (("SHIPMENTS", "ships", CHINA_SHIP_COLS),
+                                     ("SKU_LINES", "lines", CHINA_LINE_COLS),
+                                     ("CONTAINERS", "conts", CHINA_CONT_COLS)):
+        real = by_name.get(sheet_key)
+        if not real:
+            continue
+        ws = wb[real]
+        if not res["schema"]:
+            for r in ws.iter_rows(min_row=1, max_row=6, values_only=True):
+                if r and str(r[0] or "").strip() == "schema_version" and len(r) > 1 and r[1]:
+                    res["schema"] = str(r[1]).strip()
+                    break
+        rows = _china_parse_sheet(ws, cols)
+        if rows is None:
+            continue
+        if out_key == "ships":
+            rows = [r for r in rows if r.get("shipment_id") or r.get("internal_order_no")]
+        elif out_key == "lines":
+            rows = [r for r in rows if r.get("barcode") or r.get("sku") or r.get("model_no")
+                    or r.get("product_name_en") or r.get("product_name_ar")]
+        else:
+            rows = [r for r in rows if r.get("container_no")]
+        res[out_key] = rows
+    return res
+
+# ── قراءة/كتابة تابات الصين في جوجل شيت | Read / write the China tabs ──
+def _china_rows_from_raw(raw):
+    if not raw or len(raw) < 2:
+        return []
+    hdr = [str(h).strip() for h in raw[0]]
+    out = []
+    for row in raw[1:]:
+        if not any(str(c).strip() for c in row):
+            continue
+        out.append({h: (str(row[i]).strip() if i < len(row) else "") for i, h in enumerate(hdr) if h})
+    return out
+
+def _china_write_sheet(ws, cols, rows):
+    last = None
+    for attempt in range(5):
+        try:
+            ws.clear()
+            values = [cols] + [[r.get(c, "") for c in cols] for r in rows]
+            for i in range(0, len(values), 500):
+                ws.append_rows(values[i:i + 500], value_input_option="RAW")
+            clear_cache(ws)
+            return True
+        except gspread.exceptions.APIError as e:
+            last = e
+            time.sleep(1 * (2 ** attempt))
+    raise last
+
+def _china_do_import(parsed, replace):
+    sheets = get_china_sheets()
+    specs = [("ChinaShipments", CHINA_SHIP_COLS, parsed.get("ships"), _china_ship_key),
+             ("ChinaLines", CHINA_LINE_COLS, parsed.get("lines"), _china_line_key),
+             ("ChinaContainers", CHINA_CONT_COLS, parsed.get("conts"), _china_cont_key)]
+    counts = {}
+    for tab, cols, new_rows, keyfn in specs:
+        if new_rows is None:      # الصفحة دي مش موجودة في الملف — سيبها زي ما هي
+            continue
+        if replace:
+            final = new_rows
+        else:
+            existing = _china_rows_from_raw(get_cached(sheets[tab], force=True))
+            final = _china_merge(existing, new_rows, keyfn)
+        _china_write_sheet(sheets[tab], cols, final)
+        counts[tab] = len(final)
+    return counts
+
+def _china_delete_all():
+    sheets = get_china_sheets()
+    for tab, cols in CHINA_TABS.items():
+        _china_write_sheet(sheets[tab], cols, [])
+
+def _china_delete_order(order_no):
+    """يحذف طلب (internal_order_no) كامل: صفوف الشحنات + أسطر المنتجات، والحاويات اللي كانت
+    مرتبطة بأسطره بس ومبقاش ليها أي سطر تاني | Deletes one order with its lines, plus
+    containers that only that order's lines used."""
+    sheets = get_china_sheets()
+    ships = _china_rows_from_raw(get_cached(sheets["ChinaShipments"], force=True))
+    lines = _china_rows_from_raw(get_cached(sheets["ChinaLines"], force=True))
+    conts = _china_rows_from_raw(get_cached(sheets["ChinaContainers"], force=True))
+    gone = {l.get("container_no", "") for l in lines if l.get("internal_order_no") == order_no} - {""}
+    lines2 = [l for l in lines if l.get("internal_order_no") != order_no]
+    still = {l.get("container_no", "") for l in lines2}
+    conts2 = [c for c in conts if not (c.get("container_no", "") in gone and c.get("container_no", "") not in still)]
+    ships2 = [s for s in ships if s.get("internal_order_no") != order_no]
+    _china_write_sheet(sheets["ChinaShipments"], CHINA_SHIP_COLS, ships2)
+    _china_write_sheet(sheets["ChinaLines"], CHINA_LINE_COLS, lines2)
+    _china_write_sheet(sheets["ChinaContainers"], CHINA_CONT_COLS, conts2)
+
+# ── البيانات المجمّعة والمربوطة (متكاشة) | The joined data bundle (cached) ──
+def _china_enrich(line, conts, ship_by_pair, ship_by_no):
+    ctr = conts.get(line.get("container_no", "")) or {}
+    shp = (ship_by_pair.get((line.get("internal_order_no", ""), line.get("po_no", "")))
+           or ship_by_no.get(line.get("internal_order_no", "")) or {})
+    stage = line.get("stock_stage", "")
+    cstat = ctr.get("container_status", "")
+    wh_arr = ctr.get("warehouse_arrival_actual", "")
+    if stage == "Cancelled" or cstat == "Cancelled":
+        status = "cancelled"
+    elif stage == "Warehouse Received" or wh_arr or cstat in ("Delivered to Warehouse", "Warehouse Received"):
+        status = "received"
+    else:
+        status = "incoming"
+    if wh_arr:
+        eta_label, eta = "وصل المستودع", wh_arr
+    elif ctr.get("port_arrival_actual"):
+        eta_label, eta = "وصل الميناء", ctr["port_arrival_actual"]
+    elif ctr.get("eta_port"):
+        eta_label, eta = "ETA الميناء", ctr["eta_port"]
+    elif shp.get("eta_destination"):
+        eta_label, eta = "ETA الوجهة", shp["eta_destination"]
+    elif shp.get("eta_port"):
+        eta_label, eta = "ETA الميناء", shp["eta_port"]
+    else:
+        eta_label, eta = "", ""
+    e = dict(line)
+    e["_qty"] = _china_int(line.get("total_qty", ""))
+    e["_status"] = status
+    e["_eta_label"] = eta_label
+    e["_eta"] = eta
+    e["_ship"] = shp
+    e["_ctr"] = ctr
+    e["_shipment_id"] = line.get("shipment_id") or shp.get("shipment_id", "")
+    e["_norm"] = _china_norm_code(line.get("barcode", ""))
+    return e
+
+def get_china_bundle():
+    sheets = get_china_sheets()
+    raws = [get_cached(sheets[t]) for t in ("ChinaShipments", "ChinaLines", "ChinaContainers")]
+    src = st.session_state.get("china_bundle_src")
+    if src is not None and "china_bundle" in st.session_state and all(a is b for a, b in zip(src, raws)):
+        return st.session_state["china_bundle"]
+    ships = _china_rows_from_raw(raws[0])
+    lines = _china_rows_from_raw(raws[1])
+    conts_list = _china_rows_from_raw(raws[2])
+    conts = {c["container_no"]: c for c in conts_list if c.get("container_no")}
+    ship_by_pair, ship_by_no = {}, {}
+    for s in ships:
+        ship_by_pair.setdefault((s.get("internal_order_no", ""), s.get("po_no", "")), s)
+        ship_by_no.setdefault(s.get("internal_order_no", ""), s)
+    enriched = [_china_enrich(l, conts, ship_by_pair, ship_by_no) for l in lines]
+    by_code, by_noon_sku = {}, {}
+    for e in enriched:
+        if e["_norm"]:
+            by_code.setdefault(e["_norm"], []).append(e)
+        ns = e.get("noon_sku", "").strip().upper()
+        if ns:
+            by_noon_sku.setdefault(ns, []).append(e)
+    bundle = {"ships": ships, "conts": conts_list, "conts_map": conts, "lines": enriched,
+              "by_code": by_code, "by_noon_sku": by_noon_sku}
+    st.session_state["china_bundle"] = bundle
+    st.session_state["china_bundle_src"] = raws
+    return bundle
+
+def _china_code_to_skus():
+    """كود (موحّد) -> قائمة SKUs المتجر المرتبطة بيه من تاب التكويد | normalised code -> store SKUs."""
+    m = {}
+    for sku_up, code in get_tacweed_map().items():
+        m.setdefault(_china_norm_code(code), []).append(sku_up)
+    return m
+
+def china_lines_for_sku(sku_up):
+    """أسطر الصين المرتبطة بـ SKU: عن طريق كود التكويد = barcode (الأساسي)، وكمان لو
+    noon_sku في الملف = نفس الـ SKU | China lines linked to a SKU: via Tacweed code ==
+    barcode (primary), plus an exact noon_sku match."""
+    b = get_china_bundle()
+    if not b["lines"]:
+        return []
+    cands = []
+    code = get_tacweed_map().get(sku_up, "")
+    if code:
+        cands += b["by_code"].get(_china_norm_code(code), [])
+    cands += b["by_noon_sku"].get(sku_up, [])
+    out, seen = [], set()
+    for l in cands:
+        if id(l) not in seen:
+            seen.add(id(l))
+            out.append(l)
+    return out
+
+def china_badge_html(lines):
+    inc = [l for l in lines if l["_status"] == "incoming"]
+    if not inc:
+        return ""
+    qty = sum(l["_qty"] for l in inc)
+    html = f'<span class="tacweed-badge" style="background:#7c2d12;color:#fed7aa;">🚢 من الصين: {qty:,} قطعة</span>'
+    etas = [d for d in (_china_date(l["_eta"]) for l in inc) if d]
+    if etas:
+        html += f' <span class="tacweed-badge" style="background:#1e3a5f;color:#bfdbfe;">📅 أقرب وصول: {min(etas)}</span>'
+    return html
+
+def _china_lines_table_html(lines):
+    from html import escape as _esc
+    head = ["shipment_id", "container_no", "الكمية", "المرحلة", "الوصول", "الطلب | PO"]
+    th = "".join(f'<th style="padding:3px 8px;border-bottom:1px solid #94a3b8;text-align:right;">{h}</th>' for h in head)
+    body = ""
+    for l in lines:
+        eta = f'{l["_eta_label"]}: {l["_eta"]}' if l["_eta"] else "—"
+        cells = [l["_shipment_id"] or "—", l.get("container_no") or "—", f'{l["_qty"]:,}',
+                 l.get("stock_stage") or "—", eta,
+                 f'{l.get("internal_order_no") or "—"} | {l.get("po_no") or "—"}']
+        body += "<tr>" + "".join(f'<td style="padding:3px 8px;">{_esc(str(c))}</td>' for c in cells) + "</tr>"
+    return f'<div style="overflow-x:auto;"><table style="font-size:12px;border-collapse:collapse;"><tr>{th}</tr>{body}</table></div>'
+
+def render_china_for_sku(sku_up):
+    """بيتنادى جوه تابات مبيعات FBN وFBB: شارة الكمية القادمة من الصين + تفاصيل الشحنات
+    (shipment_id / container_no / الكمية / الوصول). أي خطأ هنا مبيوقفش تاب المبيعات |
+    Called inside the FBN and FBB sales tabs. Any error here never breaks the sales tab."""
+    try:
+        lines = china_lines_for_sku(sku_up)
+        if not lines:
+            return
+        shown = [l for l in lines if l["_status"] != "cancelled"]
+        if not shown:
+            return
+        badge = china_badge_html(shown)
+        if badge:
+            st.markdown(badge, unsafe_allow_html=True)
+        with st.expander(f"🚢 تفاصيل شحنات الصين | China shipments — {len(shown)}"):
+            st.markdown(_china_lines_table_html(shown), unsafe_allow_html=True)
+    except Exception:
+        return
+
+# ── واجهة الرفع والحذف | Upload / delete UI ──
+def render_china_upload(key_prefix, bundle):
+    has_data = bool(bundle["lines"] or bundle["ships"] or bundle["conts"])
+    ver = st.session_state.get("china_upl_ver", 0)
+    with st.expander("📤 رفع / تحديث ملف شحنات الصين | Upload China Shipments File", expanded=not has_data):
+        upl = st.file_uploader("ارفع ملف الإكسيل (xlsx/xlsm) | Upload the China Excel file",
+                               type=["xlsx", "xlsm"], key=f"{key_prefix}_upl_{ver}")
+        if upl:
+            try:
+                parsed = _china_parse_workbook(upl.getvalue())
+            except Exception as e:
+                parsed = None
+                st.error(f"❌ تعذر قراءة الملف | Could not read the file: {e}")
+            if parsed is not None:
+                if all(parsed[k] is None for k in ("ships", "lines", "conts")):
+                    st.error("❌ مفيش صفحات SHIPMENTS / SKU_LINES / CONTAINERS في الملف ده | None of the expected sheets found")
+                else:
+                    n_s = len(parsed["ships"]) if parsed["ships"] is not None else "—"
+                    n_l = len(parsed["lines"]) if parsed["lines"] is not None else "—"
+                    n_c = len(parsed["conts"]) if parsed["conts"] is not None else "—"
+                    st.info(f"📊 SHIPMENTS: {n_s} | SKU_LINES: {n_l} | CONTAINERS: {n_c}"
+                            + (f" | schema: `{parsed['schema']}`" if parsed["schema"] else ""))
+                    if parsed["schema"] and parsed["schema"] != "SMARTSTORE_CHINA_V5.1":
+                        st.warning(f"⚠️ نسخة الملف `{parsed['schema']}` مختلفة عن V5.1 المتوقعة — راجع النتيجة بعد الرفع | schema differs from V5.1")
+                    if parsed["lines"]:
+                        nb = sum(1 for r in parsed["lines"] if not r.get("barcode"))
+                        if nb:
+                            st.warning(f"⚠️ {nb} سطر في SKU_LINES من غير barcode — مش هيتربط بالتكويد | line(s) without barcode won't link to Tacweed")
+                        st.dataframe(pd.DataFrame(parsed["lines"][:10])[["shipment_id", "container_no", "barcode", "sku",
+                                                                         "product_name_en", "total_qty", "stock_stage"]],
+                                     use_container_width=True, height=200)
+
+                    def _after(msg):
+                        st.session_state["china_upl_ver"] = ver + 1
+                        st.session_state.pop("china_bundle", None)
+                        st.session_state.pop("china_bundle_src", None)
+                        st.session_state["china_flash"] = msg
+                        st.rerun()
+
+                    ca, cb = st.columns(2)
+                    with ca:
+                        if st.button("📤 إضافة / تحديث الموجود | Merge", type="primary",
+                                     use_container_width=True, key=f"{key_prefix}_merge"):
+                            with st.spinner("جاري الحفظ في Google Sheets..."):
+                                counts = _china_do_import(parsed, replace=False)
+                            _after(f"✅ تم الدمج — الإجمالي الآن: {counts}")
+                    with cb:
+                        if st.button("🔄 استبدال الكل | Replace All", type="secondary",
+                                     use_container_width=True, key=f"{key_prefix}_replace"):
+                            st.session_state[f"{key_prefix}_confirm_replace"] = True
+                    if st.session_state.get(f"{key_prefix}_confirm_replace"):
+                        st.warning("⚠️ هيمسح بيانات الصين القديمة (للصفحات الموجودة في الملف) ويرفع الجديدة؟ | Replace existing China data?")
+                        cy, cn = st.columns(2)
+                        if cy.button("✅ نعم | Yes", key=f"{key_prefix}_yes_replace"):
+                            st.session_state[f"{key_prefix}_confirm_replace"] = False
+                            with st.spinner("جاري الحفظ في Google Sheets..."):
+                                counts = _china_do_import(parsed, replace=True)
+                            _after(f"✅ تم الاستبدال — {counts}")
+                        if cn.button("❌ لا | No", key=f"{key_prefix}_no_replace"):
+                            st.session_state[f"{key_prefix}_confirm_replace"] = False
+                            st.rerun()
+
+        if has_data:
+            st.markdown("---")
+            st.markdown("**🗑️ حذف | Delete**")
+            orders = sorted({l.get("internal_order_no", "") for l in bundle["lines"] if l.get("internal_order_no")}
+                            | {s.get("internal_order_no", "") for s in bundle["ships"] if s.get("internal_order_no")})
+            d1, d2 = st.columns([3, 1])
+            with d1:
+                pick = st.selectbox("حذف طلب محدد (NO.xxx) بكل أسطره | Delete one order", ["—"] + orders,
+                                    key=f"{key_prefix}_del_pick")
+            with d2:
+                st.write("")
+                if st.button("🗑️ حذف الطلب | Delete", key=f"{key_prefix}_del_order_btn",
+                             use_container_width=True, disabled=(pick == "—")):
+                    st.session_state[f"{key_prefix}_confirm_del_order"] = pick
+            pend = st.session_state.get(f"{key_prefix}_confirm_del_order")
+            if pend:
+                st.warning(f"⚠️ هيحذف الطلب {pend} بكل أسطره وشحناته؟ | Delete order {pend}?")
+                yo, no_ = st.columns(2)
+                if yo.button("✅ نعم | Yes", key=f"{key_prefix}_yes_del_order"):
+                    st.session_state[f"{key_prefix}_confirm_del_order"] = None
+                    with st.spinner("جاري الحذف..."):
+                        _china_delete_order(pend)
+                    st.session_state.pop("china_bundle", None)
+                    st.session_state.pop("china_bundle_src", None)
+                    st.session_state["china_flash"] = f"✅ تم حذف الطلب {pend}"
+                    st.rerun()
+                if no_.button("❌ لا | No", key=f"{key_prefix}_no_del_order"):
+                    st.session_state[f"{key_prefix}_confirm_del_order"] = None
+                    st.rerun()
+            if st.button("🗑️ مسح كل بيانات الصين | Delete ALL China data", key=f"{key_prefix}_del_all_btn"):
+                st.session_state[f"{key_prefix}_confirm_del_all"] = True
+            if st.session_state.get(f"{key_prefix}_confirm_del_all"):
+                st.warning("⚠️ هيمسح كل بيانات الصين (الشحنات والمنتجات والحاويات)؟ | Delete ALL China data?")
+                ya, na = st.columns(2)
+                if ya.button("✅ نعم | Yes", key=f"{key_prefix}_yes_del_all"):
+                    st.session_state[f"{key_prefix}_confirm_del_all"] = False
+                    with st.spinner("جاري الحذف..."):
+                        _china_delete_all()
+                    st.session_state.pop("china_bundle", None)
+                    st.session_state.pop("china_bundle_src", None)
+                    st.session_state["china_flash"] = "✅ تم مسح كل بيانات الصين"
+                    st.rerun()
+                if na.button("❌ لا | No", key=f"{key_prefix}_no_del_all"):
+                    st.session_state[f"{key_prefix}_confirm_del_all"] = False
+                    st.rerun()
+
+# ── تاب شحنات الصين | The China tab body ──
+CHINA_STATUS_OPTS = {"🚢 قادمة | Incoming": "incoming", "✅ وصلت المستودع | Received": "received",
+                     "🚫 ملغاة | Cancelled": "cancelled", "الكل | All": None}
+
+def _china_days(date_str, today):
+    d = _china_date(date_str)
+    return (d - today).days if d else None
+
+def render_china_tab():
+    st.subheader("🚢 شحنات الصين | China Shipments")
+    st.caption("بضاعة جاية من الصين — بيانات ملف الإكسيل (SHIPMENTS / SKU_LINES / CONTAINERS) مربوطة بالتكويد: "
+               "الكود01 في تاب التكويد = barcode في SKU_LINES. الكمية القادمة بتظهر كمان جوه تابات مبيعات FBN وFBB | "
+               "Incoming goods from China, linked to Tacweed (Code01 = barcode). Also shown inside the FBN/FBB sales tabs.")
+    flash = st.session_state.pop("china_flash", None)
+    if flash:
+        st.success(flash)
+
+    bundle = get_china_bundle()
+    render_china_upload("china", bundle)
+    lines = bundle["lines"]
+    if not (lines or bundle["ships"] or bundle["conts"]):
+        st.info("لا توجد بيانات صين بعد — ارفع ملف الإكسيل من فوق | No China data yet — upload the Excel file above")
+        return
+
+    today = datetime.now().date()
+    code_skus = _china_code_to_skus()
+
+    def _store_skus(l):
+        s = list(code_skus.get(l["_norm"], [])) if l["_norm"] else []
+        ns = l.get("noon_sku", "").strip().upper()
+        if ns and ns not in s:
+            s.append(ns)
+        return s
+
+    # ── مؤشرات | KPIs ──
+    inc = [l for l in lines if l["_status"] == "incoming"]
+    rec = [l for l in lines if l["_status"] == "received"]
+    q_inc = sum(l["_qty"] for l in inc)
+    q_ship = sum(l["_qty"] for l in inc if l.get("stock_stage") in CHINA_SHIPPED_STAGES)
+    q_fact = q_inc - q_ship
+    q_rec = sum(l["_qty"] for l in rec)
+    n_orders = len({s.get("internal_order_no") for s in bundle["ships"] if s.get("internal_order_no")}
+                   | {l.get("internal_order_no") for l in lines if l.get("internal_order_no")})
+    n_ship = len({s.get("shipment_id") for s in bundle["ships"] if s.get("shipment_id")}
+                 | {l["_shipment_id"] for l in lines if l["_shipment_id"]})
+    n_cont = len([c for c in bundle["conts"] if c.get("container_status") != "Cancelled"])
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("الطلبات | Orders", f"{n_orders:,}")
+    k2.metric("الشحنات | Shipments", f"{n_ship:,}")
+    k3.metric("الحاويات | Containers", f"{n_cont:,}")
+    k4.metric("قطع قادمة | Incoming units", f"{q_inc:,}")
+    k5.metric("قطع وصلت | Received units", f"{q_rec:,}")
+    st.caption(f"📦 من القطع القادمة: {q_ship:,} في الطريق (محمّلة/مشحونة/ميناء/تخليص) | {q_fact:,} لسه في المصنع/قبل الشحن")
+
+    t_prod, t_ship, t_cont, t_map = st.tabs(["📦 المنتجات | Products", "🧾 الشحنات | Shipments",
+                                             "🧱 الحاويات | Containers", "🔗 الربط بالتكويد | Mapping"])
+
+    # ═══ المنتجات ═══
+    with t_prod:
+        f1, f2, f3 = st.columns([3, 2, 3])
+        q_txt = f1.text_input("🔍 بحث (باركود/SKU/اسم/شحنة/حاوية/طلب) | Search", key="china_q").strip().upper()
+        status_lbl = f2.selectbox("الحالة | Status", list(CHINA_STATUS_OPTS.keys()), key="china_status")
+        stage_opts = sorted({l.get("stock_stage", "") for l in lines if l.get("stock_stage")})
+        stage_sel = f3.multiselect("المرحلة | Stage", stage_opts, key="china_stage")
+        view = st.radio("العرض | View", ["📦 ملخص بالمنتج | By product", "📋 تفصيل الأسطر | Line details"],
+                        horizontal=True, key="china_view")
+        want = CHINA_STATUS_OPTS[status_lbl]
+        flt = []
+        for l in lines:
+            if want and l["_status"] != want:
+                continue
+            if stage_sel and l.get("stock_stage") not in stage_sel:
+                continue
+            if q_txt:
+                hay = " ".join([l.get("barcode", ""), l.get("sku", ""), l.get("model_no", ""), l.get("product_name_en", ""),
+                                l.get("product_name_ar", ""), l["_shipment_id"], l.get("container_no", ""),
+                                l.get("internal_order_no", ""), l.get("po_no", ""), " ".join(_store_skus(l))]).upper()
+                if q_txt not in hay:
+                    continue
+            flt.append(l)
+        if not flt:
+            st.info("لا توجد نتائج | No results")
+        elif view.startswith("📦"):
+            agg = {}
+            for l in flt:
+                k = l["_norm"] or f"NOBC|{l.get('sku', '')}"
+                a = agg.setdefault(k, {"barcode": l.get("barcode", ""), "name": l.get("product_name_ar") or l.get("product_name_en", ""),
+                                       "model": l.get("model_no") or l.get("sku", ""), "qty": 0, "conts": set(), "ships": set(),
+                                       "stages": set(), "etas": [], "skus": set()})
+                a["qty"] += l["_qty"]
+                if l.get("container_no"):
+                    a["conts"].add(l["container_no"])
+                if l["_shipment_id"]:
+                    a["ships"].add(l["_shipment_id"])
+                elif l.get("internal_order_no"):
+                    a["ships"].add(l["internal_order_no"])
+                if l.get("stock_stage"):
+                    a["stages"].add(l["stock_stage"])
+                d = _china_date(l["_eta"])
+                if d:
+                    a["etas"].append(d)
+                a["skus"].update(_store_skus(l))
+            df_p = pd.DataFrame([{
+                "تكويد/Barcode": a["barcode"], "الموديل | Model": a["model"], "المنتج | Product": a["name"],
+                "SKUs المتجر | Store SKUs": ", ".join(sorted(a["skus"])) or "— غير مربوط",
+                "إجمالي الكمية | Qty": a["qty"], "عدد الحاويات | Containers": len(a["conts"]),
+                "الشحنات/الطلبات | Shipments": ", ".join(sorted(a["ships"])),
+                "أقرب وصول | Nearest ETA": str(min(a["etas"])) if a["etas"] else "",
+                "المراحل | Stages": ", ".join(sorted(a["stages"])),
+            } for a in sorted(agg.values(), key=lambda x: -x["qty"])])
+            c1, c2 = st.columns(2)
+            with c1:
+                dl_btn(df_p, "china_products", key="dlbtn_china_products")
+            with c2:
+                st.info(f"📦 منتجات: {len(df_p)} | إجمالي القطع: {int(df_p['إجمالي الكمية | Qty'].sum()):,}")
+            st.dataframe(df_p, use_container_width=True, height=520)
+        else:
+            rows_d = []
+            for l in flt:
+                c, s = l["_ctr"], l["_ship"]
+                dd = _china_days(l["_eta"], today) if l["_status"] == "incoming" else None
+                rows_d.append({
+                    "shipment_id": l["_shipment_id"], "container_no": l.get("container_no", ""),
+                    "تكويد/Barcode": l.get("barcode", ""), "SKU": l.get("sku", ""), "الموديل | Model": l.get("model_no", ""),
+                    "المنتج | Product": l.get("product_name_ar") or l.get("product_name_en", ""),
+                    "SKUs المتجر | Store SKUs": ", ".join(_store_skus(l)),
+                    "الكمية | Qty": l["_qty"], "كراتين | Cartons": _china_int(l.get("cartons", "")),
+                    "قطع/كرتون": _china_int(l.get("units_per_carton", "")), "CBM": l.get("cbm", ""),
+                    "المرحلة | Stage": l.get("stock_stage", ""), "الحالة | Status": l["_status"],
+                    "الوصول | Arrival": l["_eta_label"], "التاريخ | Date": l["_eta"], "أيام للوصول | Days": dd,
+                    "حالة الحاوية | Container": c.get("container_status", ""), "السفينة | Vessel": c.get("vessel_name", ""),
+                    "B/L": c.get("bl_no") or s.get("bl_no", ""), "المورد | Supplier": s.get("supplier_name", ""),
+                    "الطلب | Order": l.get("internal_order_no", ""), "PO": l.get("po_no", ""),
+                    "ملاحظات | Notes": l.get("notes", ""),
+                })
+            df_d = pd.DataFrame(rows_d)
+            c1, c2 = st.columns(2)
+            with c1:
+                dl_btn(df_d, "china_lines", key="dlbtn_china_lines")
+            with c2:
+                st.info(f"📋 أسطر: {len(df_d)} | إجمالي القطع: {int(df_d['الكمية | Qty'].sum()):,}")
+            st.dataframe(df_d, use_container_width=True, height=520)
+
+    # ═══ الشحنات ═══
+    with t_ship:
+        ships = bundle["ships"]
+        if not ships:
+            st.info("لا توجد صفوف في SHIPMENTS | No shipment rows")
+        else:
+            units_by_pair = {}
+            for l in lines:
+                if l["_status"] != "cancelled":
+                    k = (l.get("internal_order_no", ""), l.get("po_no", ""))
+                    units_by_pair[k] = units_by_pair.get(k, 0) + l["_qty"]
+            st_opts = sorted({s.get("shipment_status", "") for s in ships if s.get("shipment_status")})
+            sf1, sf2 = st.columns([3, 3])
+            sq = sf1.text_input("🔍 بحث | Search", key="china_ship_q").strip().upper()
+            ssel = sf2.multiselect("حالة الشحنة | Status", st_opts, key="china_ship_status")
+            rows_s = []
+            for s in ships:
+                if ssel and s.get("shipment_status") not in ssel:
+                    continue
+                if sq and sq not in " ".join([s.get("shipment_id", ""), s.get("internal_order_no", ""), s.get("po_no", ""),
+                                              s.get("supplier_name", ""), s.get("bl_no", "")]).upper():
+                    continue
+                rows_s.append({
+                    "shipment_id": s.get("shipment_id", ""), "الطلب | Order": s.get("internal_order_no", ""),
+                    "PO": s.get("po_no", ""), "المورد | Supplier": s.get("supplier_name", ""),
+                    "الحالة | Status": s.get("shipment_status", ""), "الشحن | Mode": s.get("shipment_mode", ""),
+                    "ميناء التحميل": s.get("port_of_loading", ""), "ميناء الوصول": s.get("destination_port", ""),
+                    "شركة الشحن": s.get("shipping_line", ""), "B/L": s.get("bl_no", ""),
+                    "حاويات | Cont.": s.get("container_count", ""),
+                    "القطع | Units": units_by_pair.get((s.get("internal_order_no", ""), s.get("po_no", "")), 0),
+                    "ETD فعلي": s.get("actual_etd", ""), "ETA الميناء": s.get("eta_port", ""),
+                    "ETA الوجهة": s.get("eta_destination", ""), "ملاحظات | Notes": s.get("notes", ""),
+                })
+            df_s = pd.DataFrame(rows_s)
+            c1, c2 = st.columns(2)
+            with c1:
+                dl_btn(df_s, "china_shipments", key="dlbtn_china_shipments")
+            with c2:
+                st.info(f"🧾 صفوف: {len(df_s)}")
+            st.dataframe(df_s, use_container_width=True, height=520)
+
+    # ═══ الحاويات ═══
+    with t_cont:
+        conts = bundle["conts"]
+        if not conts:
+            st.info("لا توجد صفوف في CONTAINERS | No container rows")
+        else:
+            units_by_cont, prods_by_cont = {}, {}
+            for l in lines:
+                cn = l.get("container_no", "")
+                if cn and l["_status"] != "cancelled":
+                    units_by_cont[cn] = units_by_cont.get(cn, 0) + l["_qty"]
+                    prods_by_cont.setdefault(cn, set()).add(l.get("model_no") or l.get("sku") or l.get("barcode", ""))
+            cs_opts = sorted({c.get("container_status", "") for c in conts if c.get("container_status")})
+            cf1, cf2 = st.columns([3, 3])
+            cq = cf1.text_input("🔍 بحث | Search", key="china_cont_q").strip().upper()
+            csel = cf2.multiselect("حالة الحاوية | Status", cs_opts, key="china_cont_status")
+            rows_c = []
+            for c in conts:
+                if csel and c.get("container_status") not in csel:
+                    continue
+                if cq and cq not in " ".join([c.get("container_no", ""), c.get("shipment_id", ""), c.get("bl_no", ""),
+                                              c.get("vessel_name", "")]).upper():
+                    continue
+                arrived = c.get("port_arrival_actual") or c.get("warehouse_arrival_actual")
+                dd = None if (arrived or c.get("container_status") == "Cancelled") else _china_days(c.get("eta_port", ""), today)
+                rows_c.append({
+                    "container_no": c.get("container_no", ""), "shipment_id": c.get("shipment_id", ""),
+                    "الحالة | Status": c.get("container_status", ""), "النوع": c.get("container_type", ""),
+                    "السفينة | Vessel": c.get("vessel_name", ""), "الرحلة": c.get("voyage_no", ""), "B/L": c.get("bl_no", ""),
+                    "ميناء التحميل": c.get("port_of_loading", ""), "ميناء الوصول": c.get("destination_port", ""),
+                    "ETD فعلي": c.get("actual_etd", ""), "ETA الميناء": c.get("eta_port", ""),
+                    "وصول فعلي للميناء": c.get("port_arrival_actual", ""), "وصول فعلي للمستودع": c.get("warehouse_arrival_actual", ""),
+                    "أيام للوصول | Days to ETA": dd,
+                    "أيام التأخير | Delay": (-dd if dd is not None and dd < 0 else 0) if dd is not None else None,
+                    "التخليص | Customs": c.get("customs_status", ""),
+                    "القطع بالنظام | Units": units_by_cont.get(c.get("container_no", ""), 0),
+                    "منتجات | Products": ", ".join(sorted(prods_by_cont.get(c.get("container_no", ""), []))),
+                    "آخر موقع": c.get("last_known_location", ""), "سبب التأخير": c.get("delay_reason", ""),
+                })
+            df_c = pd.DataFrame(rows_c)
+            c1, c2 = st.columns(2)
+            with c1:
+                dl_btn(df_c, "china_containers", key="dlbtn_china_containers")
+            with c2:
+                st.info(f"🧱 حاويات: {len(df_c)}")
+            st.dataframe(df_c, use_container_width=True, height=520)
+
+    # ═══ الربط ═══
+    with t_map:
+        if not lines:
+            st.info("لا توجد أسطر منتجات | No product lines")
+        else:
+            linked = [l for l in lines if _store_skus(l)]
+            unlinked = [l for l in lines if not _store_skus(l)]
+            codes_all = {l["_norm"] for l in lines if l["_norm"]}
+            codes_linked = {l["_norm"] for l in linked if l["_norm"]}
+            m1, m2, m3 = st.columns(3)
+            m1.metric("باركودات الصين | China barcodes", f"{len(codes_all):,}")
+            m2.metric("مربوطة بالتكويد | Linked", f"{len(codes_linked):,}")
+            m3.metric("غير مربوطة | Unlinked lines", f"{len(unlinked):,}")
+            if not get_tacweed_map():
+                st.warning("⚠️ تاب التكويد فاضي — ارفع ملف التكويد من تاب المخزون أو المبيعات | Tacweed is empty — upload it first")
+            if unlinked:
+                st.markdown("**أسطر مفيهاش SKU في المتجر بنفس الكود | Lines with no store SKU for their code:**")
+                df_u = pd.DataFrame([{
+                    "تكويد/Barcode": l.get("barcode", ""), "SKU": l.get("sku", ""), "الموديل | Model": l.get("model_no", ""),
+                    "المنتج | Product": l.get("product_name_ar") or l.get("product_name_en", ""),
+                    "الكمية | Qty": l["_qty"], "shipment_id": l["_shipment_id"], "container_no": l.get("container_no", ""),
+                    "المرحلة | Stage": l.get("stock_stage", ""),
+                } for l in unlinked])
+                dl_btn(df_u, "china_unlinked", key="dlbtn_china_unlinked")
+                st.dataframe(df_u, use_container_width=True, height=420)
+            else:
+                st.success("✅ كل أسطر الصين مربوطة بالتكويد | All China lines are linked")
 
 # ══ inv_map ══
 def _to_int(v):
@@ -2446,6 +3190,7 @@ NAV_ITEMS = [
     ("tab_dash", "📊", "داشبورد المبيعات | Dashboard"),
     ("tab9",     "📦", "المخزون | Inventory"),
     ("tab_wh",   "🏭", "مخزون المستودع | Warehouse Stockout"),
+    ("tab_china", "🚢", "شحنات الصين | China Shipments"),
     ("tab16",    "🗂️", "مخزون بدون بيع | No Sales"),
     ("tab_ads",  "📢", "الإعلانات | Ads"),
 ]
@@ -2602,6 +3347,7 @@ tab14    = st.container(key="navpanel_tab14")
 tab_dash = st.container(key="navpanel_tab_dash")
 tab9     = st.container(key="navpanel_tab9")
 tab_wh   = st.container(key="navpanel_tab_wh")
+tab_china = st.container(key="navpanel_tab_china")
 tab16    = st.container(key="navpanel_tab16")
 tab_ads  = st.container(key="navpanel_tab_ads")
 
@@ -4068,6 +4814,7 @@ if st.session_state["nav_page"] == "tab14":
                             tc_badge_t14 = warehouse_available_badge(r["sku_up"])
                             if tc_badge_t14:
                                 st.markdown(tc_badge_t14, unsafe_allow_html=True)
+                            render_china_for_sku(r["sku_up"])  # 🚢 كمية/شحنات الصين القادمة (مربوطة بالتكويد)
 
                             # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
                             ads_entries_t14 = ads_map_t14.get(r["sku_up"])
@@ -4470,6 +5217,7 @@ if st.session_state["nav_page"] == "tab14":
                             tc_badge_t14 = warehouse_available_badge(r["sku_up"])
                             if tc_badge_t14:
                                 st.markdown(tc_badge_t14, unsafe_allow_html=True)
+                            render_china_for_sku(r["sku_up"])  # 🚢 كمية/شحنات الصين القادمة (مربوطة بالتكويد)
 
                             # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
                             ads_entries_t14 = ads_map_t14.get(r["sku_up"])
@@ -4834,6 +5582,12 @@ if st.session_state["nav_page"] == "tab16":
                     render_no_sale_list(no_sale_3d, "آخر 3 أيام", "no_sale_3d")
                 with sub3:
                     render_no_sale_list(no_sale_7d, "آخر أسبوع", "no_sale_7d")
+
+# ══ TAB CHINA — شحنات الصين (تاب جديدة منفصلة) ══
+if st.session_state["nav_page"] == "tab_china":
+    with tab_china:
+        if _tab_gate("tab_china", "🚢 شحنات الصين | China Shipments"):
+            render_china_tab()
 
 if st.session_state["nav_page"] == "tab_ads":
     with tab_ads:
