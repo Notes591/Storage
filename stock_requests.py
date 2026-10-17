@@ -1030,8 +1030,17 @@ CHINA_DATE_FIELDS = {"planned_etd","actual_etd","eta_port","eta_destination","la
                      "actual_load_date","port_arrival_actual","warehouse_arrival_actual"}
 # حقول محسوبة بالإكسيل بتتأخر (متحسوبة وقت آخر حفظ) — بنحسبها إحنا لحظيًا بدلها
 CHINA_SKIP_COLS = {"days_to_eta", "delay_days"}
-# مراحل "في الطريق / شُحنت" مقابل "لسه في المصنع" — للإحصائيات بس
-CHINA_SHIPPED_STAGES = {"Loaded", "Shipped / In Transit", "Arrived at Port", "Customs Clearance", "Cleared"}
+# مراحل رحلة البضاعة من أول تأكيد المصنع لحد استلام المستودع | The full journey, in order
+CHINA_STAGES = ["Factory Confirmed", "In Production", "Production Completed", "Ready to Ship", "Allocated to Container",
+                "Loaded", "Shipped / In Transit", "Arrived at Port", "Customs Clearance", "Cleared", "Warehouse Received"]
+CHINA_STAGE_AR = {"Factory Confirmed": "تأكيد المصنع", "In Production": "في الإنتاج", "Production Completed": "اكتمل الإنتاج",
+                  "Ready to Ship": "جاهز للشحن", "Allocated to Container": "تخصيص حاوية", "Loaded": "تم التحميل",
+                  "Shipped / In Transit": "في البحر", "Arrived at Port": "وصل الميناء", "Customs Clearance": "تخليص جمركي",
+                  "Cleared": "تم التخليص", "Warehouse Received": "استُلم بالمستودع"}
+CHINA_SHIPPED_IDX = 5     # من "تم التحميل" فما فوق = خرجت من المصنع | Loaded and beyond = left the factory
+CHINA_RECEIVED_IDX = 10
+CHINA_CONT_STATUS_IDX = {"Loaded": 5, "Shipped / In Transit": 6, "Arrived at Port": 7, "Customs Clearance": 8,
+                         "Cleared": 9, "Delivered to Warehouse": 10, "Warehouse Received": 10}
 
 def _china_get_or_create_ws(tab, cols, retries=5, delay=2):
     for attempt in range(retries):
@@ -1169,7 +1178,7 @@ def _china_parse_workbook(file_bytes):
             rows = [r for r in rows if r.get("shipment_id") or r.get("internal_order_no")]
         elif out_key == "lines":
             rows = [r for r in rows if r.get("barcode") or r.get("sku") or r.get("model_no")
-                    or r.get("product_name_en") or r.get("product_name_ar")]
+                    or r.get("product_name_en") or r.get("product_name_ar") or r.get("line_id")]
         else:
             rows = [r for r in rows if r.get("container_no")]
         res[out_key] = rows
@@ -1250,9 +1259,22 @@ def _china_enrich(line, conts, ship_by_pair, ship_by_no):
     stage = line.get("stock_stage", "")
     cstat = ctr.get("container_status", "")
     wh_arr = ctr.get("warehouse_arrival_actual", "")
+    # المرحلة الفعلية = الأبعد بين مرحلة السطر وحالة الحاوية وتواريخ الوصول/التخليص الفعلية
+    idx = CHINA_STAGES.index(stage) if stage in CHINA_STAGES else -1
+    if ctr:
+        idx = max(idx, CHINA_CONT_STATUS_IDX.get(cstat, -1))
+        if ctr.get("port_arrival_actual"):
+            idx = max(idx, 7)
+        cust = ctr.get("customs_status", "")
+        if cust == "Cleared":
+            idx = max(idx, 9)
+        elif cust in ("Submitted", "Under Clearance", "Inspection") and idx >= 6:
+            idx = max(idx, 8)
+        if wh_arr:
+            idx = max(idx, 10)
     if stage == "Cancelled" or cstat == "Cancelled":
         status = "cancelled"
-    elif stage == "Warehouse Received" or wh_arr or cstat in ("Delivered to Warehouse", "Warehouse Received"):
+    elif idx >= CHINA_RECEIVED_IDX:
         status = "received"
     else:
         status = "incoming"
@@ -1271,6 +1293,8 @@ def _china_enrich(line, conts, ship_by_pair, ship_by_no):
     e = dict(line)
     e["_qty"] = _china_int(line.get("total_qty", ""))
     e["_status"] = status
+    e["_idx"] = idx
+    e["_stage_eff"] = CHINA_STAGE_AR.get(CHINA_STAGES[idx], "") if idx >= 0 else CHINA_STAGE_AR.get(stage, stage)
     e["_eta_label"] = eta_label
     e["_eta"] = eta
     e["_ship"] = shp
@@ -1352,29 +1376,205 @@ def _china_lines_table_html(lines):
     for l in lines:
         eta = f'{l["_eta_label"]}: {l["_eta"]}' if l["_eta"] else "—"
         cells = [l["_shipment_id"] or "—", l.get("container_no") or "—", f'{l["_qty"]:,}',
-                 l.get("stock_stage") or "—", eta,
+                 l.get("_stage_eff") or l.get("stock_stage") or "—", eta,
                  f'{l.get("internal_order_no") or "—"} | {l.get("po_no") or "—"}']
         body += "<tr>" + "".join(f'<td style="padding:3px 8px;">{_esc(str(c))}</td>' for c in cells) + "</tr>"
     return f'<div style="overflow-x:auto;"><table style="font-size:12px;border-collapse:collapse;"><tr>{th}</tr>{body}</table></div>'
 
 def render_china_for_sku(sku_up):
     """بيتنادى جوه تابات مبيعات FBN وFBB: شارة الكمية القادمة من الصين + تفاصيل الشحنات
-    (shipment_id / container_no / الكمية / الوصول). أي خطأ هنا مبيوقفش تاب المبيعات |
-    Called inside the FBN and FBB sales tabs. Any error here never breaks the sales tab."""
+    (shipment_id / container_no / الكمية / المرحلة / الوصول) + مسار كامل لكل سطر. أي خطأ بيظهر
+    كتحذير صغير بدل ما يختفي، ومبيوقفش تاب المبيعات | Called inside the FBN and FBB sales tabs.
+    Errors show as a small warning instead of vanishing, and never break the sales tab."""
     try:
         lines = china_lines_for_sku(sku_up)
         if not lines:
             return
-        shown = [l for l in lines if l["_status"] != "cancelled"]
-        if not shown:
-            return
-        badge = china_badge_html(shown)
+        badge = china_badge_html([l for l in lines if l["_status"] != "cancelled"])
         if badge:
             st.markdown(badge, unsafe_allow_html=True)
-        with st.expander(f"🚢 تفاصيل شحنات الصين | China shipments — {len(shown)}"):
-            st.markdown(_china_lines_table_html(shown), unsafe_allow_html=True)
-    except Exception:
+        recv = sum(l["_qty"] for l in lines if l["_status"] == "received")
+        canc = sum(l["_qty"] for l in lines if l["_status"] == "cancelled")
+        extra = ""
+        if recv:
+            extra += f" | وصل المستودع: {recv:,}"
+        if canc:
+            extra += f" | ملغي: {canc:,}"
+        with st.expander(f"🚢 تفاصيل شحنات الصين | China shipments — {len(lines)} سطر{extra}"):
+            st.markdown(_china_lines_table_html(lines), unsafe_allow_html=True)
+            for l in lines:
+                st.markdown(_china_stepper_html(l["_idx"], l["_status"] == "cancelled"), unsafe_allow_html=True)
+                st.caption(f'{l["_shipment_id"] or "—"} | {l.get("container_no") or "—"} | {l["_qty"]:,} قطعة')
+    except Exception as e:
+        st.caption(f"⚠️ تعذر عرض بيانات الصين لهذا الـ SKU: {e}")
+
+def render_china_sales_status(sku_ups):
+    """سطر حالة صغير فوق قائمة مبيعات FBN/FBB: بيوضح هل بيانات الصين اتحمّلت وكام SKU في القائمة
+    اتربط بيها — عشان لو مفيش شارات يبان السبب فورًا | One status line above the FBN/FBB list."""
+    try:
+        b = get_china_bundle()
+        if not b["lines"]:
+            st.caption("🚢 بيانات شحنات الصين: لا توجد بيانات محمّلة — ارفع الملف من قسم «شحنات الصين» | no China data loaded yet")
+            return
+        n = sum(1 for s in sku_ups if china_lines_for_sku(s))
+        no_code = sum(1 for s in sku_ups if not get_tacweed_map().get(s, ""))
+        st.caption(f"🚢 بيانات الصين: {len(b['lines'])} سطر محمّل | مربوط بمنتجات هذه القائمة: {n} SKU"
+                   + (f" | {no_code} SKU بدون كود تكويد" if no_code else ""))
+    except Exception as e:
+        st.caption(f"⚠️ تعذر تحميل بيانات الصين: {e}")
+
+# ── مسار الكود من البداية للنهاية | Full journey of one code, start to finish ──
+def _china_stepper_html(idx, cancelled=False):
+    if cancelled:
+        return '<div style="padding:6px 10px;border-radius:8px;background:#7f1d1d;color:#fecaca;font-size:12px;display:inline-block;">🚫 ملغي | Cancelled</div>'
+    items = ""
+    for i, st_name in enumerate(CHINA_STAGES):
+        if i < idx or (i == idx and idx == CHINA_RECEIVED_IDX):
+            bg, fg, mark = "#166534", "#dcfce7", "✓"
+        elif i == idx:
+            bg, fg, mark = "#c2410c", "#ffffff", "●"
+        else:
+            bg, fg, mark = "#374151", "#9ca3af", str(i + 1)
+        items += (f'<div style="flex:1 1 74px;min-width:74px;text-align:center;">'
+                  f'<div style="margin:0 auto;width:24px;height:24px;border-radius:50%;background:{bg};color:{fg};'
+                  f'font-size:12px;line-height:24px;font-weight:700;">{mark}</div>'
+                  f'<div style="font-size:11px;color:{"#e5e7eb" if i <= idx else "#9ca3af"};margin-top:2px;">{CHINA_STAGE_AR[st_name]}</div></div>')
+    return f'<div style="display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 8px 0;">{items}</div>'
+
+def _china_kv_html(pairs):
+    from html import escape as _esc
+    rows = "".join(
+        f'<tr><td style="padding:2px 10px;color:#9ca3af;white-space:nowrap;">{_esc(k)}</td>'
+        f'<td style="padding:2px 10px;">{_esc(str(v)) if v not in (None, "") else "—"}</td></tr>' for k, v in pairs)
+    return f'<table style="font-size:13px;border-collapse:collapse;">{rows}</table>'
+
+def _china_line_journey(l, today):
+    """كارت كامل لسطر واحد: شريط المراحل + الطلب + الكميات + التواريخ + الشحنة + الحاوية."""
+    s, c = l["_ship"], l["_ctr"]
+    st.markdown(_china_stepper_html(l["_idx"], l["_status"] == "cancelled"), unsafe_allow_html=True)
+    st.markdown(f"**المرحلة الحالية:** {l['_stage_eff'] or '—'} &nbsp;|&nbsp; **الكمية:** {l['_qty']:,} قطعة "
+                f"&nbsp;|&nbsp; **shipment_id:** `{l['_shipment_id'] or '—'}` &nbsp;|&nbsp; **container_no:** `{l.get('container_no') or '—'}`")
+    eta_days = ""
+    if l["_status"] == "incoming" and l["_eta"]:
+        dd = _china_days(l["_eta"], today)
+        if dd is not None:
+            eta_days = f"بعد {dd} يوم" if dd >= 0 else f"متأخرة {-dd} يوم"
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        st.markdown("**🏭 الطلب والمصنع | Order**")
+        st.markdown(_china_kv_html([
+            ("رقم الطلب الداخلي", l.get("internal_order_no")), ("PO المصنع", l.get("po_no")),
+            ("المورد", s.get("supplier_name")), ("المشتري", s.get("buyer_company")),
+            ("Incoterm", s.get("incoterm")), ("منشأ", s.get("origin_location")),
+            ("حالة الشحنة", s.get("shipment_status")), ("آخر تحديث", l.get("last_updated_at")),
+            ("حدّث بواسطة", l.get("updated_by"))]), unsafe_allow_html=True)
+        st.markdown("**📦 الكميات والتكلفة | Quantity & cost**")
+        st.markdown(_china_kv_html([
+            ("الكراتين", l.get("cartons")), ("قطع/كرتون", l.get("units_per_carton")), ("الإجمالي", f"{l['_qty']:,}"),
+            ("CBM", l.get("cbm")), ("وزن إجمالي كغ", l.get("gross_weight_kg")), ("وزن صافي كغ", l.get("net_weight_kg")),
+            ("تكلفة الوحدة", f"{l.get('unit_cost')} {l.get('currency')}".strip() if l.get("unit_cost") else ""),
+            ("قيمة السطر", f"{l.get('line_amount')} {l.get('currency')}".strip() if l.get("line_amount") else "")]),
+            unsafe_allow_html=True)
+    with g2:
+        st.markdown("**📅 التواريخ | Timeline**")
+        st.markdown(_china_kv_html([
+            ("جاهزية الإنتاج", l.get("production_ready_date")), ("تاريخ التحميل", l.get("actual_load_date")),
+            ("ETD مخطط", s.get("planned_etd")), ("ETD فعلي", c.get("actual_etd") or s.get("actual_etd")),
+            ("ETA الميناء", c.get("eta_port") or s.get("eta_port")), ("وصول فعلي للميناء", c.get("port_arrival_actual")),
+            ("ETA الوجهة النهائية", s.get("eta_destination")), ("وصول فعلي للمستودع", c.get("warehouse_arrival_actual")),
+            ("الموعد المعتمد", f"{l['_eta_label']}: {l['_eta']} {('(' + eta_days + ')') if eta_days else ''}".strip() if l["_eta"] else "")]),
+            unsafe_allow_html=True)
+    with g3:
+        st.markdown("**🚢 الشحنة والحاوية | Shipment & container**")
+        url = c.get("tracking_url") or s.get("tracking_url") or ""
+        bl = c.get("bl_no") or s.get("bl_no") or ""
+        if url.endswith("=") and bl:
+            url += bl
+        st.markdown(_china_kv_html([
+            ("شركة الشحن", c.get("shipping_line") or s.get("shipping_line")), ("طريقة الشحن", s.get("shipment_mode")),
+            ("B/L", bl), ("رقم الحجز", s.get("booking_no")), ("السفينة", c.get("vessel_name")), ("الرحلة", c.get("voyage_no")),
+            ("ميناء التحميل", c.get("port_of_loading") or s.get("port_of_loading")),
+            ("ميناء الوصول", c.get("destination_port") or s.get("destination_port")),
+            ("الوجهة النهائية", c.get("final_destination") or s.get("final_destination")),
+            ("نوع الحاوية", c.get("container_type")), ("رقم الختم", c.get("seal_no")),
+            ("حالة الحاوية", c.get("container_status")), ("التخليص", c.get("customs_status")),
+            ("آخر موقع", c.get("last_known_location")), ("سبب التأخير", c.get("delay_reason"))]), unsafe_allow_html=True)
+        if url.startswith("http"):
+            st.markdown(f"[🔗 تتبع الشحنة | Track]({url})")
+    if l.get("notes") or s.get("notes"):
+        st.caption("📝 " + " | ".join(x for x in (l.get("notes"), s.get("notes")) if x))
+
+def render_china_journey(lines, store_skus_fn, today):
+    """تاب مسار الكود: اختار كود (باركود) تشوف كل اللي حصله من تأكيد المصنع لحد المستودع."""
+    if not lines:
+        st.info("لا توجد أسطر | No lines")
         return
+    groups = {}
+    for l in lines:
+        groups.setdefault(l["_norm"] or f"NOBC|{l.get('sku', '')}", []).append(l)
+    def _label(k):
+        g = groups[k]
+        nm = g[0].get("product_name_ar") or g[0].get("product_name_en") or g[0].get("model_no") or g[0].get("sku", "") or g[0].get("line_id", "")
+        inc = sum(x["_qty"] for x in g if x["_status"] == "incoming")
+        return f"{g[0].get('barcode') or '(بدون باركود)'} — {nm} — قادم {inc:,} / إجمالي {sum(x['_qty'] for x in g):,}"
+    keys = sorted(groups, key=lambda k: -sum(x["_qty"] for x in groups[k] if x["_status"] == "incoming"))
+    q = st.text_input("🔍 ابحث عن كود/منتج/SKU/شحنة/حاوية | Search", key="china_jq").strip().upper()
+    if q:
+        def _hit(k):
+            for x in groups[k]:
+                hay = " ".join([x.get("barcode", ""), x.get("sku", ""), x.get("model_no", ""), x.get("product_name_en", ""),
+                                x.get("product_name_ar", ""), x["_shipment_id"], x.get("container_no", ""),
+                                x.get("internal_order_no", ""), x.get("po_no", ""), " ".join(store_skus_fn(x))]).upper()
+                if q in hay:
+                    return True
+            return False
+        keys = [k for k in keys if _hit(k)]
+    if not keys:
+        st.info("لا توجد نتائج | No results")
+        return
+    pick = st.selectbox(f"الكود | Code ({len(keys)})", keys, format_func=_label, key="china_jpick")
+    g = groups[pick]
+    first = g[0]
+    nm = first.get("product_name_ar") or first.get("product_name_en") or first.get("model_no") or first.get("line_id") or ""
+    skus = sorted({s for x in g for s in store_skus_fn(x)})
+    h1, h2 = st.columns([1, 6])
+    with h1:
+        show_img(first.get("image_url", ""), 90)
+    with h2:
+        st.markdown(f"### {nm}")
+        st.markdown(f'<span class="tacweed-badge" style="background:#3b0764;color:#e9d5ff;">🏷️ تكويد: {first.get("barcode") or "—"}</span>',
+                    unsafe_allow_html=True)
+        st.markdown("**SKUs المتجر:** " + (", ".join(f"`{s}`" for s in skus) if skus else "— غير مربوط بالتكويد"))
+        st.caption(f"الموديل: {first.get('model_no') or first.get('sku') or '—'} | EN: {first.get('product_name_en') or '—'}")
+    tot = sum(x["_qty"] for x in g)
+    by = {"factory": 0, "sea": 0, "port": 0, "recv": 0, "canc": 0}
+    for x in g:
+        if x["_status"] == "cancelled":
+            by["canc"] += x["_qty"]
+        elif x["_idx"] >= CHINA_RECEIVED_IDX:
+            by["recv"] += x["_qty"]
+        elif x["_idx"] >= 7:
+            by["port"] += x["_qty"]
+        elif x["_idx"] >= CHINA_SHIPPED_IDX:
+            by["sea"] += x["_qty"]
+        else:
+            by["factory"] += x["_qty"]
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("إجمالي الكمية | Total", f"{tot:,}")
+    m2.metric("في المصنع | Factory", f"{by['factory']:,}")
+    m3.metric("في البحر | At sea", f"{by['sea']:,}")
+    m4.metric("ميناء/تخليص | Port/Customs", f"{by['port']:,}")
+    m5.metric("وصل المستودع | Received", f"{by['recv']:,}")
+    if by["canc"]:
+        st.caption(f"🚫 ملغي: {by['canc']:,} قطعة")
+    st.markdown(f"**عدد الأسطر/الدفعات: {len(g)}** — كل دفعة (طلب/حاوية) ليها مسارها:")
+    for n, l in enumerate(sorted(g, key=lambda x: (x["_status"] == "cancelled", x["_idx"], x.get("line_id", ""))), start=1):
+        lbl = (f"دفعة {n}: {l['_qty']:,} قطعة — {l['_stage_eff'] or '—'} — {l['_shipment_id'] or l.get('internal_order_no') or '—'}"
+               f" — {l.get('container_no') or 'بدون حاوية'}")
+        with st.expander(lbl, expanded=(len(g) <= 2)):
+            _china_line_journey(l, today)
+
+
 
 # ── واجهة الرفع والحذف | Upload / delete UI ──
 def render_china_upload(key_prefix, bundle):
@@ -1522,7 +1722,7 @@ def render_china_tab():
     inc = [l for l in lines if l["_status"] == "incoming"]
     rec = [l for l in lines if l["_status"] == "received"]
     q_inc = sum(l["_qty"] for l in inc)
-    q_ship = sum(l["_qty"] for l in inc if l.get("stock_stage") in CHINA_SHIPPED_STAGES)
+    q_ship = sum(l["_qty"] for l in inc if l["_idx"] >= CHINA_SHIPPED_IDX)
     q_fact = q_inc - q_ship
     q_rec = sum(l["_qty"] for l in rec)
     n_orders = len({s.get("internal_order_no") for s in bundle["ships"] if s.get("internal_order_no")}
@@ -1538,8 +1738,13 @@ def render_china_tab():
     k5.metric("قطع وصلت | Received units", f"{q_rec:,}")
     st.caption(f"📦 من القطع القادمة: {q_ship:,} في الطريق (محمّلة/مشحونة/ميناء/تخليص) | {q_fact:,} لسه في المصنع/قبل الشحن")
 
-    t_prod, t_ship, t_cont, t_map = st.tabs(["📦 المنتجات | Products", "🧾 الشحنات | Shipments",
-                                             "🧱 الحاويات | Containers", "🔗 الربط بالتكويد | Mapping"])
+    t_jour, t_prod, t_ship, t_cont, t_map = st.tabs(["🧭 مسار الكود | Code Journey", "📦 المنتجات | Products",
+                                                     "🧾 الشحنات | Shipments", "🧱 الحاويات | Containers",
+                                                     "🔗 الربط بالتكويد | Mapping"])
+
+    # ═══ مسار الكود: كل اللي حصل لكل كود من البداية للنهاية ═══
+    with t_jour:
+        render_china_journey(lines, _store_skus, today)
 
     # ═══ المنتجات ═══
     with t_prod:
@@ -1612,7 +1817,7 @@ def render_china_tab():
                     "SKUs المتجر | Store SKUs": ", ".join(_store_skus(l)),
                     "الكمية | Qty": l["_qty"], "كراتين | Cartons": _china_int(l.get("cartons", "")),
                     "قطع/كرتون": _china_int(l.get("units_per_carton", "")), "CBM": l.get("cbm", ""),
-                    "المرحلة | Stage": l.get("stock_stage", ""), "الحالة | Status": l["_status"],
+                    "المرحلة | Stage": l["_stage_eff"], "الحالة | Status": l["_status"],
                     "الوصول | Arrival": l["_eta_label"], "التاريخ | Date": l["_eta"], "أيام للوصول | Days": dd,
                     "حالة الحاوية | Container": c.get("container_status", ""), "السفينة | Vessel": c.get("vessel_name", ""),
                     "B/L": c.get("bl_no") or s.get("bl_no", ""), "المورد | Supplier": s.get("supplier_name", ""),
@@ -4804,6 +5009,7 @@ if st.session_state["nav_page"] == "tab14":
                     live_map_t14 = get_live_map()
                     xdock_threshold_t14 = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
 
+                    render_china_sales_status([r["sku_up"] for r in sales_tab_rows])  # 🚢 حالة ربط بيانات الصين
                     st.divider()
                     for r in sales_tab_rows:
                         c_img, c_info = st.columns([1, 7])
@@ -5202,6 +5408,7 @@ if st.session_state["nav_page"] == "tab14":
                     live_map_t14 = get_live_map()
                     xdock_threshold_t14 = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
 
+                    render_china_sales_status([r["sku_up"] for r in sales_tab_rows])  # 🚢 حالة ربط بيانات الصين
                     st.divider()
                     for r in sales_tab_rows:
                         c_img, c_info = st.columns([1, 7])
