@@ -1291,6 +1291,17 @@ def _china_enrich(line, conts, ship_by_pair, ship_by_no):
     else:
         eta_label, eta = "", ""
     e = dict(line)
+    # كل التواريخ المهمة للسطر (الحاوية أولاً ثم الشحنة كبديل) | Key dates per line (container first, shipment as fallback)
+    e["_d"] = {
+        "ready": line.get("production_ready_date", ""),
+        "load": line.get("actual_load_date", ""),
+        "etd_plan": shp.get("planned_etd", ""),
+        "etd": ctr.get("actual_etd") or shp.get("actual_etd", ""),
+        "eta_port": ctr.get("eta_port") or shp.get("eta_port", ""),
+        "port_arr": ctr.get("port_arrival_actual", ""),
+        "eta_dest": shp.get("eta_destination", ""),
+        "wh_arr": wh_arr,
+    }
     e["_qty"] = _china_int(line.get("total_qty", ""))
     e["_status"] = status
     e["_idx"] = idx
@@ -1370,13 +1381,15 @@ def china_badge_html(lines):
 
 def _china_lines_table_html(lines):
     from html import escape as _esc
-    head = ["shipment_id", "container_no", "الكمية", "المرحلة", "الوصول", "الطلب | PO"]
+    head = ["shipment_id", "container_no", "الكمية", "المرحلة", "ETD فعلي", "ETA الميناء", "وصول الميناء",
+            "ETA الوجهة", "وصل المستودع", "الطلب | PO"]
     th = "".join(f'<th style="padding:3px 8px;border-bottom:1px solid #94a3b8;text-align:right;">{h}</th>' for h in head)
     body = ""
     for l in lines:
-        eta = f'{l["_eta_label"]}: {l["_eta"]}' if l["_eta"] else "—"
+        d = l["_d"]
         cells = [l["_shipment_id"] or "—", l.get("container_no") or "—", f'{l["_qty"]:,}',
-                 l.get("_stage_eff") or l.get("stock_stage") or "—", eta,
+                 l.get("_stage_eff") or l.get("stock_stage") or "—",
+                 d["etd"] or "—", d["eta_port"] or "—", d["port_arr"] or "—", d["eta_dest"] or "—", d["wh_arr"] or "—",
                  f'{l.get("internal_order_no") or "—"} | {l.get("po_no") or "—"}']
         body += "<tr>" + "".join(f'<td style="padding:3px 8px;">{_esc(str(c))}</td>' for c in cells) + "</tr>"
     return f'<div style="overflow-x:auto;"><table style="font-size:12px;border-collapse:collapse;"><tr>{th}</tr>{body}</table></div>'
@@ -1777,7 +1790,7 @@ def render_china_tab():
                 k = l["_norm"] or f"NOBC|{l.get('sku', '')}"
                 a = agg.setdefault(k, {"barcode": l.get("barcode", ""), "name": l.get("product_name_ar") or l.get("product_name_en", ""),
                                        "model": l.get("model_no") or l.get("sku", ""), "qty": 0, "conts": set(), "ships": set(),
-                                       "stages": set(), "etas": [], "skus": set()})
+                                       "stages": set(), "etas": [], "skus": set(), "etds": [], "eta_ports": []})
                 a["qty"] += l["_qty"]
                 if l.get("container_no"):
                     a["conts"].add(l["container_no"])
@@ -1790,12 +1803,20 @@ def render_china_tab():
                 d = _china_date(l["_eta"])
                 if d:
                     a["etas"].append(d)
+                d_etd = _china_date(l["_d"]["etd"])
+                if d_etd:
+                    a["etds"].append(d_etd)
+                d_ep = _china_date(l["_d"]["eta_port"])
+                if d_ep:
+                    a["eta_ports"].append(d_ep)
                 a["skus"].update(_store_skus(l))
             df_p = pd.DataFrame([{
                 "تكويد/Barcode": a["barcode"], "الموديل | Model": a["model"], "المنتج | Product": a["name"],
                 "SKUs المتجر | Store SKUs": ", ".join(sorted(a["skus"])) or "— غير مربوط",
                 "إجمالي الكمية | Qty": a["qty"], "عدد الحاويات | Containers": len(a["conts"]),
                 "الشحنات/الطلبات | Shipments": ", ".join(sorted(a["ships"])),
+                "أول ETD فعلي": str(min(a["etds"])) if a["etds"] else "",
+                "أقرب ETA ميناء": str(min(a["eta_ports"])) if a["eta_ports"] else "",
                 "أقرب وصول | Nearest ETA": str(min(a["etas"])) if a["etas"] else "",
                 "المراحل | Stages": ", ".join(sorted(a["stages"])),
             } for a in sorted(agg.values(), key=lambda x: -x["qty"])])
@@ -1818,7 +1839,11 @@ def render_china_tab():
                     "الكمية | Qty": l["_qty"], "كراتين | Cartons": _china_int(l.get("cartons", "")),
                     "قطع/كرتون": _china_int(l.get("units_per_carton", "")), "CBM": l.get("cbm", ""),
                     "المرحلة | Stage": l["_stage_eff"], "الحالة | Status": l["_status"],
-                    "الوصول | Arrival": l["_eta_label"], "التاريخ | Date": l["_eta"], "أيام للوصول | Days": dd,
+                    "جاهزية الإنتاج": l["_d"]["ready"], "تاريخ التحميل": l["_d"]["load"],
+                    "ETD مخطط": l["_d"]["etd_plan"], "ETD فعلي (actual_etd)": l["_d"]["etd"],
+                    "ETA الميناء (eta_port)": l["_d"]["eta_port"], "وصول فعلي للميناء": l["_d"]["port_arr"],
+                    "ETA الوجهة": l["_d"]["eta_dest"], "وصول فعلي للمستودع": l["_d"]["wh_arr"],
+                    "الموعد المعتمد": l["_eta_label"], "التاريخ | Date": l["_eta"], "أيام للوصول | Days": dd,
                     "حالة الحاوية | Container": c.get("container_status", ""), "السفينة | Vessel": c.get("vessel_name", ""),
                     "B/L": c.get("bl_no") or s.get("bl_no", ""), "المورد | Supplier": s.get("supplier_name", ""),
                     "الطلب | Order": l.get("internal_order_no", ""), "PO": l.get("po_no", ""),
