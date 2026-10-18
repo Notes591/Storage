@@ -1094,6 +1094,19 @@ def _china_norm_code(v):
     s = re.sub(r"[\s\-]", "", s).upper()
     return s.lstrip("0") if s.isdigit() else s
 
+def _china_eta_stats(eta_port, port_arr, cancelled, today):
+    """نفس منطق أعمدة الإكسيل days_to_eta / delay_days لكن محسوبة لحظيًا (الإكسيل بيحسبهم وقت آخر
+    حفظ فبيتأخروا): days_to_eta = ETA الميناء - النهاردة | delay_days = (وصول الميناء الفعلي أو النهاردة)
+    - ETA الميناء لو موجب، وصفر للملغي | Same logic as the Excel columns, computed live."""
+    e = _china_date(eta_port)
+    if not e:
+        return None, None
+    days = (e - today).days
+    if cancelled:
+        return days, 0
+    a = _china_date(port_arr)
+    return days, max(0, ((a - e).days if a else (today - e).days))
+
 def _china_int(v):
     try:
         return int(float(str(v).replace(",", "")))
@@ -1302,6 +1315,8 @@ def _china_enrich(line, conts, ship_by_pair, ship_by_no):
         "eta_dest": shp.get("eta_destination", ""),
         "wh_arr": wh_arr,
     }
+    e["_upd"] = ctr.get("last_updated_at") or line.get("last_updated_at", "")
+    e["_upd_by"] = ctr.get("updated_by") or line.get("updated_by", "")
     e["_qty"] = _china_int(line.get("total_qty", ""))
     e["_status"] = status
     e["_idx"] = idx
@@ -1382,14 +1397,18 @@ def china_badge_html(lines):
 def _china_lines_table_html(lines):
     from html import escape as _esc
     head = ["shipment_id", "container_no", "الكمية", "المرحلة", "ETD فعلي", "ETA الميناء", "وصول الميناء",
-            "ETA الوجهة", "وصل المستودع", "الطلب | PO"]
+            "ETA الوجهة", "وصل المستودع", "أيام حتى ETA", "أيام التأخير", "آخر تحديث", "الطلب | PO"]
     th = "".join(f'<th style="padding:3px 8px;border-bottom:1px solid #94a3b8;text-align:right;">{h}</th>' for h in head)
     body = ""
+    _today = datetime.now().date()
     for l in lines:
         d = l["_d"]
+        dte, dly = _china_eta_stats(d["eta_port"], d["port_arr"], l["_status"] == "cancelled", _today)
+        upd = f'{l["_upd"]} ({l["_upd_by"]})' if l["_upd"] and l["_upd_by"] else (l["_upd"] or "—")
         cells = [l["_shipment_id"] or "—", l.get("container_no") or "—", f'{l["_qty"]:,}',
                  l.get("_stage_eff") or l.get("stock_stage") or "—",
                  d["etd"] or "—", d["eta_port"] or "—", d["port_arr"] or "—", d["eta_dest"] or "—", d["wh_arr"] or "—",
+                 "—" if dte is None else dte, "—" if dly is None else dly, upd,
                  f'{l.get("internal_order_no") or "—"} | {l.get("po_no") or "—"}']
         body += "<tr>" + "".join(f'<td style="padding:3px 8px;">{_esc(str(c))}</td>' for c in cells) + "</tr>"
     return f'<div style="overflow-x:auto;"><table style="font-size:12px;border-collapse:collapse;"><tr>{th}</tr>{body}</table></div>'
@@ -1472,6 +1491,7 @@ def _china_line_journey(l, today):
         dd = _china_days(l["_eta"], today)
         if dd is not None:
             eta_days = f"بعد {dd} يوم" if dd >= 0 else f"متأخرة {-dd} يوم"
+    _st = _china_eta_stats(l["_d"]["eta_port"], l["_d"]["port_arr"], l["_status"] == "cancelled", today)
     g1, g2, g3 = st.columns(3)
     with g1:
         st.markdown("**🏭 الطلب والمصنع | Order**")
@@ -1495,7 +1515,8 @@ def _china_line_journey(l, today):
             ("ETD مخطط", s.get("planned_etd")), ("ETD فعلي", c.get("actual_etd") or s.get("actual_etd")),
             ("ETA الميناء", c.get("eta_port") or s.get("eta_port")), ("وصول فعلي للميناء", c.get("port_arrival_actual")),
             ("ETA الوجهة النهائية", s.get("eta_destination")), ("وصول فعلي للمستودع", c.get("warehouse_arrival_actual")),
-            ("الموعد المعتمد", f"{l['_eta_label']}: {l['_eta']} {('(' + eta_days + ')') if eta_days else ''}".strip() if l["_eta"] else "")]),
+            ("الموعد المعتمد", f"{l['_eta_label']}: {l['_eta']} {('(' + eta_days + ')') if eta_days else ''}".strip() if l["_eta"] else ""),
+            ("أيام حتى ETA (days_to_eta)", _st[0]), ("أيام التأخير (delay_days)", _st[1])]),
             unsafe_allow_html=True)
     with g3:
         st.markdown("**🚢 الشحنة والحاوية | Shipment & container**")
@@ -1511,7 +1532,8 @@ def _china_line_journey(l, today):
             ("الوجهة النهائية", c.get("final_destination") or s.get("final_destination")),
             ("نوع الحاوية", c.get("container_type")), ("رقم الختم", c.get("seal_no")),
             ("حالة الحاوية", c.get("container_status")), ("التخليص", c.get("customs_status")),
-            ("آخر موقع", c.get("last_known_location")), ("سبب التأخير", c.get("delay_reason"))]), unsafe_allow_html=True)
+            ("آخر موقع", c.get("last_known_location")), ("سبب التأخير", c.get("delay_reason")),
+            ("آخر تحديث (الحاوية)", c.get("last_updated_at")), ("حدّث بواسطة (الحاوية)", c.get("updated_by"))]), unsafe_allow_html=True)
         if url.startswith("http"):
             st.markdown(f"[🔗 تتبع الشحنة | Track]({url})")
     if l.get("notes") or s.get("notes"):
@@ -1831,6 +1853,7 @@ def render_china_tab():
             for l in flt:
                 c, s = l["_ctr"], l["_ship"]
                 dd = _china_days(l["_eta"], today) if l["_status"] == "incoming" else None
+                _st = _china_eta_stats(l["_d"]["eta_port"], l["_d"]["port_arr"], l["_status"] == "cancelled", today)
                 rows_d.append({
                     "shipment_id": l["_shipment_id"], "container_no": l.get("container_no", ""),
                     "تكويد/Barcode": l.get("barcode", ""), "SKU": l.get("sku", ""), "الموديل | Model": l.get("model_no", ""),
@@ -1844,6 +1867,8 @@ def render_china_tab():
                     "ETA الميناء (eta_port)": l["_d"]["eta_port"], "وصول فعلي للميناء": l["_d"]["port_arr"],
                     "ETA الوجهة": l["_d"]["eta_dest"], "وصول فعلي للمستودع": l["_d"]["wh_arr"],
                     "الموعد المعتمد": l["_eta_label"], "التاريخ | Date": l["_eta"], "أيام للوصول | Days": dd,
+                    "أيام حتى ETA (days_to_eta)": _st[0], "أيام التأخير (delay_days)": _st[1],
+                    "آخر تحديث (last_updated_at)": l["_upd"], "حدّث بواسطة (updated_by)": l["_upd_by"],
                     "حالة الحاوية | Container": c.get("container_status", ""), "السفينة | Vessel": c.get("vessel_name", ""),
                     "B/L": c.get("bl_no") or s.get("bl_no", ""), "المورد | Supplier": s.get("supplier_name", ""),
                     "الطلب | Order": l.get("internal_order_no", ""), "PO": l.get("po_no", ""),
@@ -1888,7 +1913,9 @@ def render_china_tab():
                     "حاويات | Cont.": s.get("container_count", ""),
                     "القطع | Units": units_by_pair.get((s.get("internal_order_no", ""), s.get("po_no", "")), 0),
                     "ETD فعلي": s.get("actual_etd", ""), "ETA الميناء": s.get("eta_port", ""),
-                    "ETA الوجهة": s.get("eta_destination", ""), "ملاحظات | Notes": s.get("notes", ""),
+                    "ETA الوجهة": s.get("eta_destination", ""),
+                    "آخر تحديث (last_updated_at)": s.get("last_updated_at", ""), "حدّث بواسطة (updated_by)": s.get("updated_by", ""),
+                    "ملاحظات | Notes": s.get("notes", ""),
                 })
             df_s = pd.DataFrame(rows_s)
             c1, c2 = st.columns(2)
@@ -1921,8 +1948,8 @@ def render_china_tab():
                 if cq and cq not in " ".join([c.get("container_no", ""), c.get("shipment_id", ""), c.get("bl_no", ""),
                                               c.get("vessel_name", "")]).upper():
                     continue
-                arrived = c.get("port_arrival_actual") or c.get("warehouse_arrival_actual")
-                dd = None if (arrived or c.get("container_status") == "Cancelled") else _china_days(c.get("eta_port", ""), today)
+                dd, dly = _china_eta_stats(c.get("eta_port", ""), c.get("port_arrival_actual", ""),
+                                           c.get("container_status") == "Cancelled", today)
                 rows_c.append({
                     "container_no": c.get("container_no", ""), "shipment_id": c.get("shipment_id", ""),
                     "الحالة | Status": c.get("container_status", ""), "النوع": c.get("container_type", ""),
@@ -1931,7 +1958,9 @@ def render_china_tab():
                     "ETD فعلي": c.get("actual_etd", ""), "ETA الميناء": c.get("eta_port", ""),
                     "وصول فعلي للميناء": c.get("port_arrival_actual", ""), "وصول فعلي للمستودع": c.get("warehouse_arrival_actual", ""),
                     "أيام للوصول | Days to ETA": dd,
-                    "أيام التأخير | Delay": (-dd if dd is not None and dd < 0 else 0) if dd is not None else None,
+                    "أيام التأخير | Delay": dly,
+                    "آخر تحديث (last_updated_at)": c.get("last_updated_at", ""), "حدّث بواسطة (updated_by)": c.get("updated_by", ""),
+                    "الوجهة النهائية": c.get("final_destination", ""),
                     "التخليص | Customs": c.get("customs_status", ""),
                     "القطع بالنظام | Units": units_by_cont.get(c.get("container_no", ""), 0),
                     "منتجات | Products": ", ".join(sorted(prods_by_cont.get(c.get("container_no", ""), []))),
