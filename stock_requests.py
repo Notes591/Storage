@@ -1096,8 +1096,8 @@ def _china_norm_code(v):
 
 def _china_eta_stats(eta_port, port_arr, cancelled, today):
     """نفس منطق أعمدة الإكسيل days_to_eta / delay_days لكن محسوبة لحظيًا (الإكسيل بيحسبهم وقت آخر
-    حفظ فبيتأخروا): days_to_eta = ETA الميناء - النهاردة | delay_days = (وصول الميناء الفعلي أو النهاردة)
-    - ETA الميناء لو موجب، وصفر للملغي | Same logic as the Excel columns, computed live."""
+    حفظ فبيتأخروا): days_to_eta = الوصول المتوقع للميناء - النهاردة | delay_days = (وصول الميناء الفعلي أو النهاردة)
+    - الوصول المتوقع للميناء لو موجب، وصفر للملغي | Same logic as the Excel columns, computed live."""
     e = _china_date(eta_port)
     if not e:
         return None, None
@@ -1329,11 +1329,11 @@ def _china_enrich(line, conts, ship_by_pair, ship_by_no):
     elif ctr.get("port_arrival_actual"):
         eta_label, eta = "وصل الميناء", ctr["port_arrival_actual"]
     elif ctr.get("eta_port"):
-        eta_label, eta = "ETA الميناء", ctr["eta_port"]
+        eta_label, eta = "الوصول المتوقع للميناء", ctr["eta_port"]
     elif shp.get("eta_destination"):
-        eta_label, eta = "ETA الوجهة", shp["eta_destination"]
+        eta_label, eta = "الوصول المتوقع لمخزن الرياض", shp["eta_destination"]
     elif shp.get("eta_port"):
-        eta_label, eta = "ETA الميناء", shp["eta_port"]
+        eta_label, eta = "الوصول المتوقع للميناء", shp["eta_port"]
     else:
         eta_label, eta = "", ""
     e = dict(line)
@@ -1417,16 +1417,16 @@ def china_lines_for_sku(sku_up):
     return out
 
 # ── 📅 تاريخ الإتاحة للبيع + فجوة الوصول | Available-for-sale date & arrival gap ──
-# من بيانات الإكسيل بس، من غير أي افتراضات أو تقديرات: متاح للبيع = ETA الوجهة (eta_destination = وصول
+# من بيانات الإكسيل بس، من غير أي افتراضات أو تقديرات: متاح للبيع = الوصول المتوقع لمخزن الرياض (eta_destination = وصول
 # المستودع بالرياض) اللي بتكتبه موظفة الصين. لو مش مكتوب، الدفعة بتظهر "بدون تاريخ وصول للوجهة" مع ETA
 # الميناء كمعلومة بس، ومبتدخلش في حساب الفجوة. الدوال دي مفيهاش اعتماد على واجهة العرض — فتتنقل لاحقًا
 # لقاعدة بيانات/API من غير تعديل | Data-only, no assumptions. Pure calculations, no UI dependency.
 def _china_avail(l):
-    """(تاريخ الإتاحة, الأساس). السطر المستلم/الملغي: (None, ""). ETA الوجهة غير مكتوب: (None, ...)."""
+    """(تاريخ الإتاحة, الأساس). السطر المستلم/الملغي: (None, ""). الوصول المتوقع لمخزن الرياض غير مكتوب: (None, ...)."""
     if l["_status"] != "incoming":
         return None, ""
     d = _china_date(l["_d"]["eta_dest"])
-    return (d, "ETA الوجهة") if d else (None, "ETA الوجهة غير مُدخل")
+    return (d, "الوصول المتوقع لمخزن الرياض") if d else (None, "تاريخ الوصول لمخزن الرياض غير مكتوب")
 
 def _china_group(idx):
     return "في المصنع" if idx < CHINA_SHIPPED_IDX else ("في البحر" if idx < 7 else "ميناء/تخليص")
@@ -1480,8 +1480,8 @@ def china_badge_html(lines):
 
 def _china_lines_table_html(lines):
     from html import escape as _esc
-    head = ["shipment_id", "container_no", "الكمية", "المرحلة", "ETD فعلي", "ETA الميناء", "وصول الميناء",
-            "ETA الوجهة", "وصل المستودع", "متاح للبيع (ETA الوجهة)", "أيام حتى ETA", "أيام التأخير", "آخر تحديث", "الطلب | PO"]
+    head = ["shipment_id", "container_no", "الكمية", "المرحلة", "خروج الشحنة من الصين", "الوصول المتوقع للميناء", "وصل الميناء فعليًا",
+            "الوصول المتوقع لمخزن الرياض", "وصل المستودع", "متاح للبيع (وصول مخزن الرياض)", "باقي كم يوم للوصول للميناء", "أيام التأخير", "آخر تحديث", "الطلب | PO"]
     th = "".join(f'<th style="padding:3px 8px;border-bottom:1px solid #94a3b8;text-align:right;">{h}</th>' for h in head)
     body = ""
     _today = datetime.now().date()
@@ -1499,6 +1499,138 @@ def _china_lines_table_html(lines):
         body += "<tr>" + "".join(f'<td style="padding:3px 8px;">{_esc(str(c))}</td>' for c in cells) + "</tr>"
     return f'<div style="overflow-x:auto;"><table style="font-size:12px;border-collapse:collapse;"><tr>{th}</tr>{body}</table></div>'
 
+# ── 📝 ملخص الصين بالعربي الواضح | Plain-Arabic summary card ──
+_AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
+_CH_PORTS_AR = {"JEDDAH": "جدة", "DAMMAM": "الدمام", "RIYADH": "الرياض"}
+
+def _china_fmt_date(d, today=None):
+    """تاريخ بالعربي: 27 أكتوبر 2026 (بعد 8 يوم) — مفيش مشكلة اتجاه أرقام زي 2026-10-27."""
+    t = f"{d.day} {_AR_MONTHS[d.month - 1]} {d.year}"
+    if today is not None:
+        n = (d - today).days
+        t += " (النهارده)" if n == 0 else (f" (بعد {n} يوم)" if n > 0 else f" (فات من {-n} يوم)")
+    return t
+
+def _china_range(dates, today=None):
+    ds = sorted({d for d in dates if d})
+    if not ds:
+        return ""
+    if len(ds) == 1:
+        return _china_fmt_date(ds[0], today)
+    return f"من {_china_fmt_date(ds[0])} إلى {_china_fmt_date(ds[-1])}"
+
+def _china_avail_sentence(g, today):
+    dated, undated = {}, 0
+    for l in g:
+        d = _china_date(l["_d"]["eta_dest"])
+        if d:
+            dated[d] = dated.get(d, 0) + l["_qty"]
+        else:
+            undated += l["_qty"]
+    parts = [f"{q:,} قطعة يوم {_china_fmt_date(d, today)}" for d, q in sorted(dated.items())]
+    if parts and undated:
+        return ("📅 متوقع تكون متاحة للبيع في مخزن الرياض: " + "، ".join(parts)
+                + f"، و{undated:,} قطعة لسه تاريخ وصولها لمخزن الرياض غير مكتوب في ملف الصين")
+    if parts:
+        return "📅 متوقع تكون متاحة للبيع في مخزن الرياض: " + "، ".join(parts)
+    return "📅 تاريخ وصولها لمخزن الرياض لسه غير مكتوب في ملف الصين"
+
+def _china_summary_card_html(inc, today, row=None):
+    """كارت واحد يشرح الكمية القادمة من الصين: كام في المصنع، كام في البحر، كام وصل الميناء، وإمتى كل جزء
+    هيبقى متاح للبيع (من تواريخ ملف الصين بس) — وتنبيه الانقطاع لو المخزون هيخلص قبل الوصول."""
+    from html import escape as _esc
+    groups = {"factory": [], "sea": [], "port": []}
+    for l in inc:
+        groups["factory" if l["_idx"] < CHINA_SHIPPED_IDX else ("sea" if l["_idx"] < 7 else "port")].append(l)
+    q = {k: sum(x["_qty"] for x in v) for k, v in groups.items()}
+    total = sum(q.values())
+    bits = []
+    if q["factory"]:
+        bits.append(f"{q['factory']:,} في المصنع")
+    if q["sea"]:
+        bits.append(f"{q['sea']:,} في البحر")
+    if q["port"]:
+        bits.append(f"{q['port']:,} وصلت الميناء")
+    head = f"🚢 من الصين <b>{total:,} قطعة</b> في الطريق إلينا" + (" — منها " + "، و".join(bits) if len(bits) > 1 else "")
+    items = []
+
+    g = groups["factory"]
+    if g:
+        by = {}
+        for l in g:
+            by[l["_stage_eff"] or "—"] = by.get(l["_stage_eff"] or "—", 0) + l["_qty"]
+        parts = "، ".join((f"{n:,} {_esc(k)}" if len(by) > 1 else _esc(k)) for k, n in by.items())
+        ready = _china_range([_china_date(l["_d"]["ready"]) for l in g])
+        line = f"🏭 <b>{q['factory']:,} قطعة</b> لسه في المصنع ({parts})"
+        if ready:
+            line += f" — الإنتاج جاهز {ready}"
+        items.append(line + " — ولسه ماتشحنتش من الصين<br><span class='cn-sub'>" + _china_avail_sentence(g, today) + "</span>")
+
+    g = groups["sea"]
+    if g:
+        etd = _china_range([_china_date(l["_d"]["etd"]) for l in g])
+        etas = [_china_date(l["_d"]["eta_port"]) for l in g]
+        ports = sorted({_CH_PORTS_AR.get((l["_ctr"].get("destination_port") or l["_ship"].get("destination_port") or "").upper(),
+                                         l["_ctr"].get("destination_port") or l["_ship"].get("destination_port") or "") for l in g} - {""})
+        port_txt = " " + " و".join(_esc(x) for x in ports) if ports else ""
+        line = f"🚢 <b>{q['sea']:,} قطعة</b> في البحر"
+        if etd:
+            line += f" — خرجت من الصين {etd}"
+        if any(etas):
+            late = max(e for e in etas if e) < today
+            line += (f"، وكان متوقع تصل ميناء{port_txt} {_china_range(etas, today)} ولسه ماوصلتش" if late
+                     else f"، ومتوقع تصل ميناء{port_txt} {_china_range(etas, today)}")
+        else:
+            line += "، وموعد وصولها للميناء غير مكتوب"
+        items.append(line + "<br><span class='cn-sub'>" + _china_avail_sentence(g, today) + "</span>")
+
+    g = groups["port"]
+    if g:
+        arr = _china_range([_china_date(l["_d"]["port_arr"]) for l in g])
+        n_clr = sum(l["_qty"] for l in g if l["_idx"] >= 9)
+        n_prc = sum(l["_qty"] for l in g if l["_idx"] == 8)
+        n_wait = sum(l["_qty"] for l in g if l["_idx"] == 7)
+        cust = [f"{n:,} {t}" for n, t in ((n_clr, "تم تخليصها"), (n_prc, "جاري تخليصها"), (n_wait, "في انتظار التخليص الجمركي")) if n]
+        line = f"⚓ <b>{q['port']:,} قطعة</b> وصلت الميناء" + (f" يوم {arr}" if arr else "")
+        if cust:
+            line += " — " + "، ".join(cust)
+        items.append(line + "<br><span class='cn-sub'>" + _china_avail_sentence(g, today) + "</span>")
+
+    alert = ""
+    if row is not None:
+        rate = float(row.get("effective_avg") or 0)
+        stock = float(row.get("stock") or 0)
+        dated, undated = china_batches_for_lines(inc)
+        skipped = sum(u["qty"] for u in undated)
+        note = f" (الحساب مش شامل {skipped:,} قطعة تاريخ وصولها غير مكتوب)" if skipped and dated else ""
+        if rate <= 0:
+            alert = "<div class='cn-box' style='background:#374151;color:#d1d5db;'>ℹ️ مفيش مبيعات مسجلة للمنتج ده، فمش هقدر أحسب فجوة الانقطاع</div>"
+        else:
+            days_left = stock / rate
+            stock_line = (f"📦 المخزون الحالي {stock:,.0f} قطعة بمعدل بيع {rate:.1f} قطعة/يوم — يكفي حوالي {days_left:,.0f} يوم "
+                          f"(لحد {_china_fmt_date(today + timedelta(days=int(days_left)))})")
+            if days_left < 3650:
+                items.append(stock_line)
+            if not dated:
+                alert = ("<div class='cn-box' style='background:#374151;color:#d1d5db;'>ℹ️ مقدرش أحسب فجوة الانقطاع لأن تاريخ وصول الشحنات "
+                         "لمخزن الرياض غير مكتوب في ملف الصين</div>")
+            else:
+                proj = china_supply_projection(stock, rate, [(b["date"], b["qty"]) for b in dated], today)
+                if proj["gaps"]:
+                    g0 = proj["gaps"][0]
+                    alert = (f"<div class='cn-box' style='background:#7f1d1d;color:#fecaca;'>⚠️ المخزون هيخلص يوم {_china_fmt_date(g0[0])} "
+                             f"والشحنة هتتوفر يوم {_china_fmt_date(g0[1])} — يعني هنفضل {proj['gap_days']} يوم من غير بضاعة "
+                             f"ونخسر مبيعات تقريبًا {proj['lost_units']:,} قطعة{note}</div>")
+                else:
+                    alert = (f"<div class='cn-box' style='background:#14532d;color:#bbf7d0;'>✅ مفيش انقطاع متوقع: المخزون الحالي "
+                             f"وشحنات الصين بيغطوا المبيعات لحد وصول الشحنة{note}</div>")
+    return ("<div dir='rtl' style='background:#1e293b;border:1px solid #334155;border-radius:10px;padding:10px 14px;margin:6px 0;"
+            "color:#e2e8f0;font-size:14px;line-height:1.9;'>"
+            "<style>.cn-sub{color:#93c5fd;font-size:13px;}.cn-box{margin-top:8px;padding:7px 11px;border-radius:7px;font-weight:700;font-size:13px;}"
+            ".cn-li{margin:4px 0;}</style>"
+            f"<div style='font-size:15px;font-weight:800;color:#fed7aa;'>{head}</div>"
+            + "".join(f"<div class='cn-li'>{i}</div>" for i in items) + alert + "</div>")
+
 def render_china_for_sku(sku_up, row=None):
     """بيتنادى جوه تابات مبيعات FBN وFBB: كمية الصين القادمة + دفعاتها بتاريخ وصول الوجهة (من الإكسيل بس) +
     تنبيه فجوة الانقطاع لو المخزون هيخلص قبل وصول الشحنة (بيستخدم مخزون ومعدل بيع الصف row) + تفاصيل
@@ -1509,36 +1641,8 @@ def render_china_for_sku(sku_up, row=None):
             return
         today = datetime.now().date()
         inc = [l for l in lines if l["_status"] == "incoming"]
-        badges = ""
         if inc:
-            qty = sum(l["_qty"] for l in inc)
-            badges += f'<span class="tacweed-badge" style="background:#7c2d12;color:#fed7aa;">🚢 من الصين: {qty:,} قطعة</span> '
-            dated, undated = china_batches_for_lines(inc)
-            for bt in dated[:6]:
-                badges += (f'<span class="tacweed-badge" style="background:#1e3a5f;color:#bfdbfe;">📦 {bt["qty"]:,} {bt["group"]}'
-                           f' ← متاح للبيع {bt["date"]}</span> ')
-            for ub in undated[:6]:
-                port = f' | ETA الميناء {ub["eta_port"]}' if ub["eta_port"] else ""
-                badges += (f'<span class="tacweed-badge" style="background:#374151;color:#d1d5db;">❔ {ub["qty"]:,} {ub["group"]}{port}'
-                           f' — تاريخ الوصول للوجهة غير مُدخل</span> ')
-            if row is not None and dated:
-                rate = float(row.get("effective_avg") or 0)
-                stock = float(row.get("stock") or 0)
-                proj = china_supply_projection(stock, rate, [(b["date"], b["qty"]) for b in dated], today)
-                skipped = sum(u["qty"] for u in undated)
-                note = f" — غير شامل {skipped:,} قطعة بدون تاريخ وصول" if skipped else ""
-                if proj["no_rate"]:
-                    badges += '<span class="tacweed-badge" style="background:#374151;color:#d1d5db;">لا معدل بيع لحساب الفجوة</span>'
-                elif proj["gaps"]:
-                    g0 = proj["gaps"][0]
-                    badges += (f'<span class="tacweed-badge" style="background:#7f1d1d;color:#fecaca;">⚠️ انقطاع متوقع {proj["gap_days"]} يوم '
-                               f'({g0[0]} ← {g0[1]}) — مبيعات معرضة ≈ {proj["lost_units"]:,} قطعة{note}</span>')
-                else:
-                    cov = "أكتر من سنة" if proj["covered_until"] > today + timedelta(days=365) else f'حتى {proj["covered_until"]}'
-                    badges += (f'<span class="tacweed-badge" style="background:#14532d;color:#bbf7d0;">✅ لا انقطاع متوقع '
-                               f'(المخزون + الشحنات تغطي {cov}){note}</span>')
-        if badges:
-            st.markdown(badges, unsafe_allow_html=True)
+            st.markdown(_china_summary_card_html(inc, today, row), unsafe_allow_html=True)
         recv = sum(l["_qty"] for l in lines if l["_status"] == "received")
         canc = sum(l["_qty"] for l in lines if l["_status"] == "cancelled")
         extra = ""
@@ -1629,12 +1733,12 @@ def _china_line_journey(l, today):
         st.markdown("**📅 التواريخ | Timeline**")
         st.markdown(_china_kv_html([
             ("جاهزية الإنتاج", l.get("production_ready_date")), ("تاريخ التحميل", l.get("actual_load_date")),
-            ("ETD مخطط", s.get("planned_etd")), ("ETD فعلي", c.get("actual_etd") or s.get("actual_etd")),
-            ("ETA الميناء", c.get("eta_port") or s.get("eta_port")), ("وصول فعلي للميناء", c.get("port_arrival_actual")),
-            ("ETA الوجهة النهائية", s.get("eta_destination")), ("وصول فعلي للمستودع", c.get("warehouse_arrival_actual")),
+            ("خروج مخطط من الصين", s.get("planned_etd")), ("خروج الشحنة من الصين", c.get("actual_etd") or s.get("actual_etd")),
+            ("الوصول المتوقع للميناء", c.get("eta_port") or s.get("eta_port")), ("وصول فعلي للميناء", c.get("port_arrival_actual")),
+            ("الوصول المتوقع لمخزن الرياض", s.get("eta_destination")), ("وصول فعلي للمستودع", c.get("warehouse_arrival_actual")),
             ("الموعد المعتمد", f"{l['_eta_label']}: {l['_eta']} {('(' + eta_days + ')') if eta_days else ''}".strip() if l["_eta"] else ""),
-            ("أيام حتى ETA (days_to_eta)", _st[0]), ("أيام التأخير (delay_days)", _st[1]),
-            ("متاح للبيع (ETA الوجهة)", str(_av) if _av else ("وصل المستودع" if l["_status"] == "received" else _basis))]),
+            ("باقي كم يوم للوصول للميناء (days_to_eta)", _st[0]), ("أيام التأخير (delay_days)", _st[1]),
+            ("متاح للبيع (وصول مخزن الرياض)", str(_av) if _av else ("وصل المستودع" if l["_status"] == "received" else _basis))]),
             unsafe_allow_html=True)
     with g3:
         st.markdown("**🚢 الشحنة والحاوية | Shipment & container**")
@@ -1971,10 +2075,10 @@ def render_china_tab():
                 "SKUs المتجر | Store SKUs": ", ".join(sorted(a["skus"])) or "— غير مربوط",
                 "إجمالي الكمية | Qty": a["qty"], "عدد الحاويات | Containers": len(a["conts"]),
                 "الشحنات/الطلبات | Shipments": ", ".join(sorted(a["ships"])),
-                "أول ETD فعلي": str(min(a["etds"])) if a["etds"] else "",
-                "أقرب ETA ميناء": str(min(a["eta_ports"])) if a["eta_ports"] else "",
-                "أقرب وصول | Nearest ETA": str(min(a["etas"])) if a["etas"] else "",
-                "أقرب إتاحة للبيع (ETA الوجهة)": str(min(a["avails"])) if a["avails"] else "",
+                "أول خروج من الصين": str(min(a["etds"])) if a["etds"] else "",
+                "أقرب وصول متوقع للميناء": str(min(a["eta_ports"])) if a["eta_ports"] else "",
+                "أقرب وصول": str(min(a["etas"])) if a["etas"] else "",
+                "أقرب إتاحة للبيع (وصول مخزن الرياض)": str(min(a["avails"])) if a["avails"] else "",
                 "المراحل | Stages": ", ".join(sorted(a["stages"])),
             } for a in sorted(agg.values(), key=lambda x: -x["qty"])])
             c1, c2 = st.columns(2)
@@ -1999,12 +2103,12 @@ def render_china_tab():
                     "قطع/كرتون": _china_int(l.get("units_per_carton", "")), "CBM": l.get("cbm", ""),
                     "المرحلة | Stage": l["_stage_eff"], "الحالة | Status": l["_status"],
                     "جاهزية الإنتاج": l["_d"]["ready"], "تاريخ التحميل": l["_d"]["load"],
-                    "ETD مخطط": l["_d"]["etd_plan"], "ETD فعلي (actual_etd)": l["_d"]["etd"],
-                    "ETA الميناء (eta_port)": l["_d"]["eta_port"], "وصول فعلي للميناء": l["_d"]["port_arr"],
-                    "ETA الوجهة": l["_d"]["eta_dest"], "وصول فعلي للمستودع": l["_d"]["wh_arr"],
+                    "خروج مخطط من الصين": l["_d"]["etd_plan"], "خروج الشحنة من الصين (actual_etd)": l["_d"]["etd"],
+                    "الوصول المتوقع للميناء (eta_port)": l["_d"]["eta_port"], "وصول فعلي للميناء": l["_d"]["port_arr"],
+                    "الوصول المتوقع لمخزن الرياض": l["_d"]["eta_dest"], "وصول فعلي للمستودع": l["_d"]["wh_arr"],
                     "الموعد المعتمد": l["_eta_label"], "التاريخ | Date": l["_eta"], "أيام للوصول | Days": dd,
-                    "متاح للبيع (ETA الوجهة)": str(_av[0]) if _av[0] else _av[1],
-                    "أيام حتى ETA (days_to_eta)": _st[0], "أيام التأخير (delay_days)": _st[1],
+                    "متاح للبيع (وصول مخزن الرياض)": str(_av[0]) if _av[0] else _av[1],
+                    "باقي كم يوم للوصول للميناء (days_to_eta)": _st[0], "أيام التأخير (delay_days)": _st[1],
                     "آخر تحديث (last_updated_at)": l["_upd"], "حدّث بواسطة (updated_by)": l["_upd_by"],
                     "حالة الحاوية | Container": c.get("container_status", ""), "السفينة | Vessel": c.get("vessel_name", ""),
                     "B/L": c.get("bl_no") or s.get("bl_no", ""), "المورد | Supplier": s.get("supplier_name", ""),
@@ -2049,8 +2153,8 @@ def render_china_tab():
                     "شركة الشحن": s.get("shipping_line", ""), "B/L": s.get("bl_no", ""),
                     "حاويات | Cont.": s.get("container_count", ""),
                     "القطع | Units": units_by_pair.get((s.get("internal_order_no", ""), s.get("po_no", "")), 0),
-                    "ETD فعلي": s.get("actual_etd", ""), "ETA الميناء": s.get("eta_port", ""),
-                    "ETA الوجهة": s.get("eta_destination", ""),
+                    "خروج الشحنة من الصين": s.get("actual_etd", ""), "الوصول المتوقع للميناء": s.get("eta_port", ""),
+                    "الوصول المتوقع لمخزن الرياض": s.get("eta_destination", ""),
                     "آخر تحديث (last_updated_at)": s.get("last_updated_at", ""), "حدّث بواسطة (updated_by)": s.get("updated_by", ""),
                     "ملاحظات | Notes": s.get("notes", ""),
                 })
@@ -2092,9 +2196,9 @@ def render_china_tab():
                     "الحالة | Status": c.get("container_status", ""), "النوع": c.get("container_type", ""),
                     "السفينة | Vessel": c.get("vessel_name", ""), "الرحلة": c.get("voyage_no", ""), "B/L": c.get("bl_no", ""),
                     "ميناء التحميل": c.get("port_of_loading", ""), "ميناء الوصول": c.get("destination_port", ""),
-                    "ETD فعلي": c.get("actual_etd", ""), "ETA الميناء": c.get("eta_port", ""),
+                    "خروج الشحنة من الصين": c.get("actual_etd", ""), "الوصول المتوقع للميناء": c.get("eta_port", ""),
                     "وصول فعلي للميناء": c.get("port_arrival_actual", ""), "وصول فعلي للمستودع": c.get("warehouse_arrival_actual", ""),
-                    "أيام للوصول | Days to ETA": dd,
+                    "باقي كم يوم للوصول للميناء": dd,
                     "أيام التأخير | Delay": dly,
                     "آخر تحديث (last_updated_at)": c.get("last_updated_at", ""), "حدّث بواسطة (updated_by)": c.get("updated_by", ""),
                     "الوجهة النهائية": c.get("final_destination", ""),
