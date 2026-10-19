@@ -1224,7 +1224,36 @@ def _china_write_sheet(ws, cols, rows):
             time.sleep(1 * (2 ** attempt))
     raise last
 
-def _china_do_import(parsed, replace):
+def _china_diff(parsed):
+    """مقارنة الملف المرفوع بالمحفوظ حاليًا: جديد / اتغيّر / موجود عندنا ومش في الملف / ثابت — عشان نتأكد
+    إن التحديث صح ومفيش تكرار قبل ما نحفظ. بيرجع (ملخص لكل صفحة, تفاصيل التغييرات)."""
+    sheets = get_china_sheets()
+    specs = [("SHIPMENTS", "ChinaShipments", CHINA_SHIP_COLS, "ships", _china_ship_key),
+             ("SKU_LINES", "ChinaLines", CHINA_LINE_COLS, "lines", _china_line_key),
+             ("CONTAINERS", "ChinaContainers", CHINA_CONT_COLS, "conts", _china_cont_key)]
+    summary, details = [], []
+    for label, tab, cols, pk, keyfn in specs:
+        new_rows = parsed.get(pk)
+        if new_rows is None:
+            continue
+        old = {keyfn(r): r for r in _china_rows_from_raw(get_cached(sheets[tab]))}
+        new = {keyfn(r): r for r in new_rows}
+        added = [k for k in new if k not in old]
+        removed = [k for k in old if k not in new]
+        changed = []
+        for k in new:
+            if k in old:
+                diffs = [(c, old[k].get(c, ""), new[k].get(c, "")) for c in cols
+                         if c not in CHINA_SKIP_COLS and old[k].get(c, "") != new[k].get(c, "")]
+                if diffs:
+                    changed.append(k)
+                    for c, ov, nv in diffs:
+                        details.append({"الصفحة": label, "المفتاح": k, "الحقل": c, "قبل": ov, "بعد": nv})
+        summary.append({"الصفحة": label, "في الملف": len(new), "جديد": len(added), "اتغيّر": len(changed),
+                        "ثابت": len(new) - len(added) - len(changed), "عندنا ومش في الملف": len(removed)})
+    return summary, details
+
+def _china_do_import(parsed, replace, label=""):
     sheets = get_china_sheets()
     specs = [("ChinaShipments", CHINA_SHIP_COLS, parsed.get("ships"), _china_ship_key),
              ("ChinaLines", CHINA_LINE_COLS, parsed.get("lines"), _china_line_key),
@@ -1240,6 +1269,10 @@ def _china_do_import(parsed, replace):
             final = _china_merge(existing, new_rows, keyfn)
         _china_write_sheet(sheets[tab], cols, final)
         counts[tab] = len(final)
+    try:
+        save_setting("china_last_import", f"{now_str()} | {label} | {'استبدال' if replace else 'دمج'}")
+    except Exception:
+        pass
     return counts
 
 def _china_delete_all():
@@ -1383,6 +1416,57 @@ def china_lines_for_sku(sku_up):
             out.append(l)
     return out
 
+# ── 📅 تاريخ الإتاحة للبيع + فجوة الوصول | Available-for-sale date & arrival gap ──
+# من بيانات الإكسيل بس، من غير أي افتراضات أو تقديرات: متاح للبيع = ETA الوجهة (eta_destination = وصول
+# المستودع بالرياض) اللي بتكتبه موظفة الصين. لو مش مكتوب، الدفعة بتظهر "بدون تاريخ وصول للوجهة" مع ETA
+# الميناء كمعلومة بس، ومبتدخلش في حساب الفجوة. الدوال دي مفيهاش اعتماد على واجهة العرض — فتتنقل لاحقًا
+# لقاعدة بيانات/API من غير تعديل | Data-only, no assumptions. Pure calculations, no UI dependency.
+def _china_avail(l):
+    """(تاريخ الإتاحة, الأساس). السطر المستلم/الملغي: (None, ""). ETA الوجهة غير مكتوب: (None, ...)."""
+    if l["_status"] != "incoming":
+        return None, ""
+    d = _china_date(l["_d"]["eta_dest"])
+    return (d, "ETA الوجهة") if d else (None, "ETA الوجهة غير مُدخل")
+
+def _china_group(idx):
+    return "في المصنع" if idx < CHINA_SHIPPED_IDX else ("في البحر" if idx < 7 else "ميناء/تخليص")
+
+def china_batches_for_lines(lines):
+    """الأسطر القادمة: دفعات بتاريخ وصول الوجهة [{date, group, qty}] + دفعات بدون تاريخ [{group, qty, eta_port}]."""
+    dated, undated = {}, {}
+    for l in lines:
+        if l["_status"] != "incoming":
+            continue
+        dte, _b = _china_avail(l)
+        grp = _china_group(l["_idx"])
+        if dte:
+            dated[(dte, grp)] = dated.get((dte, grp), 0) + l["_qty"]
+        else:
+            k = (grp, l["_d"]["eta_port"])
+            undated[k] = undated.get(k, 0) + l["_qty"]
+    return ([{"date": k[0], "group": k[1], "qty": q} for k, q in sorted(dated.items())],
+            [{"group": k[0], "eta_port": k[1], "qty": q} for k, q in sorted(undated.items())])
+
+def china_supply_projection(stock, rate, batches, today):
+    """محاكاة بسيطة: المخزون الحالي بيتسحب بمعدل يومي ثابت، وكل دفعة بتتضاف في تاريخ إتاحتها.
+    batches = [(تاريخ, كمية)]. بيرجع: gaps = [(من, إلى, أيام)] و lost_units (مبيعات معرضة للضياع) و covered_until."""
+    if rate <= 0:
+        return {"no_rate": True, "gaps": [], "gap_days": 0, "lost_units": 0, "covered_until": None}
+    t, S, gaps, lost = 0.0, float(stock), [], 0.0
+    for dte, qty in sorted(batches):
+        d = max((dte - today).days, 0)
+        before = S - rate * (d - t)
+        if before < 0:
+            zero_at = t + (S / rate if S > 0 else 0)
+            gap = d - zero_at
+            if gap >= 0.5:
+                gaps.append((today + timedelta(days=round(zero_at)), dte, round(gap)))
+                lost += rate * gap
+            before = 0
+        S, t = before + qty, d
+    return {"no_rate": False, "gaps": gaps, "gap_days": sum(g[2] for g in gaps), "lost_units": round(lost),
+            "covered_until": today + timedelta(days=round(t + S / rate))}
+
 def china_badge_html(lines):
     inc = [l for l in lines if l["_status"] == "incoming"]
     if not inc:
@@ -1397,34 +1481,64 @@ def china_badge_html(lines):
 def _china_lines_table_html(lines):
     from html import escape as _esc
     head = ["shipment_id", "container_no", "الكمية", "المرحلة", "ETD فعلي", "ETA الميناء", "وصول الميناء",
-            "ETA الوجهة", "وصل المستودع", "أيام حتى ETA", "أيام التأخير", "آخر تحديث", "الطلب | PO"]
+            "ETA الوجهة", "وصل المستودع", "متاح للبيع (ETA الوجهة)", "أيام حتى ETA", "أيام التأخير", "آخر تحديث", "الطلب | PO"]
     th = "".join(f'<th style="padding:3px 8px;border-bottom:1px solid #94a3b8;text-align:right;">{h}</th>' for h in head)
     body = ""
     _today = datetime.now().date()
     for l in lines:
         d = l["_d"]
+        _av, _basis = _china_avail(l)
+        av_txt = str(_av) if _av else ("وصل" if l["_status"] == "received" else "—")
         dte, dly = _china_eta_stats(d["eta_port"], d["port_arr"], l["_status"] == "cancelled", _today)
         upd = f'{l["_upd"]} ({l["_upd_by"]})' if l["_upd"] and l["_upd_by"] else (l["_upd"] or "—")
         cells = [l["_shipment_id"] or "—", l.get("container_no") or "—", f'{l["_qty"]:,}',
                  l.get("_stage_eff") or l.get("stock_stage") or "—",
-                 d["etd"] or "—", d["eta_port"] or "—", d["port_arr"] or "—", d["eta_dest"] or "—", d["wh_arr"] or "—",
+                 d["etd"] or "—", d["eta_port"] or "—", d["port_arr"] or "—", d["eta_dest"] or "—", d["wh_arr"] or "—", av_txt,
                  "—" if dte is None else dte, "—" if dly is None else dly, upd,
                  f'{l.get("internal_order_no") or "—"} | {l.get("po_no") or "—"}']
         body += "<tr>" + "".join(f'<td style="padding:3px 8px;">{_esc(str(c))}</td>' for c in cells) + "</tr>"
     return f'<div style="overflow-x:auto;"><table style="font-size:12px;border-collapse:collapse;"><tr>{th}</tr>{body}</table></div>'
 
-def render_china_for_sku(sku_up):
-    """بيتنادى جوه تابات مبيعات FBN وFBB: شارة الكمية القادمة من الصين + تفاصيل الشحنات
-    (shipment_id / container_no / الكمية / المرحلة / الوصول) + مسار كامل لكل سطر. أي خطأ بيظهر
-    كتحذير صغير بدل ما يختفي، ومبيوقفش تاب المبيعات | Called inside the FBN and FBB sales tabs.
-    Errors show as a small warning instead of vanishing, and never break the sales tab."""
+def render_china_for_sku(sku_up, row=None):
+    """بيتنادى جوه تابات مبيعات FBN وFBB: كمية الصين القادمة + دفعاتها بتاريخ وصول الوجهة (من الإكسيل بس) +
+    تنبيه فجوة الانقطاع لو المخزون هيخلص قبل وصول الشحنة (بيستخدم مخزون ومعدل بيع الصف row) + تفاصيل
+    الأسطر. أي خطأ بيظهر كتحذير صغير ومبيوقفش تاب المبيعات."""
     try:
         lines = china_lines_for_sku(sku_up)
         if not lines:
             return
-        badge = china_badge_html([l for l in lines if l["_status"] != "cancelled"])
-        if badge:
-            st.markdown(badge, unsafe_allow_html=True)
+        today = datetime.now().date()
+        inc = [l for l in lines if l["_status"] == "incoming"]
+        badges = ""
+        if inc:
+            qty = sum(l["_qty"] for l in inc)
+            badges += f'<span class="tacweed-badge" style="background:#7c2d12;color:#fed7aa;">🚢 من الصين: {qty:,} قطعة</span> '
+            dated, undated = china_batches_for_lines(inc)
+            for bt in dated[:6]:
+                badges += (f'<span class="tacweed-badge" style="background:#1e3a5f;color:#bfdbfe;">📦 {bt["qty"]:,} {bt["group"]}'
+                           f' ← متاح للبيع {bt["date"]}</span> ')
+            for ub in undated[:6]:
+                port = f' | ETA الميناء {ub["eta_port"]}' if ub["eta_port"] else ""
+                badges += (f'<span class="tacweed-badge" style="background:#374151;color:#d1d5db;">❔ {ub["qty"]:,} {ub["group"]}{port}'
+                           f' — تاريخ الوصول للوجهة غير مُدخل</span> ')
+            if row is not None and dated:
+                rate = float(row.get("effective_avg") or 0)
+                stock = float(row.get("stock") or 0)
+                proj = china_supply_projection(stock, rate, [(b["date"], b["qty"]) for b in dated], today)
+                skipped = sum(u["qty"] for u in undated)
+                note = f" — غير شامل {skipped:,} قطعة بدون تاريخ وصول" if skipped else ""
+                if proj["no_rate"]:
+                    badges += '<span class="tacweed-badge" style="background:#374151;color:#d1d5db;">لا معدل بيع لحساب الفجوة</span>'
+                elif proj["gaps"]:
+                    g0 = proj["gaps"][0]
+                    badges += (f'<span class="tacweed-badge" style="background:#7f1d1d;color:#fecaca;">⚠️ انقطاع متوقع {proj["gap_days"]} يوم '
+                               f'({g0[0]} ← {g0[1]}) — مبيعات معرضة ≈ {proj["lost_units"]:,} قطعة{note}</span>')
+                else:
+                    cov = "أكتر من سنة" if proj["covered_until"] > today + timedelta(days=365) else f'حتى {proj["covered_until"]}'
+                    badges += (f'<span class="tacweed-badge" style="background:#14532d;color:#bbf7d0;">✅ لا انقطاع متوقع '
+                               f'(المخزون + الشحنات تغطي {cov}){note}</span>')
+        if badges:
+            st.markdown(badges, unsafe_allow_html=True)
         recv = sum(l["_qty"] for l in lines if l["_status"] == "received")
         canc = sum(l["_qty"] for l in lines if l["_status"] == "cancelled")
         extra = ""
@@ -1437,6 +1551,8 @@ def render_china_for_sku(sku_up):
             for l in lines:
                 st.markdown(_china_stepper_html(l["_idx"], l["_status"] == "cancelled"), unsafe_allow_html=True)
                 st.caption(f'{l["_shipment_id"] or "—"} | {l.get("container_no") or "—"} | {l["_qty"]:,} قطعة')
+            if row is not None:
+                st.caption("الفجوة محسوبة على مخزون نون (Inventory) ومعدل البيع الظاهر فوق فقط — مخزون المستودع والمنصات الأخرى غير محسوب بعد.")
     except Exception as e:
         st.caption(f"⚠️ تعذر عرض بيانات الصين لهذا الـ SKU: {e}")
 
@@ -1492,6 +1608,7 @@ def _china_line_journey(l, today):
         if dd is not None:
             eta_days = f"بعد {dd} يوم" if dd >= 0 else f"متأخرة {-dd} يوم"
     _st = _china_eta_stats(l["_d"]["eta_port"], l["_d"]["port_arr"], l["_status"] == "cancelled", today)
+    _av, _basis = _china_avail(l)
     g1, g2, g3 = st.columns(3)
     with g1:
         st.markdown("**🏭 الطلب والمصنع | Order**")
@@ -1516,7 +1633,8 @@ def _china_line_journey(l, today):
             ("ETA الميناء", c.get("eta_port") or s.get("eta_port")), ("وصول فعلي للميناء", c.get("port_arrival_actual")),
             ("ETA الوجهة النهائية", s.get("eta_destination")), ("وصول فعلي للمستودع", c.get("warehouse_arrival_actual")),
             ("الموعد المعتمد", f"{l['_eta_label']}: {l['_eta']} {('(' + eta_days + ')') if eta_days else ''}".strip() if l["_eta"] else ""),
-            ("أيام حتى ETA (days_to_eta)", _st[0]), ("أيام التأخير (delay_days)", _st[1])]),
+            ("أيام حتى ETA (days_to_eta)", _st[0]), ("أيام التأخير (delay_days)", _st[1]),
+            ("متاح للبيع (ETA الوجهة)", str(_av) if _av else ("وصل المستودع" if l["_status"] == "received" else _basis))]),
             unsafe_allow_html=True)
     with g3:
         st.markdown("**🚢 الشحنة والحاوية | Shipment & container**")
@@ -1635,6 +1753,16 @@ def render_china_upload(key_prefix, bundle):
                             + (f" | schema: `{parsed['schema']}`" if parsed["schema"] else ""))
                     if parsed["schema"] and parsed["schema"] != "SMARTSTORE_CHINA_V5.1":
                         st.warning(f"⚠️ نسخة الملف `{parsed['schema']}` مختلفة عن V5.1 المتوقعة — راجع النتيجة بعد الرفع | schema differs from V5.1")
+                    _dsum, _ddet = _china_diff(parsed)
+                    if _dsum:
+                        st.markdown("**🔍 مقارنة الملف بالمحفوظ حاليًا | Compared with what is stored**")
+                        st.dataframe(pd.DataFrame(_dsum), use_container_width=True, hide_index=True)
+                        if any(x["عندنا ومش في الملف"] for x in _dsum):
+                            st.warning("⚠️ فيه سجلات عندنا ومش في الملف الجديد. لو الملف نسخة كاملة محدّثة استخدم «استبدال الكل» عشان تتشال، "
+                                       "ولو تحديث جزئي استخدم «إضافة / تحديث الموجود».")
+                        if _ddet:
+                            with st.expander(f"📝 تفاصيل التغييرات ({len(_ddet)} حقل)"):
+                                st.dataframe(pd.DataFrame(_ddet[:300]), use_container_width=True, hide_index=True)
                     if parsed["lines"]:
                         nb = sum(1 for r in parsed["lines"] if not r.get("barcode"))
                         if nb:
@@ -1655,7 +1783,7 @@ def render_china_upload(key_prefix, bundle):
                         if st.button("📤 إضافة / تحديث الموجود | Merge", type="primary",
                                      use_container_width=True, key=f"{key_prefix}_merge"):
                             with st.spinner("جاري الحفظ في Google Sheets..."):
-                                counts = _china_do_import(parsed, replace=False)
+                                counts = _china_do_import(parsed, replace=False, label=upl.name)
                             _after(f"✅ تم الدمج — الإجمالي الآن: {counts}")
                     with cb:
                         if st.button("🔄 استبدال الكل | Replace All", type="secondary",
@@ -1667,7 +1795,7 @@ def render_china_upload(key_prefix, bundle):
                         if cy.button("✅ نعم | Yes", key=f"{key_prefix}_yes_replace"):
                             st.session_state[f"{key_prefix}_confirm_replace"] = False
                             with st.spinner("جاري الحفظ في Google Sheets..."):
-                                counts = _china_do_import(parsed, replace=True)
+                                counts = _china_do_import(parsed, replace=True, label=upl.name)
                             _after(f"✅ تم الاستبدال — {counts}")
                         if cn.button("❌ لا | No", key=f"{key_prefix}_no_replace"):
                             st.session_state[f"{key_prefix}_confirm_replace"] = False
@@ -1738,6 +1866,9 @@ def render_china_tab():
 
     bundle = get_china_bundle()
     render_china_upload("china", bundle)
+    _li = load_settings().get("china_last_import", "")
+    if _li:
+        st.caption(f"🕒 آخر رفع: {_li}")
     lines = bundle["lines"]
     if not (lines or bundle["ships"] or bundle["conts"]):
         st.info("لا توجد بيانات صين بعد — ارفع ملف الإكسيل من فوق | No China data yet — upload the Excel file above")
@@ -1812,7 +1943,7 @@ def render_china_tab():
                 k = l["_norm"] or f"NOBC|{l.get('sku', '')}"
                 a = agg.setdefault(k, {"barcode": l.get("barcode", ""), "name": l.get("product_name_ar") or l.get("product_name_en", ""),
                                        "model": l.get("model_no") or l.get("sku", ""), "qty": 0, "conts": set(), "ships": set(),
-                                       "stages": set(), "etas": [], "skus": set(), "etds": [], "eta_ports": []})
+                                       "stages": set(), "etas": [], "skus": set(), "etds": [], "eta_ports": [], "avails": []})
                 a["qty"] += l["_qty"]
                 if l.get("container_no"):
                     a["conts"].add(l["container_no"])
@@ -1825,6 +1956,9 @@ def render_china_tab():
                 d = _china_date(l["_eta"])
                 if d:
                     a["etas"].append(d)
+                _a = _china_avail(l)[0]
+                if _a:
+                    a["avails"].append(_a)
                 d_etd = _china_date(l["_d"]["etd"])
                 if d_etd:
                     a["etds"].append(d_etd)
@@ -1840,6 +1974,7 @@ def render_china_tab():
                 "أول ETD فعلي": str(min(a["etds"])) if a["etds"] else "",
                 "أقرب ETA ميناء": str(min(a["eta_ports"])) if a["eta_ports"] else "",
                 "أقرب وصول | Nearest ETA": str(min(a["etas"])) if a["etas"] else "",
+                "أقرب إتاحة للبيع (ETA الوجهة)": str(min(a["avails"])) if a["avails"] else "",
                 "المراحل | Stages": ", ".join(sorted(a["stages"])),
             } for a in sorted(agg.values(), key=lambda x: -x["qty"])])
             c1, c2 = st.columns(2)
@@ -1854,6 +1989,7 @@ def render_china_tab():
                 c, s = l["_ctr"], l["_ship"]
                 dd = _china_days(l["_eta"], today) if l["_status"] == "incoming" else None
                 _st = _china_eta_stats(l["_d"]["eta_port"], l["_d"]["port_arr"], l["_status"] == "cancelled", today)
+                _av = _china_avail(l)
                 rows_d.append({
                     "shipment_id": l["_shipment_id"], "container_no": l.get("container_no", ""),
                     "تكويد/Barcode": l.get("barcode", ""), "SKU": l.get("sku", ""), "الموديل | Model": l.get("model_no", ""),
@@ -1867,6 +2003,7 @@ def render_china_tab():
                     "ETA الميناء (eta_port)": l["_d"]["eta_port"], "وصول فعلي للميناء": l["_d"]["port_arr"],
                     "ETA الوجهة": l["_d"]["eta_dest"], "وصول فعلي للمستودع": l["_d"]["wh_arr"],
                     "الموعد المعتمد": l["_eta_label"], "التاريخ | Date": l["_eta"], "أيام للوصول | Days": dd,
+                    "متاح للبيع (ETA الوجهة)": str(_av[0]) if _av[0] else _av[1],
                     "أيام حتى ETA (days_to_eta)": _st[0], "أيام التأخير (delay_days)": _st[1],
                     "آخر تحديث (last_updated_at)": l["_upd"], "حدّث بواسطة (updated_by)": l["_upd_by"],
                     "حالة الحاوية | Container": c.get("container_status", ""), "السفينة | Vessel": c.get("vessel_name", ""),
@@ -5074,7 +5211,7 @@ if st.session_state["nav_page"] == "tab14":
                             tc_badge_t14 = warehouse_available_badge(r["sku_up"])
                             if tc_badge_t14:
                                 st.markdown(tc_badge_t14, unsafe_allow_html=True)
-                            render_china_for_sku(r["sku_up"])  # 🚢 كمية/شحنات الصين القادمة (مربوطة بالتكويد)
+                            render_china_for_sku(r["sku_up"], r)  # 🚢 كمية/شحنات الصين القادمة (مربوطة بالتكويد)
 
                             # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
                             ads_entries_t14 = ads_map_t14.get(r["sku_up"])
@@ -5478,7 +5615,7 @@ if st.session_state["nav_page"] == "tab14":
                             tc_badge_t14 = warehouse_available_badge(r["sku_up"])
                             if tc_badge_t14:
                                 st.markdown(tc_badge_t14, unsafe_allow_html=True)
-                            render_china_for_sku(r["sku_up"])  # 🚢 كمية/شحنات الصين القادمة (مربوطة بالتكويد)
+                            render_china_for_sku(r["sku_up"], r)  # 🚢 كمية/شحنات الصين القادمة (مربوطة بالتكويد)
 
                             # ══ أداء الإعلانات (لو الـ SKU ده معلن عليه) | Ads performance (if advertised) ══
                             ads_entries_t14 = ads_map_t14.get(r["sku_up"])
