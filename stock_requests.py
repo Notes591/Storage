@@ -1499,6 +1499,137 @@ def _china_lines_table_html(lines):
         body += "<tr>" + "".join(f'<td style="padding:3px 8px;">{_esc(str(c))}</td>' for c in cells) + "</tr>"
     return f'<div style="overflow-x:auto;"><table style="font-size:12px;border-collapse:collapse;"><tr>{th}</tr>{body}</table></div>'
 
+# ── 🎯 محرك القرار: مخزون المستودع + موعد الطلب من الصين | Decision engine ──
+# كله مبني على: المتوفر بالمستودع ومعدل سحب الكود (نفس أساس شارة "آمن — نفاد خلال N يوم") + تواريخ ملف الصين.
+# الإعدادات (مدة التوريد وغيرها) بتتخزن في شيت Settings وتتغير من تاب شحنات الصين.
+CHINA_CFG_DEFAULTS = {"china_lead_time_days": 60, "china_reorder_safety_days": 14, "china_cover_days": 60,
+                      "china_near_days": 7, "china_stale_days": 3}
+CHINA_CFG_LABELS = {
+    "china_lead_time_days": "مدة توريد الصين (من يوم الطلب لحد التوفر في الرياض) — يوم",
+    "china_reorder_safety_days": "نبّهني قبل موعد الطلب بـ — يوم",
+    "china_cover_days": "الكمية المقترحة تغطي — يوم مبيعات",
+    "china_near_days": "اعتبر الوصول «قريب» لو خلال — يوم",
+    "china_stale_days": "نبّهني لو ملف الصين ما اتحدّثش من — يوم",
+}
+
+def _china_cfg():
+    try:
+        s = load_settings()
+    except Exception:
+        s = {}
+    out = {}
+    for k, dv in CHINA_CFG_DEFAULTS.items():
+        try:
+            v = str(s.get(k, "")).strip()
+            out[k] = max(int(float(v)), 0) if v else dv
+        except Exception:
+            out[k] = dv
+    return out
+
+def _china_stock_rate(sku_up, row=None):
+    """(مخزون, معدل سحب يومي, مصدر, عدد SKUs في الكود). الأساس = المتوفر بالمستودع ومعدل سحب الكود (مجمّع)؛
+    لو الكود مالوش مخزون مستودع مسجل بيرجع مخزون نون كبديل بعلامة واضحة."""
+    wh = st.session_state.get("warehouse_stockout_sku_lookup", {}).get(sku_up)
+    if wh:
+        return float(wh.get("qty") or 0), float(wh.get("daily_draw") or 0), "wh", len(wh.get("skus") or [])
+    if row is not None:
+        return float(row.get("stock") or 0), float(row.get("effective_avg") or 0), "noon", 1
+    return None
+
+def china_decide(stock, rate, dated, undated_qty, today, cfg):
+    """dated = [(تاريخ وصول مخزن الرياض, كمية)] مرتبة. بيرجع الحالة: gap / order_late / order_soon / need_date / safe / no_rate
+    + التواريخ المهمة. دالة نقية بدون واجهة."""
+    lead, safety, cover, near = (cfg["china_lead_time_days"], cfg["china_reorder_safety_days"],
+                                 cfg["china_cover_days"], cfg["china_near_days"])
+    if rate <= 0:
+        return {"state": "no_rate", "sev": 2}
+    dated = sorted(dated)
+    days_left = stock / rate
+    stockout = today + timedelta(days=int(days_left))
+    proj = china_supply_projection(stock, rate, dated, today)
+    covered = proj["covered_until"]
+    order_by = covered - timedelta(days=lead)
+    late_by = (today - order_by).days
+    dec = {"stock": stock, "rate": rate, "days_left": days_left, "stockout": stockout, "covered": covered,
+           "order_by": order_by, "late_by": late_by, "suggested": round(rate * cover), "undated": undated_qty,
+           "next": dated[0] if dated else None, "lead": lead}
+    if proj["gaps"]:
+        g = proj["gaps"][0]
+        dec.update(state="gap", sev=0, gap_from=g[0], gap_to=g[1], gap_days=proj["gap_days"], lost=proj["lost_units"],
+                   should_order=g[0] - timedelta(days=lead))
+    elif undated_qty and not dated:
+        dec.update(state="need_date" if days_left <= lead + safety else "safe", sev=1 if days_left <= lead + safety else 3)
+    elif late_by > 0:
+        dec.update(state="order_late", sev=0)
+    elif late_by >= -safety:
+        dec.update(state="order_soon", sev=1)
+    else:
+        dec.update(state="safe", sev=3)
+    return dec
+
+def _china_decision_boxes(dec, today):
+    """صناديق HTML بالعربي: الحالة + المطلوب + (وصول قريب/متأخر) لو فيه."""
+    F = lambda d: _china_fmt_date(d, today)
+    st_, sug = dec["state"], f"{dec.get('suggested', 0):,}"
+    box = lambda bg, fg, t: f"<div class='cn-box' style='background:{bg};color:{fg};'>{t}</div>"
+    out = ""
+    if st_ == "gap":
+        out += box("#7f1d1d", "#fecaca",
+                   f"🔴 <b>فجوة في البيع:</b> المخزون هيخلص يوم {F(dec['gap_from'])} والشحنة مش هتتوفر قبل يوم {F(dec['gap_to'])} — "
+                   f"يعني {dec['gap_days']} يوم من غير بضاعة ونخسر مبيعات تقريبًا {dec['lost']:,} قطعة.<br>"
+                   f"🧾 كان لازم الشحنة توصل قبل {F(dec['gap_from'])}، يعني كان لازم نطلب من الصين قبل {F(dec['should_order'])} "
+                   f"(مدة التوريد {dec['lead']} يوم).<br>"
+                   f"🎯 <b>المطلوب:</b> اضغط على الصين تسرّع الشحنة اللي في الطريق، واطلب شحنة جديدة حوالي {sug} قطعة دلوقتي.")
+    elif st_ == "order_late":
+        out += box("#7f1d1d", "#fecaca",
+                   f"🔴 <b>كان لازم نطلب من الصين:</b> المخزون وشحنات الصين الجاية بيغطوا لحد {F(dec['covered'])}، ومدة التوريد "
+                   f"{dec['lead']} يوم — يعني كان لازم نطلب الشحنة الجاية قبل {F(dec['order_by'])}.<br>"
+                   f"🎯 <b>المطلوب:</b> اطلب دلوقتي حوالي {sug} قطعة.")
+    elif st_ == "order_soon":
+        out += box("#78350f", "#fde68a",
+                   f"🟠 <b>قرب موعد الطلب من الصين:</b> المخزون وشحنات الصين بيغطوا لحد {F(dec['covered'])}، "
+                   f"ولازم نطلب الشحنة الجاية قبل {F(dec['order_by'])}.<br>🎯 <b>المطلوب:</b> جهّز طلب حوالي {sug} قطعة.")
+    elif st_ == "need_date":
+        out += box("#78350f", "#fde68a",
+                   f"🟠 <b>مش قادر أحكم:</b> المخزون هيخلص يوم {F(dec['stockout'])} وفيه {dec['undated']:,} قطعة جاية من الصين "
+                   f"بس تاريخ وصولها لمخزن الرياض غير مكتوب.<br>🎯 <b>المطلوب:</b> اطلب من الصين تكتب تاريخ الوصول لمخزن الرياض، "
+                   f"ولو مفيش شحنة هتغطي اطلب قبل {F(dec['order_by'])}.")
+    elif st_ == "safe":
+        extra = f" (مش شامل {dec['undated']:,} قطعة تاريخ وصولها غير مكتوب)" if dec.get("undated") else ""
+        out += box("#14532d", "#bbf7d0",
+                   f"🟢 <b>آمن:</b> المخزون وشحنات الصين بيغطوا لحد {F(dec['covered'])}{extra}. "
+                   f"موعد طلب الشحنة الجاية من الصين: قبل {F(dec['order_by'])}.")
+    elif st_ == "no_rate":
+        out += box("#374151", "#d1d5db", "ℹ️ مفيش سحب مسجل للمنتج ده، فمش هقدر أحسب موعد الطلب أو الفجوة")
+    nxt = dec.get("next")
+    if nxt:
+        n = (nxt[0] - today).days
+        if n < 0:
+            out += box("#78350f", "#fde68a", f"🟠 <b>شحنة اتأخرت:</b> {nxt[1]:,} قطعة كان متوقع تتوفر في مخزن الرياض يوم "
+                       f"{F(nxt[0])} ولسه ماوصلتش — اسأل الصين عن الموعد الجديد.")
+        elif n <= dec.get("near", 7):
+            out += box("#1e3a8a", "#bfdbfe", f"🔵 <b>شحنة قربت:</b> {nxt[1]:,} قطعة هتتوفر في مخزن الرياض يوم {F(nxt[0])} — جهّز الاستلام.")
+    return out
+
+def _china_decision_html(inc, sku_up, row, today):
+    """(سطور المخزون, صناديق القرار) لكارت الـSKU."""
+    sr = _china_stock_rate(sku_up, row)
+    if sr is None:
+        return [], ""
+    stock, rate, src, n_sku = sr
+    cfg = _china_cfg()
+    dated, undated = china_batches_for_lines(inc)
+    dec = china_decide(stock, rate, [(b["date"], b["qty"]) for b in dated], sum(u["qty"] for u in undated), today, cfg)
+    dec["near"] = cfg["china_near_days"]
+    src_txt = "المتوفر بالمستودع" if src == "wh" else "مخزون نون (مفيش مخزون مستودع مسجل للكود)"
+    items = []
+    if rate > 0:
+        days_left = stock / rate
+        who = f" (سحب الكود كله من {n_sku} SKU)" if n_sku > 1 else ""
+        items.append(f"📦 {src_txt} <b>{stock:,.0f}</b> قطعة بمعدل سحب {rate:.1f} قطعة/يوم{who} — يكفي حوالي {days_left:,.0f} يوم "
+                     f"(لحد {_china_fmt_date(today + timedelta(days=int(days_left)))})")
+    return items, _china_decision_boxes(dec, today)
+
 # ── 📝 ملخص الصين بالعربي الواضح | Plain-Arabic summary card ──
 _AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 _CH_PORTS_AR = {"JEDDAH": "جدة", "DAMMAM": "الدمام", "RIYADH": "الرياض"}
@@ -1535,7 +1666,7 @@ def _china_avail_sentence(g, today):
         return "📅 متوقع تكون متاحة للبيع في مخزن الرياض: " + "، ".join(parts)
     return "📅 تاريخ وصولها لمخزن الرياض لسه غير مكتوب في ملف الصين"
 
-def _china_summary_card_html(inc, today, row=None):
+def _china_summary_card_html(inc, today, row=None, sku_up=""):
     """كارت واحد يشرح الكمية القادمة من الصين: كام في المصنع، كام في البحر، كام وصل الميناء، وإمتى كل جزء
     هيبقى متاح للبيع (من تواريخ ملف الصين بس) — وتنبيه الانقطاع لو المخزون هيخلص قبل الوصول."""
     from html import escape as _esc
@@ -1597,33 +1728,9 @@ def _china_summary_card_html(inc, today, row=None):
         items.append(line + "<br><span class='cn-sub'>" + _china_avail_sentence(g, today) + "</span>")
 
     alert = ""
-    if row is not None:
-        rate = float(row.get("effective_avg") or 0)
-        stock = float(row.get("stock") or 0)
-        dated, undated = china_batches_for_lines(inc)
-        skipped = sum(u["qty"] for u in undated)
-        note = f" (الحساب مش شامل {skipped:,} قطعة تاريخ وصولها غير مكتوب)" if skipped and dated else ""
-        if rate <= 0:
-            alert = "<div class='cn-box' style='background:#374151;color:#d1d5db;'>ℹ️ مفيش مبيعات مسجلة للمنتج ده، فمش هقدر أحسب فجوة الانقطاع</div>"
-        else:
-            days_left = stock / rate
-            stock_line = (f"📦 المخزون الحالي {stock:,.0f} قطعة بمعدل بيع {rate:.1f} قطعة/يوم — يكفي حوالي {days_left:,.0f} يوم "
-                          f"(لحد {_china_fmt_date(today + timedelta(days=int(days_left)))})")
-            if days_left < 3650:
-                items.append(stock_line)
-            if not dated:
-                alert = ("<div class='cn-box' style='background:#374151;color:#d1d5db;'>ℹ️ مقدرش أحسب فجوة الانقطاع لأن تاريخ وصول الشحنات "
-                         "لمخزن الرياض غير مكتوب في ملف الصين</div>")
-            else:
-                proj = china_supply_projection(stock, rate, [(b["date"], b["qty"]) for b in dated], today)
-                if proj["gaps"]:
-                    g0 = proj["gaps"][0]
-                    alert = (f"<div class='cn-box' style='background:#7f1d1d;color:#fecaca;'>⚠️ المخزون هيخلص يوم {_china_fmt_date(g0[0])} "
-                             f"والشحنة هتتوفر يوم {_china_fmt_date(g0[1])} — يعني هنفضل {proj['gap_days']} يوم من غير بضاعة "
-                             f"ونخسر مبيعات تقريبًا {proj['lost_units']:,} قطعة{note}</div>")
-                else:
-                    alert = (f"<div class='cn-box' style='background:#14532d;color:#bbf7d0;'>✅ مفيش انقطاع متوقع: المخزون الحالي "
-                             f"وشحنات الصين بيغطوا المبيعات لحد وصول الشحنة{note}</div>")
+    if row is not None or sku_up:
+        _it, alert = _china_decision_html(inc, sku_up or (row or {}).get("sku_up", ""), row, today)
+        items += _it
     return ("<div dir='rtl' style='background:#1e293b;border:1px solid #334155;border-radius:10px;padding:10px 14px;margin:6px 0;"
             "color:#e2e8f0;font-size:14px;line-height:1.9;'>"
             "<style>.cn-sub{color:#93c5fd;font-size:13px;}.cn-box{margin-top:8px;padding:7px 11px;border-radius:7px;font-weight:700;font-size:13px;}"
@@ -1642,7 +1749,7 @@ def render_china_for_sku(sku_up, row=None):
         today = datetime.now().date()
         inc = [l for l in lines if l["_status"] == "incoming"]
         if inc:
-            st.markdown(_china_summary_card_html(inc, today, row), unsafe_allow_html=True)
+            st.markdown(_china_summary_card_html(inc, today, row, sku_up), unsafe_allow_html=True)
         recv = sum(l["_qty"] for l in lines if l["_status"] == "received")
         canc = sum(l["_qty"] for l in lines if l["_status"] == "cancelled")
         extra = ""
@@ -1655,8 +1762,7 @@ def render_china_for_sku(sku_up, row=None):
             for l in lines:
                 st.markdown(_china_stepper_html(l["_idx"], l["_status"] == "cancelled"), unsafe_allow_html=True)
                 st.caption(f'{l["_shipment_id"] or "—"} | {l.get("container_no") or "—"} | {l["_qty"]:,} قطعة')
-            if row is not None:
-                st.caption("الفجوة محسوبة على مخزون نون (Inventory) ومعدل البيع الظاهر فوق فقط — مخزون المستودع والمنصات الأخرى غير محسوب بعد.")
+            st.caption("موعد الطلب والفجوة محسوبين على المتوفر بالمستودع ومعدل سحب الكود (نفس أساس شارة النفاد) + تواريخ ملف الصين.")
     except Exception as e:
         st.caption(f"⚠️ تعذر عرض بيانات الصين لهذا الـ SKU: {e}")
 
@@ -1952,6 +2058,211 @@ def render_china_upload(key_prefix, bundle):
                     st.rerun()
 
 # ── تاب شحنات الصين | The China tab body ──
+# ── 🚨 لوحة تنبيهات تاب شحنات الصين (من تواريخ الإكسيل) | Alerts board ──
+def china_code_decisions(bundle, today, cfg):
+    """قرار لكل كود صين عنده كمية قادمة: (مخزون المستودع + معدل سحب الكود + دفعات الصين المؤرخة). بيرجع (rows, no_stock_codes)."""
+    code_skus = _china_code_to_skus()
+    lookup = st.session_state.get("warehouse_stockout_sku_lookup", {})
+    rows, no_stock = [], 0
+    for norm, ls in bundle["by_code"].items():
+        inc = [l for l in ls if l["_status"] == "incoming"]
+        if not inc:
+            continue
+        skus = code_skus.get(norm, [])
+        wh = next((lookup[s] for s in skus if s in lookup), None)
+        if not wh:
+            no_stock += 1
+            continue
+        dated, undated = china_batches_for_lines(inc)
+        dec = china_decide(float(wh.get("qty") or 0), float(wh.get("daily_draw") or 0),
+                           [(b["date"], b["qty"]) for b in dated], sum(u["qty"] for u in undated), today, cfg)
+        dec["near"] = cfg["china_near_days"]
+        rows.append({"dec": dec, "code": ls[0].get("barcode", norm), "sku": (skus[0] if skus else ""),
+                     "name": ls[0].get("product_name_ar") or ls[0].get("product_name_en", ""),
+                     "incoming": sum(l["_qty"] for l in inc), "undated": dec.get("undated", 0)})
+    return rows, no_stock
+
+def _china_alert(sev, icon, title, action, rows):
+    return {"sev": sev, "icon": icon, "title": title, "action": action, "rows": rows}
+
+def china_build_alerts(bundle, today, cfg):
+    """كل التنبيهات مرتبة بالخطورة (0 عاجل، 1 تنبيه، 2 معلومة). كلها من تواريخ الملف + مخزون المستودع."""
+    near, stale = cfg["china_near_days"], cfg["china_stale_days"]
+    F = lambda d: _china_fmt_date(d)
+    alerts, on_track = [], 0
+    lines, conts = bundle["lines"], bundle["conts"]
+
+    # ── منتجات: فجوة / موعد طلب ──
+    prod, no_stock = china_code_decisions(bundle, today, cfg)
+    def prow(r, extra):
+        d = r["dec"]
+        base = {"الكود": r["code"], "SKU": r["sku"], "المنتج": r["name"], "المتوفر بالمستودع": f"{d['stock']:,.0f}",
+                "سحب/يوم": f"{d['rate']:.1f}", "يكفي لحد": F(d["stockout"])}
+        base.update(extra)
+        return base
+    gap = [r for r in prod if r["dec"]["state"] == "gap"]
+    late = [r for r in prod if r["dec"]["state"] == "order_late"]
+    soon = [r for r in prod if r["dec"]["state"] == "order_soon"]
+    needd = [r for r in prod if r["dec"]["state"] == "need_date"]
+    if gap:
+        alerts.append(_china_alert(0, "🔴", "منتجات هتخلص قبل وصول شحنة الصين (فجوة بيع)",
+            "اضغط على الصين تسرّع الشحنات دي، وفكّر في شحن جوي أو شراء بديل للفجوة، واطلب كمية جديدة.",
+            [prow(r, {"تاريخ وصول الشحنة": F(r["dec"]["gap_to"]), "أيام من غير بضاعة": r["dec"]["gap_days"],
+                      "مبيعات معرضة للضياع": f"{r['dec']['lost']:,}", "كان لازم نطلب قبل": F(r["dec"]["should_order"]),
+                      "كمية مقترحة": f"{r['dec']['suggested']:,}"})
+             for r in sorted(gap, key=lambda r: -r["dec"]["lost"])]))
+    if late:
+        alerts.append(_china_alert(0, "🔴", "كان لازم نطلب من الصين وفات الميعاد",
+            "اطلب دلوقتي — كل يوم تأخير بيقرّب الانقطاع.",
+            [prow(r, {"المخزون + الشحنات يغطوا لحد": F(r["dec"]["covered"]), "كان لازم نطلب قبل": F(r["dec"]["order_by"]),
+                      "فات من (يوم)": r["dec"]["late_by"], "كمية مقترحة": f"{r['dec']['suggested']:,}"})
+             for r in sorted(late, key=lambda r: -r["dec"]["late_by"])]))
+    if soon:
+        alerts.append(_china_alert(1, "🟠", f"قرب موعد الطلب من الصين (خلال {cfg['china_reorder_safety_days']} يوم)",
+            "جهّز طلب الشراء دلوقتي عشان متوصلش لمرحلة التأخير.",
+            [prow(r, {"المخزون + الشحنات يغطوا لحد": F(r["dec"]["covered"]), "اطلب قبل": F(r["dec"]["order_by"]),
+                      "باقي (يوم)": -r["dec"]["late_by"], "كمية مقترحة": f"{r['dec']['suggested']:,}"})
+             for r in sorted(soon, key=lambda r: r["dec"]["order_by"])]))
+    if needd:
+        alerts.append(_china_alert(1, "🟠", "منتجات قرب تخلص وشحنتها من غير تاريخ وصول لمخزن الرياض",
+            "اطلب من الصين تكتب تاريخ الوصول لمخزن الرياض في الملف عشان أقدر أحسب الفجوة.",
+            [prow(r, {"قطع جاية من غير تاريخ": f"{r['undated']:,}", "اطلب قبل (لو مفيش شحنة تغطي)": F(r["dec"]["order_by"])})
+             for r in sorted(needd, key=lambda r: r["dec"]["stockout"])]))
+
+    # ── حاويات ──
+    units_by_cont = {}
+    for l in lines:
+        cn = l.get("container_no", "")
+        if cn and l["_status"] != "cancelled":
+            units_by_cont[cn] = units_by_cont.get(cn, 0) + l["_qty"]
+    c_late, c_soon, c_stuck = [], [], []
+    for c in conts:
+        if c.get("container_status") == "Cancelled" or _china_date(c.get("warehouse_arrival_actual")):
+            continue
+        cn = c.get("container_no", "")
+        eta, arr = _china_date(c.get("eta_port")), _china_date(c.get("port_arrival_actual"))
+        base = {"الحاوية": cn, "الشحنة": c.get("shipment_id", ""), "القطع": units_by_cont.get(cn) or "—"}
+        if arr:
+            n = (today - arr).days
+            if n > near:
+                c_stuck.append(dict(base, **{"وصلت الميناء": F(arr), "بقالها (يوم)": n, "التخليص": c.get("customs_status", "") or "—"}))
+            else:
+                on_track += 1
+        elif eta:
+            d = (eta - today).days
+            if d < 0:
+                c_late.append(dict(base, **{"كان متوقع يوصل الميناء": F(eta), "متأخرة (يوم)": -d,
+                                            "السبب المكتوب": c.get("delay_reason", "") or "—"}))
+            elif d <= near:
+                c_soon.append(dict(base, **{"متوقع يوصل الميناء": F(eta), "باقي (يوم)": d}))
+            else:
+                on_track += 1
+    if c_late:
+        alerts.append(_china_alert(0, "🔴", "حاويات اتأخرت عن ميعاد وصولها للميناء",
+            "اسأل الصين/شركة الشحن عن الميعاد الجديد، وبلّغ المسؤول عن المنتجات اللي فيها لو مبيعاتها هتتأثر.",
+            sorted(c_late, key=lambda r: -r["متأخرة (يوم)"])))
+    if c_stuck:
+        alerts.append(_china_alert(1, "🟠", f"حاويات وصلت الميناء من أكتر من {near} يوم ولسه ماوصلتش المستودع",
+            "تابع التخليص الجمركي والنقل للمستودع — البضاعة واقفة.", sorted(c_stuck, key=lambda r: -r["بقالها (يوم)"])))
+    if c_soon:
+        alerts.append(_china_alert(2, "🔵", f"حاويات هتوصل الميناء خلال {near} يوم",
+            "جهّز التخليص الجمركي والنقل للمستودع.", sorted(c_soon, key=lambda r: r["باقي (يوم)"])))
+
+    # ── أسطر: مصنع / تاريخ الوصول لمخزن الرياض ──
+    f_rows, miss, d_late, d_soon = {}, {}, {}, {}
+    for l in lines:
+        if l["_status"] != "incoming":
+            continue
+        sid = l["_shipment_id"] or l.get("internal_order_no", "") or "—"
+        d = l["_d"]
+        if l["_idx"] < CHINA_SHIPPED_IDX:
+            ready, plan = _china_date(d["ready"]), _china_date(d["etd_plan"])
+            over = max([(today - x).days for x in (ready, plan) if x] or [0])
+            if over > 0:
+                r = f_rows.setdefault(sid, {"الشحنة": sid, "القطع": 0, "جاهزية الإنتاج": ready, "الخروج المخطط": plan, "over": 0})
+                r["القطع"] += l["_qty"]
+                r["over"] = max(r["over"], over)
+        else:
+            ed = _china_date(d["eta_dest"])
+            if not ed:
+                r = miss.setdefault(sid, {"الشحنة": sid, "القطع": 0, "وصول الميناء المتوقع": d["eta_port"] or "—"})
+                r["القطع"] += l["_qty"]
+            else:
+                n = (ed - today).days
+                tgt = d_late if n < 0 else (d_soon if n <= near else None)
+                if tgt is not None:
+                    r = tgt.setdefault(sid, {"الشحنة": sid, "القطع": 0, "تاريخ الوصول لمخزن الرياض": F(ed), "الأيام": abs(n)})
+                    r["القطع"] += l["_qty"]
+    if f_rows:
+        rows = []
+        for r in sorted(f_rows.values(), key=lambda r: -r["over"]):
+            rows.append({"الشحنة": r["الشحنة"], "القطع": r["القطع"], "جاهزية الإنتاج": F(r["جاهزية الإنتاج"]) if r["جاهزية الإنتاج"] else "—",
+                         "الخروج المخطط": F(r["الخروج المخطط"]) if r["الخروج المخطط"] else "—", "فات من (يوم)": r["over"]})
+        sev = 0 if any(r["فات من (يوم)"] > near for r in rows) else 1
+        alerts.append(_china_alert(sev, "🔴" if sev == 0 else "🟠", "بضاعة جاهزة أو ميعاد شحنها فات ولسه ماتشحنتش من الصين",
+            "كلّم الصين/المصنع وحدد ميعاد التحميل.", rows))
+    if d_late:
+        alerts.append(_china_alert(0, "🔴", "شحنات فات ميعاد وصولها لمخزن الرياض ولسه ماوصلتش",
+            "اسأل عن الموعد الجديد وحدّث الخطة — المنتجات دي ممكن تكون في فجوة بيع.",
+            [dict(r, **{"فات من (يوم)": r.pop("الأيام")}) for r in sorted(d_late.values(), key=lambda r: -r["الأيام"])]))
+    if d_soon:
+        alerts.append(_china_alert(2, "🔵", f"شحنات هتوصل مخزن الرياض خلال {near} يوم",
+            "جهّز الاستلام والتخزين.", [dict(r, **{"باقي (يوم)": r.pop("الأيام")}) for r in sorted(d_soon.values(), key=lambda r: r["الأيام"])]))
+    if miss:
+        alerts.append(_china_alert(1, "🟠", "شحنات خرجت من الصين وتاريخ وصولها لمخزن الرياض غير مكتوب",
+            "اطلب من الصين تكتب تاريخ الوصول لمخزن الرياض — من غيره مش هقدر أحسب «متاح للبيع» ولا الفجوة.",
+            sorted(miss.values(), key=lambda r: -r["القطع"])))
+
+    # ── الملف قديم؟ ──
+    upd = [d for d in (_china_date(x.get("last_updated_at")) for x in list(lines) + list(conts) + list(bundle["ships"])) if d]
+    if upd and (today - max(upd)).days > stale:
+        n = (today - max(upd)).days
+        alerts.append(_china_alert(1, "🟠", "ملف الصين قديم",
+            "اطلب من الصين نسخة محدّثة وارفعها.", [{"آخر تحديث في الملف": F(max(upd)), "من (يوم)": n}]))
+    alerts.sort(key=lambda a: a["sev"])
+    return alerts, on_track, no_stock, len(prod)
+
+def render_china_alerts_board(bundle, today):
+    """أول حاجة بتظهر في تاب شحنات الصين: عدد التنبيهات + كل تنبيه مع المطلوب عمله. أي خطأ بيظهر تحذير ومبيوقفش التاب."""
+    try:
+        cfg = _china_cfg()
+        alerts, on_track, no_stock, n_prod = china_build_alerts(bundle, today, cfg)
+        n0 = sum(1 for a in alerts if a["sev"] == 0)
+        n1 = sum(1 for a in alerts if a["sev"] == 1)
+        n2 = sum(1 for a in alerts if a["sev"] == 2)
+        st.markdown("### 🚨 التنبيهات والمطلوب عمله | Alerts")
+        if n0:
+            st.error(f"🔴 فيه {n0} تنبيه عاجل محتاج تحرك دلوقتي، و{n1} تنبيه تاني محتاج متابعة.")
+        elif n1:
+            st.warning(f"🟠 مفيش حاجة عاجلة، بس فيه {n1} تنبيه محتاج متابعة.")
+        else:
+            st.success("🟢 كل حاجة ماشية في معادها حسب تواريخ ملف الصين.")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("🔴 عاجل", n0)
+        m2.metric("🟠 متابعة", n1)
+        m3.metric("🔵 قريب", n2)
+        m4.metric("🟢 حاويات ماشية في معادها", on_track)
+        for a in alerts:
+            with st.expander(f"{a['icon']} {a['title']} — {len(a['rows'])}", expanded=a["sev"] <= 1):
+                st.markdown(f"🎯 **المطلوب:** {a['action']}")
+                st.dataframe(pd.DataFrame(a["rows"]), use_container_width=True, hide_index=True,
+                             height=min(420, 60 + 36 * len(a["rows"])))
+        st.caption(f"موعد الطلب والفجوة محسوبين على المتوفر بالمستودع ومعدل سحب الكود | منتجات محللة: {n_prod}"
+                   + (f" | {no_stock} كود صين بدون مخزون مستودع مسجل (مش داخلين في الحساب)" if no_stock else "")
+                   + f" | مدة التوريد المستخدمة {cfg['china_lead_time_days']} يوم")
+        with st.expander("⚙️ إعدادات التنبيهات | Alert settings", expanded=False):
+            cols = st.columns(len(CHINA_CFG_DEFAULTS))
+            new = {}
+            for col, (k, dv) in zip(cols, CHINA_CFG_DEFAULTS.items()):
+                new[k] = col.number_input(CHINA_CFG_LABELS[k], min_value=0, max_value=999, value=int(cfg[k]), step=1, key=f"china_cfg_{k}")
+            if st.button("💾 حفظ الإعدادات | Save", key="china_cfg_save"):
+                for k, v in new.items():
+                    if int(v) != int(cfg[k]):
+                        save_setting(k, str(int(v)))
+                st.rerun()
+    except Exception as e:
+        st.warning(f"⚠️ تعذر بناء لوحة التنبيهات: {e}")
+
 CHINA_STATUS_OPTS = {"🚢 قادمة | Incoming": "incoming", "✅ وصلت المستودع | Received": "received",
                      "🚫 ملغاة | Cancelled": "cancelled", "الكل | All": None}
 
@@ -1979,6 +2290,8 @@ def render_china_tab():
         return
 
     today = datetime.now().date()
+    render_china_alerts_board(bundle, today)
+    st.divider()
     code_skus = _china_code_to_skus()
 
     def _store_skus(l):
