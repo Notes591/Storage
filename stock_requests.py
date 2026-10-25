@@ -1615,7 +1615,7 @@ def _china_decision_html(inc, sku_up, row, today):
     """(سطور المخزون, صناديق القرار) لكارت الـSKU."""
     sr = _china_stock_rate(sku_up, row)
     if sr is None:
-        return [], ""
+        return [], "", ""
     stock, rate, src, n_sku = sr
     cfg = _china_cfg()
     dated, undated = china_batches_for_lines(inc)
@@ -1628,7 +1628,9 @@ def _china_decision_html(inc, sku_up, row, today):
         who = f" (سحب الكود كله من {n_sku} SKU)" if n_sku > 1 else ""
         items.append(f"📦 {src_txt} <b>{stock:,.0f}</b> قطعة بمعدل سحب {rate:.1f} قطعة/يوم{who} — يكفي حوالي {days_left:,.0f} يوم "
                      f"(لحد {_china_fmt_date(today + timedelta(days=int(days_left)))})")
-    return items, _china_decision_boxes(dec, today)
+    _lbl = {"gap": "🔴 فجوة في البيع", "order_late": "🔴 كان لازم نطلب من الصين", "order_soon": "🟠 قرب موعد الطلب",
+            "need_date": "🟠 مش قادر أحكم", "safe": "🟢 آمن", "no_rate": "ℹ️ مفيش سحب مسجل"}.get(dec["state"], "")
+    return items, _china_decision_boxes(dec, today), _lbl
 
 # ── 📝 ملخص الصين بالعربي الواضح | Plain-Arabic summary card ──
 _AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
@@ -1666,7 +1668,7 @@ def _china_avail_sentence(g, today):
         return "📅 متوقع تكون متاحة للبيع في مخزن الرياض: " + "، ".join(parts)
     return "📅 تاريخ وصولها لمخزن الرياض لسه غير مكتوب في ملف الصين"
 
-def _china_summary_card_html(inc, today, row=None, sku_up=""):
+def _china_card_parts(inc, today, row=None, sku_up=""):
     """كارت واحد يشرح الكمية القادمة من الصين: كام في المصنع، كام في البحر، كام وصل الميناء، وإمتى كل جزء
     هيبقى متاح للبيع (من تواريخ ملف الصين بس) — وتنبيه الانقطاع لو المخزون هيخلص قبل الوصول."""
     from html import escape as _esc
@@ -1682,7 +1684,8 @@ def _china_summary_card_html(inc, today, row=None, sku_up=""):
         bits.append(f"{q['sea']:,} في البحر")
     if q["port"]:
         bits.append(f"{q['port']:,} وصلت الميناء")
-    head = f"🚢 من الصين <b>{total:,} قطعة</b> في الطريق إلينا" + (" — منها " + "، و".join(bits) if len(bits) > 1 else "")
+    head = f"🚢 من الصين {total:,} قطعة"
+    sub = ("منها " + "، و".join(bits)) if bits else ""
     items = []
 
     g = groups["factory"]
@@ -1727,16 +1730,31 @@ def _china_summary_card_html(inc, today, row=None, sku_up=""):
             line += " — " + "، ".join(cust)
         items.append(line + "<br><span class='cn-sub'>" + _china_avail_sentence(g, today) + "</span>")
 
-    alert = ""
+    alert, dec_items, dec_label = "", [], ""
     if row is not None or sku_up:
-        _it, alert = _china_decision_html(inc, sku_up or (row or {}).get("sku_up", ""), row, today)
-        items += _it
-    return ("<div dir='rtl' style='background:#1e293b;border:1px solid #334155;border-radius:10px;padding:10px 14px;margin:6px 0;"
-            "color:#e2e8f0;font-size:14px;line-height:1.9;'>"
-            "<style>.cn-sub{color:#93c5fd;font-size:13px;}.cn-box{margin-top:8px;padding:7px 11px;border-radius:7px;font-weight:700;font-size:13px;}"
-            ".cn-li{margin:4px 0;}</style>"
-            f"<div style='font-size:15px;font-weight:800;color:#fed7aa;'>{head}</div>"
-            + "".join(f"<div class='cn-li'>{i}</div>" for i in items) + alert + "</div>")
+        dec_items, alert, dec_label = _china_decision_html(inc, sku_up or (row or {}).get("sku_up", ""), row, today)
+    return {"title": head, "sub": sub, "items": items, "dec_items": dec_items, "alert": alert, "dec_label": dec_label}
+
+_CN_CSS = ("<style>.cn-sub{color:#93c5fd;font-size:13px;}.cn-box{margin-top:8px;padding:7px 11px;border-radius:7px;"
+           "font-weight:700;font-size:13px;}.cn-li{margin:4px 0;}</style>")
+
+def _china_wrap(inner):
+    return ("<div dir='rtl' style='background:#1e293b;border:1px solid #334155;border-radius:10px;padding:10px 14px;margin:2px 0;"
+            f"color:#e2e8f0;font-size:14px;line-height:1.9;'>{_CN_CSS}{inner}</div>")
+
+def _china_render_card(inc, today, row=None, sku_up=""):
+    """الكارت اتقسم لعناوين قابلة للفتح (كلها مقفولة): «🚢 من الصين N قطعة» بتفتح التفصيل (منها كذا في المصنع وكذا في البحر
+    + كل مجموعة وتاريخ إتاحتها)، و«📦 المخزون وموعد الطلب» بتفتح مخزون المستودع والتنبيه — والحالة ظاهرة في العنوان."""
+    p = _china_card_parts(inc, today, row, sku_up)
+    with st.expander(p["title"], expanded=False):
+        body = (f"<div style='font-size:15px;font-weight:800;color:#fed7aa;'>{p['sub']}</div>" if p["sub"] else "")
+        body += "".join(f"<div class='cn-li'>{i}</div>" for i in p["items"])
+        st.markdown(_china_wrap(body), unsafe_allow_html=True)
+    if p["dec_items"] or p["alert"]:
+        lbl = "📦 المخزون وموعد الطلب" + (f" — {p['dec_label']}" if p["dec_label"] else "")
+        with st.expander(lbl, expanded=False):
+            st.markdown(_china_wrap("".join(f"<div class='cn-li'>{i}</div>" for i in p["dec_items"]) + p["alert"]),
+                        unsafe_allow_html=True)
 
 def render_china_for_sku(sku_up, row=None):
     """بيتنادى جوه تابات مبيعات FBN وFBB: كمية الصين القادمة + دفعاتها بتاريخ وصول الوجهة (من الإكسيل بس) +
@@ -1749,7 +1767,7 @@ def render_china_for_sku(sku_up, row=None):
         today = datetime.now().date()
         inc = [l for l in lines if l["_status"] == "incoming"]
         if inc:
-            st.markdown(_china_summary_card_html(inc, today, row, sku_up), unsafe_allow_html=True)
+            _china_render_card(inc, today, row, sku_up)
         recv = sum(l["_qty"] for l in lines if l["_status"] == "received")
         canc = sum(l["_qty"] for l in lines if l["_status"] == "cancelled")
         extra = ""
