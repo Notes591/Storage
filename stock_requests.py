@@ -617,21 +617,25 @@ def render_price_profit_block_t14(r, com_map_t14, live_map_t14, sales_dates, ads
     com_missing_t14 = com_info_t14 is None
     if com_missing_t14:
         com_info_t14 = {"delivery": 0.0, "commission_pct": 0.0}
-    # ── عمولة/توصيل حسب نوع التنفيذ: لو الـ SKU اتباع FBN و/أو FBB في فترة العرض، بنطبّق عمولة وتوصيل
-    #    كل نوع على مبيعاته (متوسط مرجّح بعدد القطع)، ولو نوع ملهوش رقم بنستخدم المتوسط العام ──
+    # ── عمولة/توصيل حسب نوع التنفيذ: نوع التنفيذ اللي اتباع منه الـ SKU مؤخرًا (أحدث يوم بيع في فترة العرض،
+    #    ولو الاتنين في نفس اليوم فاللي قطعه أكتر) — بنستخدم عمولة وتوصيل **آخر بيع مكتمل** للنوع ده من COM_API.
+    #    لو النوع ملوش رقم، بنرجع للرقم العام (آخر بيع مكتمل من أي نوع) ──
     _mix = r.get("_mix") or {}
-    _wn, _wb = float(_mix.get("FBN", 0) or 0), float(_mix.get("FBB", 0) or 0)
-    if (_wn + _wb) > 0 and not com_missing_t14:
-        def _pick(k_fbn, k_fbb, k_all):
-            vn = com_info_t14.get(k_fbn)
-            vb = com_info_t14.get(k_fbb)
-            va = com_info_t14.get(k_all, 0.0)
-            vn = va if vn is None else vn
-            vb = va if vb is None else vb
-            return (vn * _wn + vb * _wb) / (_wn + _wb), vn, vb
-        _d, _dn, _db = _pick("delivery_fbn", "delivery_fbb", "delivery")
-        _c, _cn, _cb = _pick("commission_pct_fbn", "commission_pct_fbb", "commission_pct")
-        com_info_t14 = dict(com_info_t14, delivery=_d, commission_pct=_c)
+    if _mix and not com_missing_t14:
+        _best = None
+        for _k, _v in _mix.items():
+            if _v.get("idx") is None:
+                continue
+            _score = (_v["idx"], -_v.get("units", 0))
+            if _best is None or _score < _best[0]:
+                _best = (_score, _k)
+        if _best:
+            _sfx = "fbn" if _best[1] == "FBN" else "fbb"
+            _d = com_info_t14.get("delivery_" + _sfx)
+            _c = com_info_t14.get("commission_pct_" + _sfx)
+            com_info_t14 = dict(com_info_t14,
+                                delivery=com_info_t14.get("delivery", 0.0) if _d is None else _d,
+                                commission_pct=com_info_t14.get("commission_pct", 0.0) if _c is None else _c)
 
     offer_price_t14 = get_latest_sku_price(r, sales_dates)
     latest_price_t14, price_from_live_t14 = get_base_price(r["sku_up"], live_map_t14, offer_price_t14)
@@ -8185,8 +8189,13 @@ if st.session_state["nav_page"] == "tab14":
                             for d in sales_dates:
                                 r_sku["day_prices"][d] = r_sku["day_prices"].get(d, []) + list(noon_chs["FBB"]["day_prices"].get(d, []))
                         # عدد القطع المباعة لكل نوع تنفيذ في فترة العرض — بيستخدمه بلوك الربح لتطبيق عمولة/توصيل كل نوع
-                        r_sku["_mix"] = {_k: sum(float(noon_chs[_k]["day_counts"].get(d, 0) or 0) for d in sales_dates)
-                                         for _k in ("FBN", "FBB") if _k in noon_chs}
+                        r_sku["_mix"] = {}
+                        for _k in ("FBN", "FBB"):
+                            if _k in noon_chs:
+                                _idx = next((_i for _i, _d in enumerate(sales_dates)
+                                             if float(noon_chs[_k]["day_counts"].get(_d, 0) or 0) > 0), None)
+                                r_sku["_mix"][_k] = {"idx": _idx,
+                                                     "units": sum(float(noon_chs[_k]["day_counts"].get(_d, 0) or 0) for _d in sales_dates)}
                     if amz_chs:
                         r_any = amz_chs.get("FSAB") or amz_chs.get("FBA")
                         r_asin = dict(r_any, day_prices={d: list(amz_chs["FSAB"]["day_prices"].get(d, [])) if "FSAB" in amz_chs else []
