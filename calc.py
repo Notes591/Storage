@@ -159,11 +159,34 @@ def get_latest_sku_price(r, ordered_dates):
             return vals[0][0]
     return None
 
+_AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩٫٬", "0123456789.,")
+
+def _wh_num(v):
+    """يحوّل كمية مكتوبة بأي شكل ("1,687" / "1 687" / "١٦٨٧" / "485.0") لرقم؛ None لو مش رقم."""
+    s = str(v if v is not None else "").translate(_AR_DIGITS).strip().replace(",", "").replace(" ", "").replace("\u00a0", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
 def _build_warehouse_stock_map(raw):
-    m = {}
+    """كود → الكمية المتوفرة (نص رقم صحيح). بيجمّع الصفوف المكررة لنفس الكود (بدل ما آخر صف يمسح اللي قبله)،
+    وبيفهم الأرقام اللي فيها فاصلة آلاف (1,687) — قبل كده دي كانت بتتقري صفر."""
+    acc, raw_txt = {}, {}
     for row in raw[1:]:
         if len(row) >= 2 and row[0].strip():
-            m[row[0].strip()] = row[1].strip()
+            code = row[0].strip()
+            n = _wh_num(row[1])
+            if n is None:
+                raw_txt.setdefault(code, row[1].strip())
+            else:
+                acc[code] = acc.get(code, 0.0) + n
+    m = {c: t for c, t in raw_txt.items() if c not in acc}
+    for c, n in acc.items():
+        n = max(0.0, n)
+        m[c] = str(int(n)) if n == int(n) else str(n)
     return m
 
 def _china_norm_code(v):
@@ -732,10 +755,11 @@ _CS_LOOKUP = {}
 CHINA_FLAT_COLS = [
  ("ORDER","internal_order_no","رقم الطلب الداخلي NO.xxx",14,"t"),("ORDER","po_no","رقم طلب المصنع PO",16,"t"),
  ("KEY","barcode","الباركود",16,"t"),("KEY","product_image","صورة المنتج (تلقائي من الباركود)",13,"g"),
+ ("KEY","shipment_id","رقم الشحنة STxxxxx",13,"t"),("KEY","container_no","رقم الحاوية",15,"t"),
  ("KEY","status","الحالة | Status",24,"g"),
  ("AUTO","next_action","المطلوب دلوقتي | Next action (تلقائي)",42,"g"),
  ("ORDER","supplier_name","اسم المورد",26,"g"),("ORDER","buyer_company","شركة المشتري",22,"g"),
- ("ORDER","shipment_id","رقم الشحنة STxxxxx",13,"t"),("ORDER","shipment_mode","طريقة الشحن",11,"g"),
+ ("ORDER","shipment_mode","طريقة الشحن",11,"g"),
  ("ORDER","incoterm","Incoterm",9,"g"),("ORDER","origin_location","منشأ البضاعة",14,"g"),
  ("ORDER","invoice_no","رقم الفاتورة",14,"t"),("ORDER","invoice_value","قيمة الفاتورة",13,"n"),
  ("ORDER","freight_value","قيمة الشحن",12,"n"),("ORDER","currency","العملة",8,"g"),
@@ -743,7 +767,7 @@ CHINA_FLAT_COLS = [
  ("ORDER","booking_no","رقم الحجز",14,"t"),
  ("ORDER","container_count","عدد الحاويات",9,"n"),("ORDER","final_destination","الوجهة النهائية",11,"g"),
  ("ORDER","order_notes","ملاحظات الطلب",24,"g"),
- ("CONTAINER","container_no","رقم الحاوية",15,"t"),("CONTAINER","seal_no","رقم الختم",13,"t"),
+ ("CONTAINER","seal_no","رقم الختم",13,"t"),
  ("CONTAINER","container_type","نوع الحاوية",10,"g"),("CONTAINER","shipping_line","شركة الشحن",13,"g"),
  ("CONTAINER","vessel_name","اسم السفينة",18,"g"),("CONTAINER","voyage_no","رقم الرحلة",12,"t"),
  ("CONTAINER","bl_no","رقم B/L",18,"t"),("CONTAINER","port_of_loading","ميناء التحميل",13,"g"),
@@ -945,8 +969,10 @@ def resolve_unit_cost(env, sku_up, asin_up=None):
             return c
     return get_sku_cost(env, sku_up)
 
-def get_ads_map(env):
-    data = env.get_cached(env.ads_sheet)
+def get_ads_map(env, data=None):
+    """data: صفوف جاهزة (مثلاً من تاب AdsMonthly اللي البوت بيكتبه)؛ لو مفيش بيقرا شيت Advertisements اليدوي."""
+    if data is None:
+        data = env.get_cached(env.ads_sheet)
     if not data or len(data) < 2:
         return {}
     header = [h.strip() for h in data[0]]
@@ -965,6 +991,10 @@ def get_ads_map(env):
         sku_up = str(sku_raw).strip().upper()
         entry = {
             "campaign": col(row, "Campaign Name") or "—",
+            "cid": str(col(row, "Campaign ID")).strip(),
+            "store": str(col(row, "Store")).strip(),
+            "psku": str(col(row, "PSKU")).strip(),
+            "offer": str(col(row, "Offer Code")).strip(),
             "views":  _f2(col(row, "Views")),
             "clicks": _f2(col(row, "Clicks")),
             "orders": _f2(col(row, "Orders")),
@@ -977,8 +1007,56 @@ def get_ads_map(env):
             "cps":    _f2(col(row, "CPS")),
             "cvr":    _f2(col(row, "CVR")),
         }
+        if not entry["cps"] and entry["orders"] > 0:
+            entry["cps"] = entry["spends"] / entry["orders"]
+        if not entry["roas"] and entry["spends"] > 0:
+            entry["roas"] = entry["revenue"] / entry["spends"]
         m.setdefault(sku_up, []).append(entry)
-    return m
+    return _ads_merge_same_campaign(m)
+
+
+def _ads_merge_same_campaign(m):
+    """نفس الـ SKU في نفس الحملة بأكتر من صف (عروض/Offer Code مختلفة) -> صف واحد بأرقام مجمّعة،
+    والنسب (CTR/ROAS/CPC/CPS/CVR) بتتحسب من المجاميع مش بتتجمّع."""
+    out = {}
+    for sku, lst in m.items():
+        grp, order = {}, []
+        for e in lst:
+            k = e.get("cid") or e.get("campaign")
+            if k not in grp:
+                g = dict(e)
+                grp[k] = g
+                order.append(k)
+            else:
+                g = grp[k]
+                for f in ("views", "clicks", "orders", "atc", "spends", "revenue"):
+                    g[f] += e[f]
+        res = []
+        for k in order:
+            g = grp[k]
+            g["ctr"] = (g["clicks"] / g["views"] * 100) if g["views"] > 0 else 0.0
+            g["cvr"] = (g["orders"] / g["clicks"] * 100) if g["clicks"] > 0 else 0.0
+            g["cpc"] = (g["spends"] / g["clicks"]) if g["clicks"] > 0 else 0.0
+            g["cps"] = (g["spends"] / g["orders"]) if g["orders"] > 0 else 0.0
+            g["roas"] = (g["revenue"] / g["spends"]) if g["spends"] > 0 else 0.0
+            res.append(g)
+        out[sku] = res
+    return out
+
+def ads_merge_by_sku(lst):
+    """كل صفوف إعلانات SKU واحد (حتى لو من حملات مختلفة) -> صف واحد بمجاميع، والنسب من المجاميع. بيرجع [] لو القايمة فاضية."""
+    if not lst:
+        return []
+    g = {"campaign": " + ".join(dict.fromkeys(str(e.get("campaign") or "—") for e in lst)), "n_campaigns": len(lst)}
+    for f in ("views", "clicks", "orders", "atc", "spends", "revenue"):
+        g[f] = sum(e[f] for e in lst)
+    g["ctr"] = (g["clicks"] / g["views"] * 100) if g["views"] > 0 else 0.0
+    g["cvr"] = (g["orders"] / g["clicks"] * 100) if g["clicks"] > 0 else 0.0
+    g["cpc"] = (g["spends"] / g["clicks"]) if g["clicks"] > 0 else 0.0
+    g["cps"] = (g["spends"] / g["orders"]) if g["orders"] > 0 else 0.0
+    g["roas"] = (g["revenue"] / g["spends"]) if g["spends"] > 0 else 0.0
+    return [g]
+
 
 def get_ads_map_amazon(env):
     """بتقرأ من شيت AdvertisementsAmz بشكله الجديد — تصدير إعلانات أمازون
@@ -1349,9 +1427,26 @@ def _cs_shipment(codes):
     prog = [x for x in nonc if _cs_prog(x) >= 0]
     return min(prog, key=_cs_prog) if prog else nonc[0]
 
+_CF_HINT_PREFIXES = ("لما ", "اختر ", "سجّل ", "سجل ", "أضف ", "اضف ", "أكّد ", "اكد ", "أكد ")
+
+def _cf_is_hint(v):
+    """نص تعليمات/إرشاد (مش بيانات): «لما يبدأ الإنتاج غيّر الحالة | Update status … [الحالة | Status]»."""
+    v = str(v or "").strip()
+    if not v:
+        return False
+    if "|" in v and "[" in v and v.endswith("]"):
+        return True
+    return v.startswith(_CF_HINT_PREFIXES) and "|" in v
+
 def china_flat_to_tables(flat_rows):
     """صفوف الشيت الواحد -> (ships, conts, lines, conflicts) بنفس شكل الجداول القديمة."""
     rows = [{k: _cf_g(r, k) for k in CHINA_FLAT_INPUT_KEYS + CHINA_STATUS_LEGACY} for r in flat_rows]
+    for r in rows:
+        for k in list(r):
+            if r[k] and _cf_is_hint(r[k]):
+                r[k] = ""                                   # نصوص الإرشاد مش بيانات
+        if not r.get("container_no") and r.get("seal_no") and (r.get("vessel_name") or r.get("actual_etd") or r.get("eta_port")):
+            r["container_no"], r["seal_no"] = r["seal_no"], ""    # رقم الحاوية متكتوب تحت عمود الختم
     rows = [r for r in rows if any(r.values())]
     for r in rows:
         r["_code"] = _cs_floor(r, china_row_status(r))
@@ -1439,6 +1534,17 @@ def china_flat_to_tables(flat_rows):
             pass
         l["record_key"] = "SKU|" + l["line_id"]
         lines.append(l)
+    # ── تنبيه فقط: مجموع كميات سطور الحاوية أكبر من «إجمالي قطع الحاوية» (ممكن شحن مجمّع، فمنعدّل الكميات) ──
+    cap, tot = {}, {}
+    for r in rows:
+        if r["container_no"] and _cf_num(r.get("ctr_total_units")):
+            cap[r["container_no"]] = max(cap.get(r["container_no"], 0), _cf_num(r["ctr_total_units"]))
+    for l in lines:
+        tot[l.get("container_no", "")] = tot.get(l.get("container_no", ""), 0) + _cf_num(l.get("total_qty"))
+    for cn, cp in cap.items():
+        if tot.get(cn, 0) > cp:
+            conflicts.append({"السجل": f"حاوية {cn}", "الحقل": "ctr_total_units",
+                              "القيم": f"مجموع كميات الطلبات {tot[cn]:,} أكبر من إجمالي قطع الحاوية في الشيت {cp:,} — لو الشحن مجمّع صحّح إجمالي الحاوية"})
     return ships, conts, lines, conflicts
 
 def _china_col_letter(n):
@@ -1602,6 +1708,8 @@ def _china_diff(env, parsed):
                         "ثابت": len(new) - len(added) - len(changed), "عندنا ومش في الملف": len(removed)})
     return summary, details
 
+CHINA_RIYADH_LEAD_DAYS = 12      # تقدير الأيام من وصول الميناء لوصول مخزن الرياض (لما التاريخ الفعلي مش مكتوب)
+
 def _china_enrich(line, conts, ship_by_pair, ship_by_no):
     ctr = conts.get(line.get("container_no", "")) or {}
     shp = (ship_by_pair.get((line.get("internal_order_no", ""), line.get("po_no", "")))
@@ -1652,6 +1760,14 @@ def _china_enrich(line, conts, ship_by_pair, ship_by_no):
         "eta_dest": shp.get("eta_destination", ""),
         "wh_arr": wh_arr,
     }
+    # تاريخ وصول الرياض لو مش مكتوب: تقدير = وصول الميناء (الفعلي وإلا المتوقع) + CHINA_RIYADH_LEAD_DAYS يوم
+    e["_d"]["eta_dest_est"] = False
+    if status == "incoming" and not e["_d"]["eta_dest"]:
+        # التقدير بس من تاريخ الوصول الفعلي للميناء اللي موظف الجمرك كتبه — من غيره مفيش تقدير
+        _base = _china_date(e["_d"]["port_arr"])
+        if _base:
+            e["_d"]["eta_dest"] = (_base + timedelta(days=CHINA_RIYADH_LEAD_DAYS)).strftime("%Y-%m-%d")
+            e["_d"]["eta_dest_est"] = True
     e["_upd"] = ctr.get("last_updated_at") or line.get("last_updated_at", "")
     e["_upd_by"] = ctr.get("updated_by") or line.get("updated_by", "")
     e["_qty"] = _china_int(line.get("total_qty", ""))
@@ -1760,6 +1876,25 @@ def china_code_decisions(env, bundle, today, cfg):
                      "incoming": sum(l["_qty"] for l in inc), "undated": dec.get("undated", 0)})
     return rows, no_stock
 
+def china_incoming_badge_text(cn, today):
+    """نص الكمية القادمة من الصين جنب شارة النفاد: الكمية + تاريخ وصولها لمخزن الرياض (من «ETA الوجهة النهائية» في شيت China)."""
+    if not cn:
+        return ""
+    inc, und = cn.get("incoming", 0), cn.get("undated_qty", 0)
+    nd, nq = cn.get("next_date"), cn.get("next_qty", 0)
+    t = f" (+🚢 {inc:,} من الصين"
+    if nd:
+        d = _china_fmt_date(nd, today)
+        if nq >= inc:
+            t += f" — توصل الرياض {d}"
+        else:
+            t += f" — أقرب {nq:,} توصل الرياض {d}"
+            if und:
+                t += f" و{und:,} بدون تاريخ"
+    elif und:
+        t += " — تاريخ وصولها للرياض غير مكتوب"
+    return t + ")"
+
 def _china_alert(sev, icon, title, action, rows):
     return {"sev": sev, "icon": icon, "title": title, "action": action, "rows": rows}
 
@@ -1803,7 +1938,7 @@ def china_build_alerts(env, bundle, today, cfg):
              for r in sorted(soon, key=lambda r: r["dec"]["order_by"])]))
     if needd:
         alerts.append(_china_alert(1, "🟠", "منتجات قرب تخلص وشحنتها من غير تاريخ وصول لمخزن الرياض",
-            "اطلب من الصين تكتب تاريخ الوصول لمخزن الرياض في الملف عشان أقدر أحسب الفجوة.",
+            "👤 مراجعة موظف التخليص الجمركي — اطلب منه يكتب تاريخ الوصول لمخزن الرياض في الملف عشان أقدر أحسب الفجوة.",
             [prow(r, {"قطع جاية من غير تاريخ": f"{r['undated']:,}", "اطلب قبل (لو مفيش شحنة تغطي)": F(r["dec"]["order_by"])})
              for r in sorted(needd, key=lambda r: r["dec"]["stockout"])]))
 
@@ -1878,17 +2013,17 @@ def china_build_alerts(env, bundle, today, cfg):
                          "الخروج المخطط": F(r["الخروج المخطط"]) if r["الخروج المخطط"] else "—", "فات من (يوم)": r["over"]})
         sev = 0 if any(r["فات من (يوم)"] > near for r in rows) else 1
         alerts.append(_china_alert(sev, "🔴" if sev == 0 else "🟠", "بضاعة جاهزة أو ميعاد شحنها فات ولسه ماتشحنتش من الصين",
-            "كلّم الصين/المصنع وحدد ميعاد التحميل.", rows))
+            "👤 مراجعة موظف الصين — كلّم المصنع وحدد ميعاد التحميل.", rows))
     if d_late:
         alerts.append(_china_alert(0, "🔴", "شحنات فات ميعاد وصولها لمخزن الرياض ولسه ماوصلتش",
-            "اسأل عن الموعد الجديد وحدّث الخطة — المنتجات دي ممكن تكون في فجوة بيع.",
+            "👤 مراجعة موظف التخليص الجمركي — اسأل عن الموعد الجديد وحدّث الخطة — المنتجات دي ممكن تكون في فجوة بيع.",
             [dict(r, **{"فات من (يوم)": r.pop("الأيام")}) for r in sorted(d_late.values(), key=lambda r: -r["الأيام"])]))
     if d_soon:
         alerts.append(_china_alert(2, "🔵", f"شحنات هتوصل مخزن الرياض خلال {near} يوم",
             "جهّز الاستلام والتخزين.", [dict(r, **{"باقي (يوم)": r.pop("الأيام")}) for r in sorted(d_soon.values(), key=lambda r: r["الأيام"])]))
     if miss:
         alerts.append(_china_alert(1, "🟠", "شحنات خرجت من الصين وتاريخ وصولها لمخزن الرياض غير مكتوب",
-            "اطلب من الصين تكتب تاريخ الوصول لمخزن الرياض — من غيره مش هقدر أحسب «متاح للبيع» ولا الفجوة.",
+            "👤 مراجعة موظف التخليص الجمركي — اطلب منه يكتب تاريخ الوصول لمخزن الرياض — من غيره مش هقدر أحسب «متاح للبيع» ولا الفجوة.",
             sorted(miss.values(), key=lambda r: -r["القطع"])))
 
     # ── تنبيهات على مستوى الكود عبر المتاجر الثلاثة (نون + أمازون + تريندول) ──
@@ -3252,6 +3387,9 @@ def compute_warehouse_stockout_rows(env):
             "days_to_stockout": round(days_to_stockout) if days_to_stockout is not None else None,
             "reorder_in": round(reorder_in) if reorder_in is not None else None,
             "status": status, "color": color, "suggested_qty": suggested_qty, "img": img, "china": china,
+            "sku_sales": {x: sum(multi_counts_wh.get(x, {}).values()) for x in skus},
+            "asin_sales": {x: sum(multi_counts_amz_wh.get(x, {}).values()) for x in asins},
+            "sales_days": window_days,
         })
 
     rows.sort(key=lambda r: (r["days_to_stockout"] if r["days_to_stockout"] is not None else 10**9))
@@ -3957,6 +4095,29 @@ def sku_link_html(sku: str, extra_style: str = ""):
         f'style="text-decoration:none;font-size:14px;" title="فتح صفحة المنتج على نون | Open on noon.com">🔗</a>'
     )
 
+def skus_asins_links_html(skus, asins=None, sku_sales=None, asin_sales=None, days=None):
+    """سطر الـ SKUs/ASINs التابعة للكود: كل SKU نون لينك بيفتح صفحة المنتج على نون في تاب جديد، وكل ASIN لينك أمازون.
+    اللي عليه مبيعات بيتقدّم ويتلوّن بلون واضح وجنبه عدد القطع المباعة في آخر `days` يوم؛ والباقي بيفضل موجود بلون هادي بعدهم."""
+    from html import escape
+    def part(label, items, linker, sales):
+        items = [x for x in (items or []) if linker(x)]
+        if not items:
+            return ""
+        sales = sales or {}
+        hot = sorted([x for x in items if sales.get(x, 0) > 0], key=lambda x: -sales[x])
+        cold = [x for x in items if sales.get(x, 0) <= 0]
+        def a(x, is_hot):
+            st_ = ("color:#4ade80;font-weight:700;" if is_hot else "color:#64748b;") + "text-decoration:none;"
+            n = f'<span style="color:#86efac;">×{sales[x]:g}</span>' if is_hot else ""
+            return f'<a href="{linker(x)}" target="_blank" rel="noopener" style="{st_}">{escape(str(x))}</a>{n}'
+        hint = f" (الأخضر عليه مبيعات{' آخر ' + str(days) + ' يوم' if days else ''}، والرقم = القطع)" if hot else ""
+        return label + hint + ": " + ", ".join([a(x, True) for x in hot] + [a(x, False) for x in cold])
+    parts = [p for p in (part("SKU (نون)", skus, build_noon_link, sku_sales),
+                         part("ASIN (أمازون)", asins, build_amazon_asin_link, asin_sales)) if p]
+    if not parts:
+        return "—"
+    return '<div style="font-size:0.85rem;color:#9ca3af;line-height:1.9;word-break:break-all;">' + "<br>".join(parts) + "</div>"
+
 def build_amazon_asin_link(asin: str):
     if not asin:
         return None
@@ -4248,3 +4409,1125 @@ def _file_to_text(f):
         return "\n".join(df.astype(str).values.ravel())
     sheets_ = pd.read_excel(f, sheet_name=None, header=None, dtype=str)
     return "\n".join("\n".join(d.fillna("").astype(str).values.ravel()) for d in sheets_.values())
+
+
+# ══ Container tracking → China | مزامنة شيت Container tracking مع شيت China ══
+# شيت Container tracking (جوجل شيت منفصل) هو مصدر بيانات الحاوية: اكتب أي مرجع في China (رقم الحاوية / رقم الشحنة STxxxxx / رقم البوليصة)
+# والباقي بيتملا منه. كل حاجة هنا دوال نقية (بتاخد الصفوف الخام وترجّع قايمة تعديلات) — القراءة والكتابة في stock_requests.
+CT_SHEET_NAME = "Container tracking"
+_CT_HEAD_LINES = {     # حقل -> أسطر العنوان المقبولة (بدون نقطة آخر السطر، حروف كبيرة)
+    "loading": {"LOADING DATE", "تاريخ التحميل"}, "invoice": {"INVOICE NO", "رقم الفاتورة"}, "origin": {"ADD", "عنوان"},
+    "container": {"CONTAINER NO", "رقم الحاوية"}, "seal": {"SEAL NO", "رقم الختم"}, "bl": {"D/R NO", "رقم بوليصة الشحن"},
+    "sailing": {"SAILING DATE", "تاريخ الإبحار"}, "transfer_loc": {"TRANSFER PORT LOCATION", "موقع ميناء النقل"},
+    "transfer_date": {"DATE OF TRANSFER PORT", "تاريخ العبور"}, "dest": {"DESTINATION", "مقصد"},
+    "eta": {"ARRIVAL DATE", "تاريخ الوصول"}, "ship": {"اسم السفينة"}, "url": {"QUERY WEBSITE", "موقع الاستعلام"},
+    "actual": {"ACTUAL ARRIVAL DATE", "تاريخ الوصول الفعلي"}, "status": {"الحالة"}, "received": {"تاريخ الاستلام في المستودع"},
+}
+# حقل في China <- حقل في Container tracking
+CT_FIELD_MAP = [("shipment_id", "invoice"), ("container_no", "container"), ("seal_no", "seal"), ("bl_no", "bl"),
+                ("actual_load_date", "loading"), ("actual_etd", "sailing"), ("destination_port", "dest"), ("eta_port", "eta"),
+                ("vessel_name", "vessel"), ("voyage_no", "voyage"), ("tracking_url", "url"), ("last_known_location", "transfer_loc"),
+                ("port_arrival_actual", "actual"), ("warehouse_arrival_actual", "received"), ("origin_location", "origin")]
+_CT_IDENTITY = {"shipment_id", "container_no"}      # بتتملا لو فاضية بس — ولو مختلفة بنبلّغ عن تعارض
+_CT_FILL_ONLY = {"origin_location"}                 # بتتملا لو فاضية بس
+_CT_DATE_KEYS = {"actual_load_date", "actual_etd", "eta_port", "port_arrival_actual", "warehouse_arrival_actual"}
+_CT_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789.")
+
+
+def ct_norm_ref(v):
+    """مرجع (رقم حاوية/شحنة/بوليصة) للمقارنة: حروف كبيرة وبدون مسافات."""
+    return re.sub(r"\s+", "", str(v or "")).upper()
+
+
+def ct_parse_date(v, year=None, anchor=None, limit=None, floor=None):
+    """تاريخ من شيت التتبع -> yyyy-mm-dd أو ''. بيقبل 2026/06/27 و 5٫10 / 5.10 (شهر.يوم من غير سنة — السنة من year،
+    ولو طلع قبل anchor بأكتر من 60 يوم نزوّده سنة) وأرقام التاريخ بتاعة الإكسيل. أي حاجة غلط (زي 5٫80) = ''."""
+    if v is None or isinstance(v, bool):
+        return ""
+    if isinstance(v, (int, float)):
+        if 20000 < v < 80000:
+            return (datetime(1899, 12, 30) + timedelta(days=int(v))).strftime("%Y-%m-%d")
+        return ""
+    s = str(v).strip().translate(_CT_DIGITS)
+    if not s:
+        return ""
+    m = re.match(r"^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})(?:\D.*)?$", s)
+    try:
+        if m:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).strftime("%Y-%m-%d")
+        m = re.match(r"^(\d{1,2})[./\-](\d{1,2})$", s)
+        if m and year:
+            if limit and re.fullmatch(r"[123]", m.group(2)):
+                # 8٫2 ممكن تكون 2 أو 20 أغسطس (الإكسيل بيشيل الصفر): نختار اللي قبل الحد (تاريخ الإبحار)، ولو الاتنين ينفعوا مش هنخمّن
+                try:
+                    c1 = datetime(int(year), int(m.group(1)), int(m.group(2)))
+                    c2 = datetime(int(year), int(m.group(1)), int(m.group(2)) * 10)
+                    ok = [x for x in (c1, c2) if x.strftime("%Y-%m-%d") <= limit]
+                    if len(ok) == 1:
+                        return ok[0].strftime("%Y-%m-%d")
+                    if len(ok) == 2:
+                        return ""
+                except ValueError:
+                    pass
+            if floor and re.fullmatch(r"[123]", m.group(2)):
+                # تاريخ الإبحار 9٫3 ممكن 3 أو 30 سبتمبر: لازم يكون بعد التحميل. لو الاتنين ينفعوا ناخد الأقرب لو الفرق معقول (≤ 25 يوم)
+                try:
+                    c1 = datetime(int(year), int(m.group(1)), int(m.group(2)))
+                    c2 = datetime(int(year), int(m.group(1)), int(m.group(2)) * 10)
+                    ok = [x for x in (c1, c2) if x.strftime("%Y-%m-%d") >= floor]
+                    if len(ok) == 1:
+                        return ok[0].strftime("%Y-%m-%d")
+                    if len(ok) == 2:
+                        fl = datetime.strptime(floor, "%Y-%m-%d")
+                        return c1.strftime("%Y-%m-%d") if (c1 - fl).days <= 25 else ""
+                except ValueError:
+                    pass
+            day = int(m.group(2))
+            if day in (40, 50, 60, 70, 80, 90):      # 5٫8 بتتعرض 5٫80 (خلية بخانتين عشريتين) = 8 مايو، مش يوم 80
+                day //= 10
+            d = datetime(int(year), int(m.group(1)), day)
+            if anchor:
+                a = datetime.strptime(anchor, "%Y-%m-%d")
+                if d < a - timedelta(days=60):
+                    d = datetime(int(year) + 1, d.month, d.day)
+            return d.strftime("%Y-%m-%d")
+    except ValueError:
+        return ""
+    return ""
+
+
+def _ct_head_map(raw):
+    """(index صف العناوين, {حقل: index عمود}) — بيدوّر على الصف اللي فيه «CONTAINER NO»."""
+    for hi, row in enumerate(raw[:12]):
+        pos = {}
+        for j, cell in enumerate(row):
+            lines = {re.sub(r"\.$", "", ln.strip().upper()) for ln in str(cell).replace("\r", "\n").split("\n") if ln.strip()}
+            if "ship" not in pos and "اسم السفينة" in lines:
+                pos["ship"] = j
+                continue
+            for f, names in _CT_HEAD_LINES.items():
+                if f not in pos and f != "ship" and lines & names:
+                    pos[f] = j
+                    break
+        if "container" in pos and "invoice" in pos:
+            return hi, pos
+    return None, {}
+
+
+def ct_read_tracking(raw, today=None):
+    """الصفوف الخام من Container tracking -> قايمة سجلات بمفاتيح China (فيها _status_text و _warn). صف بدون حاوية ولا شحنة بيتجاهل."""
+    today = today or datetime.now()
+    hi, pos = _ct_head_map(raw or [])
+    if hi is None:
+        return []
+    g = lambda row, f: (str(row[pos[f]]).strip() if f in pos and pos[f] < len(row) else "")
+    out = []
+    for i, row in enumerate(raw[hi + 1:], start=hi + 2):
+        cno, inv = ct_norm_ref(g(row, "container")), ct_norm_ref(g(row, "invoice"))
+        if not cno and not inv:
+            continue
+        m = re.match(r"^ST(\d{2})", inv)
+        year = 2000 + int(m.group(1)) if m else today.year
+        warn = []
+        sail0 = ct_parse_date(g(row, "sailing"), year)
+        load = ct_parse_date(g(row, "loading"), year, limit=sail0 or None)
+        if g(row, "loading") and not load:
+            warn.append(f"تاريخ التحميل «{g(row, 'loading')}» مش واضح (ممكن يكون يوم 2 أو 20 مثلاً) — اكتبه بصيغة 2026/09/20")
+        anchor = load or None
+        sail = ct_parse_date(g(row, "sailing"), year, anchor, floor=load or None)
+        anchor = anchor or sail or None
+        eta = ct_parse_date(g(row, "eta"), year, anchor)
+        for f, val in (("sailing", sail), ("eta", eta)):
+            if g(row, f) and not val:
+                warn.append(f"«{g(row, f)}» مش تاريخ مفهوم")
+        ship, voy = g(row, "ship"), ""
+        toks = ship.split()
+        if len(toks) > 1 and re.fullmatch(r"[A-Z]{0,3}\d{2,5}[A-Z]?", toks[-1].upper()):
+            voy, ship = toks[-1].upper(), " ".join(toks[:-1])
+        rec = {"shipment_id": inv, "container_no": cno, "seal_no": g(row, "seal"), "bl_no": ct_norm_ref(g(row, "bl")),
+               "actual_load_date": load, "actual_etd": sail, "destination_port": g(row, "dest").upper(), "eta_port": eta,
+               "vessel_name": ship, "voyage_no": voy, "tracking_url": g(row, "url"), "last_known_location": g(row, "transfer_loc"),
+               "port_arrival_actual": ct_parse_date(g(row, "actual"), year), "warehouse_arrival_actual": ct_parse_date(g(row, "received"), year),
+               "origin_location": g(row, "origin"), "_status_text": g(row, "status"), "_warn": warn, "_row": i}
+        out.append(rec)
+    return out
+
+
+def ct_sync_plan(china_raw, tracking_recs):
+    """بيقارن شيت China (الخام) بسجلات التتبع ويرجّع {"updates": [(رقم الصف في الشيت, مفتاح العمود, القيمة)], "notes": [...], "rows": عدد الصفوف المتأثرة}.
+    الأولوية للمرجع: رقم الحاوية ثم رقم البوليصة ثم رقم الشحنة. لو المرجع بيطلّع أكتر من حاوية: بنملا بس الحقول اللي متفقة عليها.
+    قيمة التتبع بتكتب فوق قيمة China (ما عدا رقم الشحنة/الحاوية/المنشأ: بتتملا لو فاضية بس). الحالة بتتقدم للأمام بس."""
+    hi = None
+    for i, r in enumerate((china_raw or [])[:8]):
+        low = {str(c).strip() for c in r}
+        if "container_no" in low and "internal_order_no" in low:
+            hi = i
+            break
+    if hi is None or not tracking_recs:
+        return {"updates": [], "notes": [], "rows": 0, "pos": {}}
+    pos = {str(c).strip(): j for j, c in enumerate(china_raw[hi]) if str(c).strip() in CHINA_FLAT_KEYS}
+    by_c, by_bl, by_inv = {}, {}, {}
+    for t in tracking_recs:
+        if t["container_no"]:
+            by_c.setdefault(t["container_no"], []).append(t)
+        if t["bl_no"]:
+            by_bl.setdefault(t["bl_no"], []).append(t)
+        if t["shipment_id"]:
+            by_inv.setdefault(t["shipment_id"], []).append(t)
+    updates, notes, rows_changed, seen_notes = [], [], 0, set()
+    note = lambda msg: (msg not in seen_notes) and (seen_notes.add(msg) or notes.append(msg))
+    for t in tracking_recs:
+        for w in t["_warn"]:
+            note(f"⚠️ سطر {t['_row']} في Container tracking ({t['container_no'] or t['shipment_id']}): {w} — اتسابت فاضية")
+    for i in range(hi + 1, len(china_raw)):
+        row = china_raw[i]
+        cur = {k: (str(row[j]).strip() if j < len(row) else "") for k, j in pos.items()}
+        if not any(cur.get(k) for k in CHINA_FLAT_INPUT_KEYS) or _china_is_label_row(cur):
+            continue
+        hinted = {k for k, v in cur.items() if _cf_is_hint(v)}
+        cur = {k: ("" if k in hinted else v) for k, v in cur.items()}      # نصوص الإرشاد مش بيانات: تعتبر فاضية
+        cno, bl, sid = ct_norm_ref(cur.get("container_no")), ct_norm_ref(cur.get("bl_no")), ct_norm_ref(cur.get("shipment_id"))
+        recs = by_c.get(cno) if cno else None
+        if not recs and bl:
+            recs = by_bl.get(bl)
+        if not recs and sid:
+            recs = by_inv.get(sid)
+        if not recs:
+            continue
+        if len(recs) > 1 and ct_norm_ref(cur.get("seal_no")):          # أكتر من حاوية على نفس البوليصة: نحدد الحاوية بالختم
+            by_seal = [r for r in recs if ct_norm_ref(r.get("seal_no")) == ct_norm_ref(cur.get("seal_no"))]
+            recs = by_seal or recs
+        if len(recs) == 1:
+            vals = {k: recs[0].get(k, "") for k, _ in CT_FIELD_MAP}
+            status_txt = recs[0]["_status_text"]
+        else:
+            vals = {}
+            for k, _ in CT_FIELD_MAP:
+                s = {r.get(k, "") for r in recs}
+                vals[k] = next(iter(s)) if len(s) == 1 else ""
+            ss_ = {r["_status_text"] for r in recs}
+            status_txt = next(iter(ss_)) if len(ss_) == 1 else ""
+            if not cno:
+                note(f"ℹ️ {sid or bl}: عليها {len(recs)} حاويات ({'، '.join(r['container_no'] for r in recs)}) — اكتب رقم الحاوية في China عشان تتملا باقي بياناتها")
+        new, ch = dict(cur), {}
+        for k, _src in CT_FIELD_MAP:
+            tv = vals.get(k, "")
+            if not tv:
+                continue
+            cv = cur.get(k, "")
+            if k in _CT_DATE_KEYS:
+                cmp_ = ct_parse_date(cv, int(tv[:4]))
+                same = (cmp_ == tv)
+            else:
+                same = ct_norm_ref(cv) == ct_norm_ref(tv) if k in _CT_IDENTITY or k in ("seal_no", "bl_no") else cv.strip().upper() == tv.strip().upper()
+            if same:
+                continue
+            if k in _CT_IDENTITY and cv:
+                note(f"⚠️ صف {i + 1} في China: {k} = «{cv}» بينما Container tracking فيه «{tv}» — ما اتغيّرش")
+                continue
+            if k in _CT_FILL_ONLY and cv:
+                continue
+            if k in hinted:
+                note(f"⚠️ صف {i + 1} في China: {k} فيه نص إرشاد/معادلة — ما كتبتش «{tv}» فوقه (اتأكد إنه خلية عادية)")
+                continue
+            ch[k] = tv
+            new[k] = tv
+        code = china_row_status(new)
+        floor = _cs_floor(new, code)
+        if "مستلم" in status_txt and (not code or _cs_prog(code) >= 0) and _cs_prog("Delivered to Warehouse") > _cs_prog(floor):
+            floor = "Delivered to Warehouse"
+        if floor and floor != code and _cs_prog(floor) > _cs_prog(code):
+            ch["status"] = china_status_label(floor)
+        if ch:
+            rows_changed += 1
+            for k, v in ch.items():
+                updates.append((i + 1, k, v))
+    return {"updates": updates, "notes": notes, "rows": rows_changed, "pos": pos}
+
+
+# ══════════════════════════════════════════════
+# متابعة المنافسين (بوت noon_tracker → تابات NoonTrack_* في جوجل شيت) | Noon competitor tracking
+# ══════════════════════════════════════════════
+# البوت المكتبي (noon_tracker.py) بيكتب 3 تابات (بتتعمل أول مرة): منتجاتنا + البائعين + المنافسين.
+# هنا بنقراهم ونعرض نتيجة كل SKU نون في سلايدر تحت كارت المبيعات. المفتاح = SKU بدون -1 في آخره.
+NOON_TRACK_TABS = ("NoonTrack_Products", "NoonTrack_Offers", "NoonTrack_Comps")
+
+def noon_track_key(sku):
+    """Z123...Z-1 -> Z123...Z (نفس صيغة البوت)."""
+    return re.sub(r"-\d+$", "", str(sku or "").strip().upper())
+
+def _nt_dicts(rows):
+    if not rows:
+        return []
+    hdr = [str(h).strip() for h in rows[0]]
+    out = []
+    for r in rows[1:]:
+        if not any(str(c).strip() for c in r):
+            continue
+        out.append({h: (r[i] if i < len(r) else "") for i, h in enumerate(hdr) if h})
+    return out
+
+_NT_AR = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+def _nt_num(v):
+    """رقم من خلية الشيت: بيفهم الأرقام العربية والفاصلة العشرية العربية (٫) وفاصل الآلاف (٬) والفاصلة العادية."""
+    try:
+        s = str(v).strip().translate(_NT_AR)
+        s = s.replace("٫", ".").replace("٬", "").replace("\u202f", "").replace("\xa0", "").replace(" ", "").replace("،", ",")
+        if s in ("", "nan", "None", "-"):
+            return None
+        if "," in s:
+            if "." in s or re.fullmatch(r"-?\d{1,3}(,\d{3})+", s):
+                s = s.replace(",", "")
+            else:
+                s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
+
+def _nt_fmt(v, nd=2):
+    n = _nt_num(v)
+    if n is None:
+        return str(v or "—") or "—"
+    return f"{n:,.{nd}f}".rstrip("0").rstrip(".") if nd else f"{n:,.0f}"
+
+def _nt_gap(price, mine):
+    """فرق سعر الطرف التاني عن سعرنا بالإشارة: (النص, اللون). −8.49 = سعره أقل من سعرنا، +16 = أعلى."""
+    if price is None or not mine:
+        return "", "#cbd5e1"
+    d = round(price - mine, 2)
+    if d == 0:
+        return "\u200e=", "#cbd5e1"
+    if d < 0:
+        return f"\u200e−{_nt_fmt(abs(d))}", "#fca5a5"
+    return f"\u200e+{_nt_fmt(d)}", "#86efac"
+
+def build_noon_track(products_rows, offers_rows, comps_rows):
+    """يرجع {SKU: {"p": صف المنتج, "offers": [...], "comps": [...]}} من صفوف التابات الخام (القوايم)."""
+    out = {}
+    for p in _nt_dicts(products_rows):
+        k = noon_track_key(p.get("SKU"))
+        if k:
+            out[k] = {"p": p, "offers": [], "comps": []}
+    for o in _nt_dicts(offers_rows):
+        e = out.get(noon_track_key(o.get("SKU")))
+        if e is not None:
+            e["offers"].append(o)
+    for c in _nt_dicts(comps_rows):
+        e = out.get(noon_track_key(c.get("SKU تبعنا")))
+        if e is not None:
+            e["comps"].append(c)
+    for e in out.values():
+        e["offers"].sort(key=lambda o: _nt_num(o.get("ترتيب نون")) or 999)
+        e["comps"].sort(key=lambda c: (_nt_num(c.get("الفرق (المنافس - إحنا)")) if _nt_num(c.get("الفرق (المنافس - إحنا)")) is not None else 9e9))
+    return out
+
+def noon_track_label(e):
+    """عنوان السلايدر: عدد المنافسين + التقييم + تحذير لو فيه منافس أرخص."""
+    p = e["p"]
+    bits = ["🔎 المنافسين والتقييمات"]
+    if e["comps"]:
+        bits.append(f"({len(e['comps'])})")
+    r = _nt_num(p.get("التقييم"))
+    if r:
+        bits.append(f"⭐ {r:g}")
+    if any(c.get("أرخص من مين") == "المنافس أرخص" for c in e["comps"]):
+        bits.append("🔴")
+    elif p.get("إحنا البوكس") == "لا" and p.get("متجرنا موجود") == "نعم":
+        bits.append("🟠")
+    return " ".join(bits)
+
+def _nt_h(x):
+    import html as _html
+    return _html.escape(str(x if x is not None else ""))
+
+def _nt_stale(stamp, days=2):
+    try:
+        return (datetime.now() - datetime.strptime(str(stamp).strip()[:16], "%Y-%m-%d %H:%M")).days >= days
+    except Exception:
+        return False
+
+def noon_track_html(e, our_price=None):
+    """HTML (rtl) لتفاصيل المنافسة لـ SKU واحد: ملخص + البائعين + المنافسين. our_price = سعرنا الاحتياطي."""
+    p = e["p"]
+    mine = _nt_num(p.get("سعرنا")) or (float(our_price) if our_price else None)
+    chip = ('<span style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:1px 8px;'
+            'font-size:12px;color:#e2e8f0;white-space:nowrap;display:inline-block;margin:2px 2px;">{}</span>')
+    th = 'style="padding:3px 8px;text-align:right;color:#94a3b8;font-weight:600;border-bottom:1px solid #334155;white-space:nowrap;"'
+    td = 'style="padding:3px 8px;text-align:right;color:#e2e8f0;border-bottom:1px solid #1e293b;white-space:nowrap;"'
+    parts = ['<div dir="rtl" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px 10px;'
+             'font-size:12.5px;color:#e2e8f0;">']
+
+    status = p.get("الحالة", "")
+    if status and status != "تم":
+        parts.append(f'<div style="color:#fbbf24;margin-bottom:4px;">⚠️ {_nt_h(status)}</div>')
+
+    chips = []
+    rating, rc = _nt_num(p.get("التقييم")), _nt_num(p.get("عدد التقييمات"))
+    if rating:
+        chips.append(f"⭐ <b dir='ltr'>{rating:g}</b> ({rc:,.0f} تقييم)" if rc else f"⭐ <b dir='ltr'>{rating:g}</b>")
+    if p.get("صاحب البوكس"):
+        fbn = " · FBN" if p.get("البوكس FBN") == "نعم" else ""
+        _bg, _bc = _nt_gap(_nt_num(p.get("سعر البوكس")), mine)
+        _bgt = f" <span style='color:{_bc};'>({_bg})</span>" if (_bg and p.get("إحنا البوكس") != "نعم") else ""
+        chips.append(f"🏆 البوكس: <b>{_nt_h(p['صاحب البوكس'])}</b> <b dir='ltr'>{_nt_fmt(p.get('سعر البوكس'))}</b>{fbn}{_bgt}")
+    if p.get("إحنا البوكس") == "نعم":
+        chips.append('<span style="color:#4ade80;font-weight:700;">✅ إحنا البوكس</span>')
+    elif p.get("متجرنا موجود") == "نعم":
+        chips.append('<span style="color:#fbbf24;font-weight:700;">❌ مش إحنا البوكس</span>')
+    elif p.get("متجرنا موجود") == "لا":
+        chips.append('<span style="color:#f87171;font-weight:700;">🚫 متجرنا مش على المنتج</span>')
+    if mine:
+        rk = f" · ترتيبنا {_nt_h(p.get('ترتيبنا'))} من {_nt_h(p.get('عدد البائعين'))}" if p.get("ترتيبنا") else ""
+        chips.append(f"💵 سعرنا <b dir='ltr'>{_nt_fmt(mine)}</b>{rk}")
+    if _nt_num(p.get("أقل سعر")):
+        gtxt, gcol = _nt_gap(_nt_num(p.get("أقل سعر")), mine)
+        dtxt = f" <span style='color:{gcol};'>({gtxt})</span>" if gtxt else ""
+        chips.append(f"🔻 أقل سعر <b dir='ltr'>{_nt_fmt(p.get('أقل سعر'))}</b> — {_nt_h(p.get('أقل بائع'))}{dtxt}")
+    if _nt_num(p.get("نسبة الخصم %")):
+        chips.append(f"🏷️ خصم {_nt_fmt(p.get('نسبة الخصم %'), 1)}%")
+    if p.get("التوصيل"):
+        chips.append(f"🚚 {_nt_h(p['التوصيل'])}")
+    if p.get("ترتيب/شارات"):
+        chips.append(f"🏅 {_nt_h(p['ترتيب/شارات'])}")
+    if p.get("الرابط"):
+        chips.append(f'<a href="{_nt_h(p["الرابط"])}" target="_blank" style="color:#60a5fa;">🔗 المنتج على noon.com</a>')
+    parts.append("".join(chip.format(c) for c in chips))
+
+    if e["offers"]:
+        parts.append('<div style="margin-top:8px;font-weight:700;color:#cbd5e1;">🛒 البائعين على المنتج</div>'
+                     '<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;font-size:12.5px;">'
+                     f'<tr><th {th}>#</th><th {th}>البائع</th><th {th}>السعر</th><th {th}>الفرق عن سعرنا</th>'
+                     f'<th {th}>FBN</th><th {th}>مخزون</th><th {th}>تقييم البائع</th></tr>')
+        for o in e["offers"][:12]:
+            ours = o.get("متجرنا") == "نعم"
+            bg = "background:#052e1655;" if ours else ("background:#1e3a5f55;" if o.get("صاحب البوكس") == "نعم" else "")
+            nm = _nt_h(o.get("البائع")) + (" 🏆" if o.get("صاحب البوكس") == "نعم" else "") + (" (إحنا)" if ours else "")
+            sr = _nt_num(o.get("تقييم البائع"))
+            src = _nt_num(o.get("عدد تقييمات البائع"))
+            srt = (f"⭐ {sr:g}" + (f" ({src:,.0f})" if src else "")) if sr else "—"
+            _og, _oc = ("", "#cbd5e1") if ours else _nt_gap(_nt_num(o.get("السعر النهائي")), mine)
+            parts.append(f'<tr style="{bg}"><td {td}>{_nt_h(o.get("ترتيب نون"))}</td><td {td}>{nm}</td>'
+                         f'<td {td} dir="ltr">{_nt_fmt(o.get("السعر النهائي"))}</td>'
+                         f'<td {td}><span style="color:{_oc};">{_og or "—"}</span></td>'
+                         f'<td {td}>{"✔" if o.get("FBN") == "نعم" else "—"}</td>'
+                         f'<td {td}>{_nt_h(o.get("المخزون")) or "—"}</td><td {td}>{srt}</td></tr>')
+        parts.append("</table></div>")
+
+    if e["comps"]:
+        parts.append('<div style="margin-top:8px;font-weight:700;color:#cbd5e1;">⚔️ المنافسين</div>'
+                     '<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;font-size:12.5px;">'
+                     f'<tr><th {th}>المنافس</th><th {th}>صاحب البوكس</th><th {th}>سعره</th><th {th}>الفرق عن سعرنا</th>'
+                     f'<th {th}>تقييم</th><th {th}>FBN</th></tr>')
+        for c in e["comps"][:15]:
+            cpr = _nt_num(c.get("سعر المنافس"))
+            if cpr is not None and mine:
+                dd = round(cpr - mine, 2)
+                who = "المنافس أرخص" if dd < 0 else ("إحنا أرخص" if dd > 0 else "نفس السعر")
+            else:
+                who = c.get("أرخص من مين", "")
+            col = "#fca5a5" if who == "المنافس أرخص" else ("#86efac" if who == "إحنا أرخص" else "#e2e8f0")
+            dtxt, _ = _nt_gap(cpr, mine) if (cpr is not None and mine) else ("", "")
+            dtxt = dtxt or "—"
+            name = _nt_h(c.get("اسم منتج المنافس"))[:48]
+            link = c.get("الرابط")
+            sku_c = _nt_h(c.get("SKU المنافس"))
+            sku_html = (f'<a href="{_nt_h(link)}" target="_blank" style="color:#60a5fa;">{sku_c}</a>' if link else sku_c)
+            cr, crc = _nt_num(c.get("التقييم")), _nt_num(c.get("عدد التقييمات"))
+            crt = (f"⭐ {cr:g}" + (f" ({crc:,.0f})" if crc else "")) if cr else "—"
+            parts.append(f'<tr><td {td}>{sku_html}<br><span style="color:#94a3b8;font-size:11px;">{name}</span></td>'
+                         f'<td {td}>{_nt_h(c.get("بائع المنافس")) or "—"}</td>'
+                         f'<td {td} dir="ltr">{_nt_fmt(c.get("سعر المنافس"))}</td>'
+                         f'<td {td}><span style="color:{col};">{dtxt}</span></td>'
+                         f'<td {td}>{crt}</td><td {td}>{"✔" if c.get("FBN") == "نعم" else "—"}</td></tr>')
+        parts.append("</table></div>")
+
+    stamp = p.get("آخر تحديث", "")
+    if stamp:
+        stale = _nt_stale(stamp)
+        parts.append(f'<div style="margin-top:6px;font-size:11px;color:{"#fbbf24" if stale else "#94a3b8"};">'
+                     f'🕒 آخر تحديث من البوت: {_nt_h(stamp)}{" — قديم، شغّل البوت" if stale else ""}</div>')
+    parts.append("</div>")
+    return "".join(parts)
+
+
+_NT_OURS = set()
+
+def set_noon_our_names(names):
+    """أسماء/أكواد متاجرنا على نون (من إعدادات التطبيق + اللي البوت علّمها 'متجرنا') — بتتشال من المنافسين."""
+    global _NT_OURS
+    _NT_OURS = {str(n).strip().lower() for n in (names or []) if str(n).strip()}
+
+def noon_learn_our_names(track):
+    """أسماء البائعين اللي البوت علّمهم 'متجرنا = نعم' في أي عرض."""
+    out = set()
+    for e in track.values():
+        for o in e["offers"]:
+            if o.get("متجرنا") == "نعم":
+                for k in ("البائع", "كود البائع"):
+                    if o.get(k):
+                        out.add(str(o[k]).strip())
+    return out
+
+def _nt_is_ours_name(*vals):
+    return any(str(v).strip().lower() in _NT_OURS for v in vals if v)
+
+def noon_track_rivals(e, our_price=None):
+    """البوكس + باقي البائعين والمنافسين (غير متاجرنا) بأسعارهم وتقييمهم، الأقل سعرًا الأول."""
+    p = e["p"]
+    mine = _nt_num(p.get("سعرنا")) or (float(our_price) if our_price else None)
+    box, others = None, []
+    for o in e["offers"]:
+        pr = _nt_num(o.get("السعر النهائي"))
+        ours = o.get("متجرنا") == "نعم" or _nt_is_ours_name(o.get("البائع"), o.get("كود البائع"))
+        rt, rc = _nt_num(o.get("تقييم البائع")), _nt_num(o.get("عدد تقييمات البائع"))
+        if o.get("صاحب البوكس") == "نعم":
+            box = {"seller": o.get("البائع"), "price": pr, "fbn": o.get("FBN") == "نعم", "ours": ours}
+        elif not ours and pr:
+            others.append({"seller": o.get("البائع"), "price": pr, "fbn": o.get("FBN") == "نعم",
+                           "comp": False, "rating": rt, "rcount": rc})
+    if box is None and p.get("صاحب البوكس"):
+        box = {"seller": p.get("صاحب البوكس"), "price": _nt_num(p.get("سعر البوكس")),
+               "fbn": p.get("البوكس FBN") == "نعم",
+               "ours": p.get("إحنا البوكس") == "نعم" or _nt_is_ours_name(p.get("صاحب البوكس"), p.get("كود صاحب البوكس"))}
+    for c in e["comps"]:
+        pr = _nt_num(c.get("سعر المنافس"))
+        if pr and not _nt_is_ours_name(c.get("بائع المنافس"), c.get("كود بائع المنافس")):
+            others.append({"seller": c.get("بائع المنافس") or c.get("SKU المنافس"), "price": pr,
+                           "fbn": c.get("FBN") == "نعم", "comp": True,
+                           "rating": _nt_num(c.get("التقييم")), "rcount": _nt_num(c.get("عدد التقييمات"))})
+    others.sort(key=lambda x: x["price"])
+    return {"mine": mine, "box": box, "others": others}
+
+def noon_track_rivals_html(e, our_price=None, max_show=6):
+    """كل معلومات المنافسة في كبسولات جنب صورة المنتج (من غير سلايدر)."""
+    p = e["p"]
+    r = noon_track_rivals(e, our_price)
+    mine = r["mine"]
+    chip = ('<span style="background:#0f172a;border:1px solid {b};border-radius:6px;padding:1px 8px;'
+            'font-size:12px;color:{c};white-space:nowrap;display:inline-block;margin:2px 3px 2px 0;">{t}</span>')
+    def gap_html(price):
+        g, col = _nt_gap(price, mine)
+        return f" <span dir='ltr' style='color:{col};font-weight:700;unicode-bidi:isolate;'>{g}</span>" if g else ""
+    def stars(rt, rc):
+        if not rt:
+            return ""
+        return f" ⭐{rt:g}" + (f" ({rc:,.0f})" if rc else "")
+    out = []
+    status = p.get("الحالة", "")
+    if status and status != "تم":
+        out.append(chip.format(b="#ca8a04", c="#fde68a", t=f"⚠️ {_nt_h(status)}"))
+    # تقييم منتجنا + سعرنا
+    rating, rc = _nt_num(p.get("التقييم")), _nt_num(p.get("عدد التقييمات"))
+    if rating:
+        out.append(chip.format(b="#475569", c="#e2e8f0", t=f"⭐ <b dir='ltr'>{rating:g}</b>" + (f" ({rc:,.0f} تقييم)" if rc else "")))
+    if mine:
+        rk = f" · ترتيبنا {_nt_h(p.get('ترتيبنا'))} من {_nt_h(p.get('عدد البائعين'))}" if p.get("ترتيبنا") else ""
+        out.append(chip.format(b="#475569", c="#e2e8f0", t=f"💵 سعرنا <b dir='ltr'>{_nt_fmt(mine)}</b>{rk}"))
+    # البوكس
+    box = r["box"]
+    if box and box["price"] is not None:
+        if box["ours"]:
+            out.append(chip.format(b="#16a34a", c="#4ade80", t=f"🏆 إحنا البوكس <b dir='ltr'>{_nt_fmt(box['price'])}</b>"))
+        else:
+            fbn = " · FBN" if box["fbn"] else ""
+            out.append(chip.format(b="#ca8a04", c="#fde68a",
+                                   t=f"🏆 البوكس: {_nt_h(box['seller'])} <b dir='ltr'>{_nt_fmt(box['price'])}</b>{fbn}"
+                                     + gap_html(box["price"])))
+    # كل منافس بسعره وفرقه (الأقل سعرًا الأول)
+    oth = r["others"]
+    for c in oth[:max_show]:
+        tag = " (منتج منافس)" if c["comp"] else ""
+        fbn = " · FBN" if c["fbn"] else ""
+        out.append(chip.format(b="#475569", c="#e2e8f0",
+                               t=f"⚔️ {_nt_h(c['seller'])} <b dir='ltr'>{_nt_fmt(c['price'])}</b>{fbn}{tag}"
+                                 + stars(c["rating"], c["rcount"]) + gap_html(c["price"])))
+    if len(oth) > max_show:
+        out.append(chip.format(b="#475569", c="#cbd5e1", t=f"+{len(oth) - max_show} منافس كمان"))
+    # ملخص واضح
+    if oth:
+        lo = oth[0]
+        txt = (f"📊 عدد المنافسين: <b>{len(oth)}</b> · أقل سعر عندهم: <b dir='ltr'>{_nt_fmt(lo['price'])}</b>"
+               + (f" (الفرق عن سعرنا{gap_html(lo['price'])})" if mine else ""))
+        out.append(chip.format(b="#334155", c="#cbd5e1", t=txt))
+    # باقي معلومات الصفحة
+    who = "منتجنا" if p.get("إحنا البوكس") == "نعم" else f"{_nt_h(p.get('صاحب البوكس') or 'البوكس')} (صاحب البوكس)"
+    if p.get("التوصيل"):
+        out.append(chip.format(b="#475569", c="#e2e8f0", t=f"🚚 توصيل {who}: {_nt_h(p['التوصيل'])}"))
+    if p.get("ترتيب/شارات"):
+        out.append(chip.format(b="#475569", c="#e2e8f0", t=f"🏅 شارة {who}: {_nt_h(p['ترتيب/شارات'])}"))
+    if p.get("الرابط"):
+        out.append(chip.format(b="#475569", c="#60a5fa",
+                               t=f'<a href="{_nt_h(p["الرابط"])}" target="_blank" style="color:#60a5fa;">🔗 المنتج على noon.com</a>'))
+    stamp = p.get("آخر تحديث", "")
+    if stamp:
+        stale = _nt_stale(stamp)
+        out.append(chip.format(b="#fbbf24" if stale else "#334155", c="#fbbf24" if stale else "#94a3b8",
+                               t=f"🕒 {_nt_h(stamp)}" + (" — قديم" if stale else "")))
+    out.append(chip.format(b="#334155", c="#64748b", t="calc v3-top"))
+    return "".join(out)
+
+
+def noon_price_alerts(track, skus, price_map=None):
+    """تنبيهات: اسكيوهات (من قايمة skus) فيها بائع/منافس سعره أقل من سعرنا. يرجع قايمة صفوف مرتبة بأكبر فرق."""
+    rows = []
+    price_map = price_map or {}
+    for sku in skus:
+        e = track.get(noon_track_key(sku))
+        if not e:
+            continue
+        r = noon_track_rivals(e, price_map.get(str(sku).upper()))
+        mine = r["mine"]
+        if not mine:
+            continue
+        cheaper = [o for o in r["others"] if o["price"] < mine]
+        box = r["box"]
+        if box and not box["ours"] and box["price"] is not None and box["price"] < mine \
+                and not any(abs(o["price"] - box["price"]) < 1e-9 for o in cheaper):
+            cheaper.append({"seller": box["seller"], "price": box["price"], "comp": False, "fbn": box["fbn"], "rating": None})
+        if not cheaper:
+            continue
+        cheaper.sort(key=lambda x: x["price"])
+        lo = cheaper[0]
+        p = e["p"]
+        rows.append({
+            "SKU": noon_track_key(sku),
+            "اسم المنتج": p.get("اسم المنتج", ""),
+            "سعرنا": round(mine, 2),
+            "أقل منافس": lo["seller"],
+            "سعر أقل منافس": round(lo["price"], 2),
+            "الفرق (سعره − سعرنا)": round(lo["price"] - mine, 2),
+            "نسبة الفرق %": round((lo["price"] - mine) / mine * 100, 1),
+            "نوع المنافس": "منتج منافس" if lo["comp"] else "بائع على نفس المنتج",
+            "عدد الأرخص مننا": len(cheaper),
+            "صاحب البوكس": (box or {}).get("seller") or "",
+            "إحنا البوكس": "نعم" if box and box["ours"] else "لا",
+            "آخر تحديث": p.get("آخر تحديث", ""),
+            "الرابط": p.get("الرابط", ""),
+        })
+    rows.sort(key=lambda x: x["الفرق (سعره − سعرنا)"])
+    return rows
+
+
+# ══════════════════════════════════════════════════════════════════════════
+import datetime as _dt   # (calc.py بيستورد datetime كلاس فوق — ده موديول للتواريخ)
+
+
+# ══ محرك ربحية الإعلانات والتوصيات (اقتراح فقط — مفيش أي تغيير تلقائي) ══
+# المبدأ: الإعلان ما بيتصنّفش «خاسر/أوقفه» بس لأن مصروفه أكبر من ربح المبيعات المنسوبة له —
+# بنحسب أثره على المنتج ككل (إجمالي مبيعاته وربحه) ونفصل المؤكد (أرقام فعلية) عن اللي لسه يحتاج اختبار.
+# ══════════════════════════════════════════════════════════════════════════
+ADS_RECO_CFG = {
+    "min_clicks_any": 40,          # أقل نقرات نحكم بيها بحد أدنى
+    "min_clicks_good": 150,        # نقرات كفاية لثقة أعلى
+    "zero_order_clicks": 120,      # نقرات كتير من غير أي طلب منسوب
+    "cover_critical": 5,           # أيام تغطية حرجة
+    "cover_ok": 14,                # أيام تغطية مريحة للزيادة
+    "ad_share_trim": 0.35,         # الإعلان بياكل ≥35% من ربح المنتج → تخفيض تجريبي
+    "ad_share_urgent": 1.0,        # الإعلان بياكل ≥100% من ربح المنتج ككل → مراجعة عاجلة
+    "ad_share_grow_max": 0.25,     # للزيادة: الإعلان ≤25% من الربح
+    "organic_dep": 0.6,            # نسبة المبيعات غير المنسوبة اللي نعتبرها اعتماد عضوي عالي
+    "roas_grow_factor": 1.5,       # للزيادة: ROAS ≥ 1.5× نقطة التعادل
+    "min_units": 5,                # أقل وحدات مباعة في الفترة لنتحكم
+    "trim_step_pct": 20,           # خطوة التخفيض المقترحة
+    "trim_every_days": 3,
+    "retreat_units_drop": 0.25,    # تراجع لو مبيعات اليوم نزلت ≥25% عن قبل التجربة
+    "retreat_profit_drop": 0.15,   # تراجع لو الربح اليومي بعد الإعلان نزل ≥15%
+}
+
+ADS_RECO_LEVELS = {
+    "increase":   ("🟢 زيادة",          "#16a34a", "#dcfce7"),
+    "continue":   ("🔵 استمرار",        "#2563eb", "#dbeafe"),
+    "watch":      ("⚪ استمرار — راقب", "#6b7280", "#f3f4f6"),
+    "trim":       ("🟡 تخفيض تجريبي",   "#b45309", "#fef3c7"),
+    "urgent":     ("🔴 مراجعة عاجلة",   "#dc2626", "#fee2e2"),
+    "test_pause": ("🟣 اختبار إيقاف",   "#7c3aed", "#ede9fe"),
+}
+
+
+def _ah_f(v):
+    """نفس تحويل الأرقام المستخدم في get_ads_map (بيتعامل مع الفاصلة العربية والنسبة المئوية)."""
+    try:
+        return _f2(v)
+    except Exception:
+        return 0.0
+
+
+def ads_hist_parse(rows):
+    """AdsHistory (قوايم من الشيت) -> ({SKU_key: {date: {views,clicks,orders,atc,spends,revenue}}}, {التواريخ الموجودة})."""
+    out, known = {}, set()
+    if not rows or len(rows) < 2:
+        return out, known
+    hdr = [str(h).strip() for h in rows[0]]
+    ix = {h: i for i, h in enumerate(hdr)}
+    def g(r, k):
+        i = ix.get(k)
+        return r[i] if i is not None and i < len(r) else ""
+    for r in rows[1:]:
+        try:
+            d = _dt.date.fromisoformat(str(g(r, "Date")).strip()[:10])
+        except Exception:
+            continue
+        known.add(d)
+        k = noon_track_key(g(r, "SKU"))
+        if not k:
+            continue
+        e = out.setdefault(k, {}).setdefault(d, {"views": 0.0, "clicks": 0.0, "orders": 0.0, "atc": 0.0, "spends": 0.0, "revenue": 0.0})
+        for a, b in (("views", "Views"), ("clicks", "Clicks"), ("orders", "Orders"), ("atc", "ATC"), ("spends", "Spends"), ("revenue", "Revenue")):
+            e[a] += _ah_f(g(r, b))
+    return out, known
+
+
+def ads_mtd_parse(rows):
+    """AdsMonthly (قوايم) -> {SKU_key: {views,clicks,orders,atc,spends,revenue}} + (بداية, نهاية) الفترة لو موجودة."""
+    out, period = {}, None
+    if not rows or len(rows) < 2:
+        return out, period
+    hdr = [str(h).strip() for h in rows[0]]
+    ix = {h: i for i, h in enumerate(hdr)}
+    def g(r, k):
+        i = ix.get(k)
+        return r[i] if i is not None and i < len(r) else ""
+    for r in rows[1:]:
+        k = noon_track_key(g(r, "SKU"))
+        if not k:
+            continue
+        if period is None:
+            try:
+                period = (_dt.date.fromisoformat(str(g(r, "Start Date"))[:10]), _dt.date.fromisoformat(str(g(r, "End Date"))[:10]))
+            except Exception:
+                pass
+        e = out.setdefault(k, {"views": 0.0, "clicks": 0.0, "orders": 0.0, "atc": 0.0, "spends": 0.0, "revenue": 0.0})
+        for a, b in (("views", "Views"), ("clicks", "Clicks"), ("orders", "Orders"), ("atc", "ATC"), ("spends", "Spends"), ("revenue", "Revenue")):
+            e[a] += _ah_f(g(r, b))
+    return out, period
+
+
+def ads_camp_hist_parse(rows):
+    """AdsCampaignHist -> قايمة dicts (بأسماء الأعمدة)، مرتبة بالتاريخ."""
+    if not rows or len(rows) < 2:
+        return []
+    hdr = [str(h).strip() for h in rows[0]]
+    out = [{h: (r[i] if i < len(r) else "") for i, h in enumerate(hdr) if h} for r in rows[1:]]
+    out.sort(key=lambda x: str(x.get("Date", "")))
+    return out
+
+
+def _ads_window_metrics(inp, dates, mtd=False):
+    """مقاييس فترة واحدة. الإعلان بيتحسب بس على الأيام المعروفة في التاريخ (الأيام اللي البوت سجّلها)، والمبيعات لنفس الأيام."""
+    price, up = inp.get("price"), inp.get("unit_profit")
+    units = inp.get("units_by_date") or {}
+    if mtd:
+        a = inp.get("ads_mtd") or {}
+        cov = list(dates)
+        sp, ao, ar, ck, vw = (a.get("spends", 0), a.get("orders", 0), a.get("revenue", 0), a.get("clicks", 0), a.get("views", 0))
+    else:
+        known, ads = inp.get("known_days") or set(), inp.get("ads_by_date") or {}
+        cov = [d for d in dates if d in known]
+        sp = sum((ads.get(d) or {}).get("spends", 0) for d in cov)
+        ao = sum((ads.get(d) or {}).get("orders", 0) for d in cov)
+        ar = sum((ads.get(d) or {}).get("revenue", 0) for d in cov)
+        ck = sum((ads.get(d) or {}).get("clicks", 0) for d in cov)
+        vw = sum((ads.get(d) or {}).get("views", 0) for d in cov)
+    u = sum(units.get(d, 0) for d in cov)
+    n = max(len(cov), 1)
+    sales = u * price if price else None
+    profit_before = u * up if up is not None else None
+    m = {
+        "days": len(dates), "cov_days": len(cov), "spend": sp, "ad_orders": ao, "ad_revenue": ar, "clicks": ck, "views": vw,
+        "units": u, "sales": sales,
+        "roas": (ar / sp) if sp > 0 else None,
+        "tacos": (sp / sales) if (sales and sales > 0) else None,
+        "cpc": (sp / ck) if ck > 0 else None,
+        "cvr": (ao / ck) if ck > 0 else None,
+        "organic_units": max(u - ao, 0), "organic_share": (max(u - ao, 0) / u) if u > 0 else None,
+        "attrib_over_total": ao > u * 1.05 and u > 0,      # منسوب أكتر من إجمالي المبيعات (فترة إسناد نون أطول من اليوم)
+        "profit_before": profit_before,
+        "profit_after": (profit_before - sp) if profit_before is not None else None,
+        "ad_share": (sp / profit_before) if (profit_before and profit_before > 0) else None,
+        "attrib_profit": (ao * up) if up is not None else None,
+        "naive_result": (ao * up - sp) if up is not None else None,
+        "units_pd": u / n, "spend_pd": sp / n,
+        "profit_after_pd": ((profit_before - sp) / n) if profit_before is not None else None,
+        "be_roas": (price / up) if (price and up and up > 0) else None,
+        "margin": (up / price) if (price and up is not None and price > 0) else None,
+    }
+    return m
+
+
+def ads_reco_for_sku(inp, cfg=None):
+    """توصية واحدة لـ SKU: level / reasons / confirmed / needs_test / confidence / suggestion / trend.
+    inp: sku, price, unit_profit (None لو مش معروف), cost_missing, com_missing, units_by_date, ads_by_date, known_days,
+         ads_mtd (اختياري — لقطة الشهر لو مفيش تاريخ يومي)، stock, comp {box_ours, gap_lowest, n_cheaper, rating}, today."""
+    c = dict(ADS_RECO_CFG, **(cfg or {}))
+    today = inp.get("today") or _dt.date.today()
+    w7 = [today - _dt.timedelta(days=i) for i in range(1, 8)]
+    w_prev = [today - _dt.timedelta(days=i) for i in range(8, 15)]
+    m = _ads_window_metrics(inp, w7)
+    source = "daily"
+    if m["cov_days"] == 0 and inp.get("ads_mtd"):
+        first = today.replace(day=1) if today.day > 1 else (today - _dt.timedelta(days=1)).replace(day=1)
+        mtd_dates = [first + _dt.timedelta(days=i) for i in range((today - first).days)]
+        m = _ads_window_metrics(inp, mtd_dates, mtd=True)
+        source = "monthly"
+    mp = _ads_window_metrics(inp, w_prev) if source == "daily" else None
+    up, price, stock, comp = inp.get("unit_profit"), inp.get("price"), inp.get("stock"), inp.get("comp") or None
+    cover = None
+    if stock is not None:
+        avg = m["units_pd"] if m["units_pd"] > 0 else 0
+        cover = (stock / avg) if avg > 0 else 9999
+    reasons_u, flags, needs_test, confirmed = [], [], [], []
+    nz = lambda x, d=0.0: d if x is None else x
+    fmt = lambda x, d=2: f"{x:,.{d}f}"
+
+    # ── مؤكد: أرقام فعلية ──
+    confirmed.append(("المصروف", fmt(m["spend"])))
+    confirmed.append(("طلبات منسوبة للإعلان", fmt(m["ad_orders"], 0)))
+    confirmed.append(("إيراد منسوب", fmt(m["ad_revenue"])))
+    if m["units"]:
+        confirmed.append(("إجمالي وحدات المنتج", fmt(m["units"], 0)))
+        confirmed.append(("غير منسوب للإعلان (عضوي)", f"{fmt(m['organic_units'], 0)} ({m['organic_share'] * 100:.0f}%)"))
+    if m["roas"] is not None:
+        confirmed.append(("ROAS (عائد الإعلان)", fmt(m["roas"])))
+    if m["tacos"] is not None:
+        confirmed.append(("TACOS (تكلفة الإعلان من المبيعات)", f"{m['tacos'] * 100:.1f}%"))
+    if m["profit_before"] is not None:
+        confirmed.append(("ربح المنتج قبل الإعلان", fmt(m["profit_before"])))
+        confirmed.append(("ربح المنتج بعد الإعلان", fmt(m["profit_after"])))
+    if m["ad_share"] is not None:
+        confirmed.append(("الإعلان = من ربح المنتج", f"{m['ad_share'] * 100:.0f}%"))
+    if m["be_roas"]:
+        confirmed.append(("ROAS التعادل", fmt(m["be_roas"])))
+    if cover is not None:
+        confirmed.append(("أيام التغطية", "∞" if cover >= 9999 else fmt(cover, 0)))
+
+    # ── مراجعة عاجلة ──
+    if up is None:
+        reasons_u.append("ربح الوحدة غير معروف" + (" (تكلفة المنتج غير مسجلة)" if inp.get("cost_missing") else "") + (" (COM ناقص)" if inp.get("com_missing") else "")
+                         + " — مفيش حكم على الربحية قبل استكمال البيانات")
+    elif up <= 0:
+        reasons_u.append(f"كل وحدة بتتباع بربح {fmt(up)} (صفر/سالب) حتى قبل الإعلان — المشكلة في السعر أو التكلفة مش في الإعلان")
+    if cover is not None and (stock <= 0 or cover < c["cover_critical"]) and m["spend"] > 0:
+        reasons_u.append(f"المخزون {stock} وبيكفي " + ("0" if stock <= 0 else f"{fmt(cover, 0)}") + f" يوم بس والإعلان شغال — هتدفع على منتج ممكن يخلص")
+    if m["ad_share"] is not None and m["ad_share"] >= c["ad_share_urgent"]:
+        reasons_u.append(f"الإعلان بياكل {m['ad_share'] * 100:.0f}% من ربح المنتج ككل (المصروف {fmt(m['spend'])} مقابل ربح {fmt(m['profit_before'])}) — المنتج بعد الإعلان مش بيكسب")
+    if m["clicks"] >= c["zero_order_clicks"] and m["ad_orders"] == 0:
+        reasons_u.append(f"{fmt(m['clicks'], 0)} نقرة من غير أي طلب منسوب — راجع السعر والصور والمنافسين، مش بالضرورة وقف الإعلان")
+    if comp and comp.get("box_ours") is False and (comp.get("gap_lowest") or 0) < 0 and m["spend"] > 0 \
+            and (m["roas"] is None or (m["be_roas"] and m["roas"] < m["be_roas"])):
+        reasons_u.append(f"إحنا مش صاحب البوكس ومنافس أرخص بـ {fmt(abs(comp['gap_lowest']))} — الإعلان بيجيب زيارات لعرض مش بيكسب")
+
+    # ── ثقة البيانات ──
+    score, cn = 0, []
+    if source == "daily":
+        score += 2 if m["cov_days"] >= 7 else (1 if m["cov_days"] >= 3 else 0)
+        if m["cov_days"] < 3:
+            cn.append(f"تاريخ الإعلان {m['cov_days']} يوم بس")
+    else:
+        cn.append("بنستخدم لقطة الشهر (مفيش تاريخ يومي لسه)")
+    score += 2 if m["clicks"] >= c["min_clicks_good"] else (1 if m["clicks"] >= c["min_clicks_any"] else 0)
+    if m["clicks"] < c["min_clicks_any"]:
+        cn.append(f"نقرات قليلة ({fmt(m['clicks'], 0)})")
+    score += 2 if m["ad_orders"] >= 10 else (1 if m["ad_orders"] >= 3 else 0)
+    if m["ad_orders"] < 3:
+        cn.append(f"طلبات منسوبة قليلة ({fmt(m['ad_orders'], 0)})")
+    score += 1 if up is not None else 0
+    score += 1 if price else 0
+    if m["attrib_over_total"]:
+        cn.append("الطلبات المنسوبة أكبر من إجمالي مبيعات الفترة (نون بتنسب على فترة أطول من اليوم) — العضوي تقريبي")
+    else:
+        score += 1
+    if inp.get("cost_missing"):
+        cn.append("تكلفة المنتج غير مسجلة")
+    conf = "high" if score >= 7 else ("medium" if score >= 4 else "low")
+
+    # ── مستوى التوصية ──
+    level, suggestion = None, ""
+    if reasons_u:
+        level, suggestion = "urgent", "راجع المنتج الأول (سعر/مخزون/بيانات) قبل أي قرار على الميزانية. مفيش إيقاف تلقائي."
+    elif m["spend"] <= 0:
+        level = "watch"
+        reasons_u.append("مفيش مصروف في الفترة")
+    else:
+        organic_hi = m["organic_share"] is not None and m["organic_share"] >= c["organic_dep"] and not m["attrib_over_total"]
+        low_data = m["clicks"] < c["min_clicks_any"] and m["ad_orders"] < 3
+        losing_naive = m["naive_result"] is not None and m["naive_result"] < 0
+        if low_data:
+            level, suggestion = "watch", "بيانات قليلة — كمّل وراقب لحد ما النقرات/الطلبات تكفي للحكم."
+            reasons_u.append("مفيش بيانات كفاية للحكم")
+        elif losing_naive and organic_hi and (m["profit_after"] or 0) > 0 and m["units"] >= c["min_units"]:
+            level = "test_pause"
+            suggestion = ("جرّب إيقاف مؤقت (أو تخفيض كبير) لعدد أيام محدد وقارن مبيعات المنتج ككل: لو المبيعات الكلية ثابتة يبقى "
+                          "الإعلان مش هو اللي بيجيبها. ارجع فوراً لو نزلت.")
+            reasons_u.append(f"الإعلان لوحده مش بيغطي نفسه (نتيجة المنسوب {fmt(m['naive_result'])}) لكن {m['organic_share'] * 100:.0f}% من مبيعات المنتج بتيجي من غير إعلان والمنتج بعد الإعلان رابح ({fmt(m['profit_after'])})")
+            needs_test.append("هل المبيعات العضوية هتفضل لو وقفنا الإعلان؟ (ترتيب البحث ممكن يتأثر) — غير مؤكد قبل التجربة")
+        elif (m["ad_share"] is not None and m["ad_share"] >= c["ad_share_trim"]) or (losing_naive and m["units"] >= c["min_units"]):
+            level = "trim"
+            suggestion = f"خفّض الميزانية {c['trim_step_pct']}% لمدة {c['trim_every_days']} أيام وقارن مبيعات المنتج ككل والربح اليومي، وكمّل لو ثابتين."
+            if m["ad_share"] is not None:
+                reasons_u.append(f"الإعلان بياكل {m['ad_share'] * 100:.0f}% من ربح المنتج")
+            if losing_naive:
+                reasons_u.append(f"نتيجة المنسوب سالبة ({fmt(m['naive_result'])}) — ده مش كفاية للإيقاف، لسه محتاج نشوف أثره على المنتج ككل")
+            needs_test.append("تأثير التخفيض على المبيعات الكلية والترتيب — غير مؤكد قبل التجربة")
+        elif (m["be_roas"] and m["roas"] is not None and m["roas"] >= c["roas_grow_factor"] * m["be_roas"]
+              and (m["ad_share"] is None or m["ad_share"] <= c["ad_share_grow_max"])
+              and (cover is None or cover >= c["cover_ok"]) and m["ad_orders"] >= 3
+              and not (comp and comp.get("box_ours") is False and (comp.get("gap_lowest") or 0) < 0)):
+            level = "increase"
+            suggestion = "زوّد الميزانية 20% وراقب ROAS و TACOS كل يومين. لو ROAS نزل تحت التعادل ارجع."
+            reasons_u.append(f"ROAS {fmt(m['roas'])} أعلى من التعادل {fmt(m['be_roas'])} بوضوح، والإعلان {nz(m['ad_share']) * 100:.0f}% من الربح، والمخزون مريح")
+            needs_test.append("هل الزيادة هتحافظ على نفس الكفاءة؟ (العائد بيقل مع التوسّع)")
+        else:
+            level, suggestion = "continue", "كمّل زي ما هو وراقب."
+            reasons_u.append("الأرقام ضمن النطاق الطبيعي — ملقيناش سبب قوي للتغيير")
+            if comp and comp.get("box_ours") is False and (comp.get("gap_lowest") or 0) < 0:
+                reasons_u.append("تنبيه: إحنا مش صاحب البوكس ومنافس أرخص — راقب السعر قبل أي زيادة")
+    if source == "monthly" and conf == "high":
+        conf = "medium"
+    if level in ("trim", "test_pause", "increase") and conf == "high":
+        conf = "medium"          # أي توصية تعتمد على أثر لسه مجرّبناهوش: ما تتصنّفش ثقة عالية
+        cn.append("التوصية تعتمد على أثر محتاج اختبار")
+    if source == "daily" and m["cov_days"] < 3:
+        conf = "low"             # أقل من 3 أيام تاريخ = ثقة منخفضة لأي توصية
+    elif source == "daily" and m["cov_days"] < 7 and conf == "high":
+        conf = "medium"          # الثقة العالية محتاجة أسبوع بيانات على الأقل
+    if comp:
+        if comp.get("box_ours") is True:
+            flags.append("✅ إحنا صاحب البوكس")
+        elif comp.get("box_ours") is False:
+            flags.append("⚠️ مش صاحب البوكس")
+        if comp.get("n_cheaper"):
+            flags.append(f"{comp['n_cheaper']} منافس أرخص مننا")
+        if comp.get("rating"):
+            flags.append(f"⭐ {comp['rating']:g}")
+    needs_test.append("الترتيب العضوي/المدفوع بالكلمات وظهور إعلانات المنافسين: مش متاح لسه (بوت الترتيب — المرحلة 2)")
+
+    trend = None
+    if mp and m["cov_days"] >= 3 and mp["cov_days"] >= 3:
+        trend = {
+            "tacos": (m["tacos"], mp["tacos"]), "roas": (m["roas"], mp["roas"]),
+            "profit_after_pd": (m["profit_after_pd"], mp["profit_after_pd"]), "spend_pd": (m["spend_pd"], mp["spend_pd"]),
+            "units_pd": (m["units_pd"], mp["units_pd"]),
+        }
+    lab, col, bg = ADS_RECO_LEVELS[level]
+    return {"sku": inp.get("sku"), "level": level, "label": lab, "color": col, "bg": bg, "reasons": reasons_u, "suggestion": suggestion,
+            "confirmed": confirmed, "needs_test": needs_test, "confidence": conf, "conf_score": score, "conf_notes": cn,
+            "flags": flags, "m": m, "m_prev": mp, "trend": trend, "source": source, "cover": cover}
+
+
+def ads_reco_all(inputs, cfg=None):
+    """يشغّل التوصيات على قايمة inputs ويرتبها: عاجل ثم اختبار إيقاف ثم تخفيض ثم زيادة ثم استمرار."""
+    order = {"urgent": 0, "test_pause": 1, "trim": 2, "increase": 3, "continue": 4, "watch": 5}
+    res = [ads_reco_for_sku(i, cfg) for i in inputs]
+    res.sort(key=lambda r: (order[r["level"]], -(r["m"]["spend"] or 0)))
+    return res
+
+
+def ads_reco_rows(results):
+    """صفوف مسطّحة للجدول/الإكسيل."""
+    conf_ar = {"high": "عالية", "medium": "متوسطة", "low": "منخفضة"}
+    rows = []
+    for r in results:
+        m = r["m"]
+        rows.append({
+            "SKU": r["sku"], "التوصية": r["label"], "الثقة": conf_ar[r["confidence"]],
+            "المصروف": round(m["spend"], 2), "طلبات منسوبة": round(m["ad_orders"]), "إجمالي وحدات": round(m["units"]),
+            "عضوي %": round(m["organic_share"] * 100) if m["organic_share"] is not None else None,
+            "ROAS": round(m["roas"], 2) if m["roas"] is not None else None,
+            "TACOS %": round(m["tacos"] * 100, 1) if m["tacos"] is not None else None,
+            "ربح قبل الإعلان": round(m["profit_before"], 2) if m["profit_before"] is not None else None,
+            "ربح بعد الإعلان": round(m["profit_after"], 2) if m["profit_after"] is not None else None,
+            "الإعلان من الربح %": round(m["ad_share"] * 100) if m["ad_share"] is not None else None,
+            "أيام التغطية": (None if r["cover"] is None else (9999 if r["cover"] >= 9999 else round(r["cover"]))),
+            "السبب": " | ".join(r["reasons"]), "المقترح": r["suggestion"], "ملاحظات الثقة": " | ".join(r["conf_notes"]),
+        })
+    return rows
+
+
+def ads_experiment_eval(exp, units_by_date, ads_by_date, known_days, price, unit_profit, box_ours_now, today=None, cfg=None):
+    """تقييم تجربة تخفيض: مقارنة بعد البداية بخط الأساس المسجّل. يرجّع status: wait / hold / continue / retreat + أسباب وأرقام.
+    exp: start (date), base_units_pd, base_profit_pd, base_spend_pd, base_tacos, box_ours (bool|None), step_pct, every_days."""
+    c = dict(ADS_RECO_CFG, **(cfg or {}))
+    today = today or _dt.date.today()
+    start = exp["start"]
+    dates = [start + _dt.timedelta(days=i) for i in range(max((today - start).days, 0))]
+    cov = [d for d in dates if d in (known_days or set())]
+    n = len(dates)
+    out = {"days": n, "cov_days": len(cov), "status": "wait", "reasons": [], "numbers": [], "rank": "الترتيب: غير متاح (محتاج بوت الترتيب — المرحلة 2)"}
+    if n < 2:
+        out["reasons"].append("لسه بدري — مرّ أقل من يومين على بداية التجربة")
+        return out
+    ads = ads_by_date or {}
+    spend_pd = (sum((ads.get(d) or {}).get("spends", 0) for d in cov) / len(cov)) if cov else None
+    units_pd = sum((units_by_date or {}).get(d, 0) for d in dates) / n
+    profit_pd = (units_pd * unit_profit - (spend_pd or 0)) if unit_profit is not None and spend_pd is not None else None
+    b_u, b_p, b_s = exp.get("base_units_pd"), exp.get("base_profit_pd"), exp.get("base_spend_pd")
+    def pct(a, b):
+        return ((a - b) / b) if (a is not None and b not in (None, 0)) else None
+    du, dp, ds = pct(units_pd, b_u), pct(profit_pd, b_p), pct(spend_pd, b_s)
+    out["numbers"] = [("مبيعات يومية (وحدات)", f"{units_pd:.1f} ← كانت {b_u:.1f}" if b_u is not None else f"{units_pd:.1f}"),
+                      ("مصروف يومي", "—" if spend_pd is None else (f"{spend_pd:.1f} ← كان {b_s:.1f}" if b_s is not None else f"{spend_pd:.1f}")),
+                      ("ربح يومي بعد الإعلان", "—" if profit_pd is None else (f"{profit_pd:.1f} ← كان {b_p:.1f}" if b_p is not None else f"{profit_pd:.1f}"))]
+    retreat = []
+    if n >= 3 and du is not None and du <= -c["retreat_units_drop"]:
+        retreat.append(f"مبيعات المنتج الكلية نزلت {abs(du) * 100:.0f}% عن قبل التجربة")
+    if n >= 3 and dp is not None and b_p and dp <= -c["retreat_profit_drop"]:
+        retreat.append(f"الربح اليومي بعد الإعلان نزل {abs(dp) * 100:.0f}%")
+    if exp.get("box_ours") is True and box_ours_now is False:
+        retreat.append("فقدنا البوكس أثناء التجربة")
+    if retreat:
+        out["status"], out["reasons"] = "retreat", retreat + ["ارجع للميزانية القديمة وكمّل مراقبة"]
+    elif n >= int(exp.get("every_days") or c["trim_every_days"]):
+        out["status"] = "continue"
+        out["reasons"] = ["المبيعات والربح ثابتين بعد الخطوة — ممكن تكمل الخطوة اللي بعدها (تخفيض إضافي) أو تثبّت هنا"]
+        if du is not None and du >= 0.1:
+            out["reasons"].append("المبيعات زادت — غالباً الإعلان مش هو المحرّك الأساسي (مع مراعاة تغيّر الأيام)")
+    else:
+        out["status"], out["reasons"] = "hold", ["التجربة شغالة — كمّل لحد ما تخلص الفترة المحددة"]
+    return out
+
+
+# ── عرض التوصيات (HTML) + تجارب التخفيض ──
+ADS_EXP_HEADERS = ["ID", "Created", "SKU", "Type", "Start Date", "Base Units/Day", "Base Profit/Day", "Base Spend/Day",
+                   "Base TACOS", "Box Ours", "Step %", "Every Days", "Status", "Note", "Closed Date", "Result Note"]
+
+_ADS_CONF = {"high": ("عالية", "#15803d", "#dcfce7"), "medium": ("متوسطة", "#b45309", "#fef3c7"), "low": ("منخفضة", "#b91c1c", "#fee2e2")}
+
+
+def ads_exp_parse(rows):
+    """AdsExperiments (قوايم) -> قايمة تجارب (dicts بتواريخ/أرقام)."""
+    out = []
+    if not rows or len(rows) < 2:
+        return out
+    hdr = [str(h).strip() for h in rows[0]]
+    for r in rows[1:]:
+        d = {h: (r[i] if i < len(r) else "") for i, h in enumerate(hdr) if h}
+        if not d.get("ID"):
+            continue
+        try:
+            start = _dt.date.fromisoformat(str(d.get("Start Date"))[:10])
+        except Exception:
+            continue
+        d["start"] = start
+        d["base_units_pd"] = _nt_num(d.get("Base Units/Day"))
+        d["base_profit_pd"] = _nt_num(d.get("Base Profit/Day"))
+        d["base_spend_pd"] = _nt_num(d.get("Base Spend/Day"))
+        d["base_tacos"] = _nt_num(d.get("Base TACOS"))
+        bo = str(d.get("Box Ours") or "").strip()
+        d["box_ours"] = True if bo == "نعم" else (False if bo == "لا" else None)
+        d["step_pct"] = _nt_num(d.get("Step %"))
+        d["every_days"] = int(_nt_num(d.get("Every Days")) or 3)
+        d["active"] = str(d.get("Status") or "").strip() == "جارية"
+        out.append(d)
+    return out
+
+
+def _ads_pill(label, col, bg):
+    return (f'<span style="background:{bg};color:{col};border:1px solid {col};border-radius:999px;padding:2px 10px;'
+            f'font-weight:800;font-size:12px;white-space:nowrap;display:inline-block;">{_nt_h(label)}</span>')
+
+
+def ads_reco_table_html(results, limit=80):
+    """جدول التوصيات بألوان — بيعرض أول limit صف (الباقي في الإكسيل)."""
+    f = lambda x, d=0: "—" if x is None else f"{x:,.{d}f}"
+    th = "padding:6px 8px;text-align:right;font-size:11px;color:#6b7280;border-bottom:1px solid #e5e7eb;white-space:nowrap;"
+    td = "padding:6px 8px;font-size:12px;border-bottom:1px solid #f1f5f9;vertical-align:top;"
+    head = ["SKU", "التوصية", "الثقة", "المصروف", "ROAS<br><span style=\"font-weight:400\">عائد الإعلان</span>", "TACOS<br><span style=\"font-weight:400\">تكلفة الإعلان من المبيعات</span>", "ربح قبل", "ربح بعد", "الإعلان من الربح", "عضوي", "تغطية", "السبب الرئيسي"]
+    rows = []
+    for r in results[:limit]:
+        m = r["m"]
+        cl, cc, cb = _ADS_CONF[r["confidence"]]
+        cov = "—" if r["cover"] is None else ("∞" if r["cover"] >= 9999 else f"{r['cover']:.0f} يوم")
+        tac = "—" if m["tacos"] is None else "%.1f%%" % (m["tacos"] * 100)
+        ash = "—" if m["ad_share"] is None else "%.0f%%" % (m["ad_share"] * 100)
+        org = "—" if m["organic_share"] is None else "%.0f%%" % (m["organic_share"] * 100)
+        rows.append(
+            f'<tr style="background:{r["bg"]}22;">'
+            f'<td style="{td}font-family:monospace;direction:ltr;text-align:left;">{_nt_h(r["sku"])}</td>'
+            f'<td style="{td}">{_ads_pill(r["label"], r["color"], r["bg"])}</td>'
+            f'<td style="{td}">{_ads_pill(cl, cc, cb)}</td>'
+            f'<td style="{td}direction:ltr;text-align:right;">{f(m["spend"])}</td>'
+            f'<td style="{td}direction:ltr;text-align:right;">{f(m["roas"], 2)}</td>'
+            f'<td style="{td}direction:ltr;text-align:right;">{tac}</td>'
+            f'<td style="{td}direction:ltr;text-align:right;">{f(m["profit_before"])}</td>'
+            f'<td style="{td}direction:ltr;text-align:right;">{f(m["profit_after"])}</td>'
+            f'<td style="{td}direction:ltr;text-align:right;">{ash}</td>'
+            f'<td style="{td}direction:ltr;text-align:right;">{org}</td>'
+            f'<td style="{td}white-space:nowrap;">{cov}</td>'
+            f'<td style="{td}min-width:260px;">{_nt_h(r["reasons"][0] if r["reasons"] else "")}</td></tr>')
+    return ('<div style="overflow-x:auto;direction:rtl;"><table style="border-collapse:collapse;width:100%;background:#fff;'
+            'border:1px solid #e5e7eb;border-radius:10px;"><thead><tr>' + "".join(f'<th style="{th}">{h}</th>' for h in head)
+            + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+
+
+def _ads_trend_html(r):
+    t = r.get("trend")
+    if not t:
+        return '<div style="font-size:12px;color:#6b7280;">الترند: لسه مفيش تاريخ كفاية (محتاج 3 أيام على الأقل في كل أسبوع).</div>'
+    def item(name, pair, better_up, d=2, pct=False):
+        a, b = pair
+        if a is None or b is None:
+            return ""
+        diff = a - b
+        good = (diff >= 0) == better_up
+        col = "#15803d" if good else "#b91c1c"
+        arrow = "↑" if diff > 0 else ("↓" if diff < 0 else "=")
+        fa = f"{a * 100:.1f}%" if pct else f"{a:,.{d}f}"
+        fb = f"{b * 100:.1f}%" if pct else f"{b:,.{d}f}"
+        return f'<span style="margin-left:12px;">{name}: <b style="color:{col};direction:ltr;display:inline-block;">{arrow} {fa}</b> <span style="color:#6b7280;">(قبلها {fb})</span></span>'
+    return ('<div style="font-size:12px;color:#111827;">📈 آخر 7 أيام مقابل الـ 7 قبلها — '
+            + item("TACOS (تكلفة الإعلان من المبيعات)", t["tacos"], False, pct=True) + item("ROAS (عائد الإعلان)", t["roas"], True)
+            + item("ربح يومي بعد الإعلان", t["profit_after_pd"], True, 1) + item("وحدات يومية", t["units_pd"], True, 1) + "</div>")
+
+
+def ads_reco_card_html(r):
+    """تفاصيل توصية واحدة: السبب + الأرقام المؤكدة + اللي لسه يحتاج اختبار + الثقة."""
+    cl, cc, cb = _ADS_CONF[r["confidence"]]
+    lis = lambda xs: "".join(f'<li style="margin:3px 0;">{_nt_h(x)}</li>' for x in xs)
+    conf_rows = "".join(f'<tr><td style="padding:2px 0;color:#6b7280;font-size:12px;">{_nt_h(a)}</td>'
+                        f'<td style="padding:2px 10px;font-weight:700;font-size:12px;direction:ltr;text-align:left;">{_nt_h(b)}</td></tr>'
+                        for a, b in r["confirmed"])
+    src = ("" if r["source"] == "daily" else '<div style="font-size:11px;color:#b45309;margin-top:4px;">⚠️ الأرقام من لقطة الشهر (AdsMonthly) — مفيش تاريخ يومي لسه.</div>')
+    flags = " &nbsp; ".join(_nt_h(x) for x in r["flags"])
+    return (
+        f'<div style="direction:rtl;background:#fff;border:1px solid {r["color"]};border-right:6px solid {r["color"]};border-radius:12px;padding:14px 16px;">'
+        f'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">{_ads_pill(r["label"], r["color"], r["bg"])}'
+        f'<span style="font-size:12px;color:#6b7280;">ثقة البيانات:</span>{_ads_pill(cl, cc, cb)}'
+        f'<span style="font-family:monospace;direction:ltr;font-size:12px;color:#374151;">{_nt_h(r["sku"])}</span>'
+        f'<span style="font-size:12px;">{flags}</span></div>'
+        f'<div style="margin-top:10px;font-size:14px;font-weight:800;color:#111827;">المقترح: {_nt_h(r["suggestion"])}</div>'
+        f'<div style="margin-top:8px;font-size:12px;font-weight:700;color:#111827;">🔎 ليه؟</div><ul style="margin:4px 18px;padding:0;font-size:13px;color:#1f2937;">{lis(r["reasons"])}</ul>'
+        f'<div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:8px;">'
+        f'<div><div style="font-size:12px;font-weight:700;color:#15803d;">✅ أرقام مؤكدة (من البيانات)</div><table>{conf_rows}</table></div>'
+        f'<div style="flex:1;min-width:240px;"><div style="font-size:12px;font-weight:700;color:#b45309;">🧪 لسه يحتاج اختبار (مش مؤكد)</div>'
+        f'<ul style="margin:4px 18px;padding:0;font-size:12px;color:#374151;">{lis(r["needs_test"])}</ul>'
+        + (f'<div style="font-size:12px;font-weight:700;color:#b91c1c;margin-top:6px;">⚖️ ليه الثقة {cl}؟</div><ul style="margin:4px 18px;padding:0;font-size:12px;color:#374151;">{lis(r["conf_notes"])}</ul>' if r["conf_notes"] else "")
+        + f'</div></div><div style="margin-top:8px;">{_ads_trend_html(r)}</div>{src}'
+        f'<div style="margin-top:6px;font-size:11px;color:#6b7280;">اقتراح فقط — مفيش تغيير تلقائي في الميزانيات أو الحملات.</div></div>')
+
+
+def ads_exp_card_html(exp, ev, level_label=""):
+    stt = {"wait": ("⏳ لسه بدري", "#6b7280", "#f3f4f6"), "hold": ("🧪 التجربة شغالة", "#2563eb", "#dbeafe"),
+           "continue": ("✅ ثابتة — كمّل", "#16a34a", "#dcfce7"), "retreat": ("🔙 تراجع الآن", "#dc2626", "#fee2e2")}[ev["status"]]
+    nums = "".join(f'<div style="font-size:12px;"><span style="color:#6b7280;">{_nt_h(a)}:</span> <b style="direction:ltr;display:inline-block;">{_nt_h(b)}</b></div>' for a, b in ev["numbers"])
+    why = "".join(f'<li style="margin:2px 0;">{_nt_h(x)}</li>' for x in ev["reasons"])
+    return (f'<div style="direction:rtl;background:#fff;border:1px solid {stt[1]};border-right:6px solid {stt[1]};border-radius:12px;padding:12px 14px;">'
+            f'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">{_ads_pill(stt[0], stt[1], stt[2])}'
+            f'<span style="font-family:monospace;direction:ltr;font-size:12px;">{_nt_h(exp.get("SKU"))}</span>'
+            f'<span style="font-size:12px;color:#374151;">{_nt_h(exp.get("Type"))} — بدأت {exp["start"]} (يوم {ev["days"]}) — خطوة {_nt_h(exp.get("Step %"))}% كل {exp["every_days"]} أيام</span></div>'
+            f'<div style="margin-top:6px;">{nums}</div><ul style="margin:6px 18px;padding:0;font-size:13px;">{why}</ul>'
+            f'<div style="font-size:11px;color:#6b7280;">{_nt_h(ev["rank"])} — ماتنساش تراجع الترتيب يدوياً على نون أثناء التجربة.</div></div>')
+
+
+ADS_GLOSSARY_HTML = (
+    '<div dir="rtl" style="font-size:13px;line-height:1.9;">'
+    '<b>TACOS</b> = مصروف الإعلان ÷ <u>إجمالي</u> مبيعات المنتج (إعلان + عضوي). كل ما قلّ كان أحسن.<br>'
+    '<b>ROAS</b> = مبيعات الإعلان ÷ مصروفه. يعني كل ريال إعلان جاب كام ريال مبيعات.<br>'
+    '<b>ROAS التعادل</b> = سعر البيع ÷ ربح الوحدة. أقل ROAS يغطي تكلفة الإعلان؛ تحته الإعلان بياكل ربح.<br>'
+    '<b>الإعلان من الربح</b> = مصروف الإعلان ÷ ربح المنتج قبل الإعلان.<br>'
+    '<b>عضوي</b> = مبيعات جت من غير ما العميل يضغط على إعلانك.<br>'
+    '<b>CTR</b> = نسبة النقر (نقرات ÷ ظهور). <b>CPC</b> = تكلفة النقرة. <b>CPS</b> = تكلفة الطلب الواحد. '
+    '<b>CVR</b> = نسبة تحويل النقرات لطلبات.<br>'
+    '<b>تغطية</b> = عدد أيام المخزون الكافية على معدل البيع الحالي.'
+    '</div>'
+)
