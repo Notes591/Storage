@@ -1136,7 +1136,13 @@ def get_com_map(env):
         sku_up = str(sku_raw).strip().upper()
         delivery = _f2(col(row, "مصاريف توصيل"))
         commission_pct = _f2(col(row, "العمولة"))
-        m[sku_up] = {"delivery": delivery, "commission_pct": commission_pct}
+        def _opt(*names):
+            v = col(row, *names)
+            return _f2(v) if str(v).strip() != "" else None
+        # أعمدة اختيارية لتاب COM_API: عمولة/توصيل كل نوع تنفيذ لوحده (لو مش موجودة بتفضل None)
+        m[sku_up] = {"delivery": delivery, "commission_pct": commission_pct,
+                     "delivery_fbn": _opt("توصيل FBN"), "commission_pct_fbn": _opt("عمولة FBN"),
+                     "delivery_fbb": _opt("توصيل FBB"), "commission_pct_fbb": _opt("عمولة FBB")}
     return m
 
 def get_live_map(env):

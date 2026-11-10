@@ -617,6 +617,21 @@ def render_price_profit_block_t14(r, com_map_t14, live_map_t14, sales_dates, ads
     com_missing_t14 = com_info_t14 is None
     if com_missing_t14:
         com_info_t14 = {"delivery": 0.0, "commission_pct": 0.0}
+    # ── عمولة/توصيل حسب نوع التنفيذ: لو الـ SKU اتباع FBN و/أو FBB في فترة العرض، بنطبّق عمولة وتوصيل
+    #    كل نوع على مبيعاته (متوسط مرجّح بعدد القطع)، ولو نوع ملهوش رقم بنستخدم المتوسط العام ──
+    _mix = r.get("_mix") or {}
+    _wn, _wb = float(_mix.get("FBN", 0) or 0), float(_mix.get("FBB", 0) or 0)
+    if (_wn + _wb) > 0 and not com_missing_t14:
+        def _pick(k_fbn, k_fbb, k_all):
+            vn = com_info_t14.get(k_fbn)
+            vb = com_info_t14.get(k_fbb)
+            va = com_info_t14.get(k_all, 0.0)
+            vn = va if vn is None else vn
+            vb = va if vb is None else vb
+            return (vn * _wn + vb * _wb) / (_wn + _wb), vn, vb
+        _d, _dn, _db = _pick("delivery_fbn", "delivery_fbb", "delivery")
+        _c, _cn, _cb = _pick("commission_pct_fbn", "commission_pct_fbb", "commission_pct")
+        com_info_t14 = dict(com_info_t14, delivery=_d, commission_pct=_c)
 
     offer_price_t14 = get_latest_sku_price(r, sales_dates)
     latest_price_t14, price_from_live_t14 = get_base_price(r["sku_up"], live_map_t14, offer_price_t14)
@@ -8169,6 +8184,9 @@ if st.session_state["nav_page"] == "tab14":
                         if "FBB" in noon_chs:
                             for d in sales_dates:
                                 r_sku["day_prices"][d] = r_sku["day_prices"].get(d, []) + list(noon_chs["FBB"]["day_prices"].get(d, []))
+                        # عدد القطع المباعة لكل نوع تنفيذ في فترة العرض — بيستخدمه بلوك الربح لتطبيق عمولة/توصيل كل نوع
+                        r_sku["_mix"] = {_k: sum(float(noon_chs[_k]["day_counts"].get(d, 0) or 0) for d in sales_dates)
+                                         for _k in ("FBN", "FBB") if _k in noon_chs}
                     if amz_chs:
                         r_any = amz_chs.get("FSAB") or amz_chs.get("FBA")
                         r_asin = dict(r_any, day_prices={d: list(amz_chs["FSAB"]["day_prices"].get(d, [])) if "FSAB" in amz_chs else []
