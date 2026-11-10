@@ -275,15 +275,14 @@ cancelled_sheet   = sheets["CancelledSchedule"]
 reschedule_sheet  = sheets["Rescheduled"]
 expired_sheet     = sheets["Expired"]
 # نسخة التجربة: secret اسمه INVENTORY_TAB (مثلاً Inventory_API) يخلي المخزون يتقرا منه بدل Inventory.
-_INV_TAB = str(os.environ.get("INVENTORY_TAB") or st.secrets.get("INVENTORY_TAB", "") or "").strip()
+_INV_TAB = str(os.environ.get("INVENTORY_TAB") or st.secrets.get("INVENTORY_TAB", "") or "Inventory_API").strip()
 if _INV_TAB and _INV_TAB != "Inventory":
     inventory_sheet = get_or_create_worksheet(_INV_TAB, TABS_CONFIG["Inventory"])
 else:
     _INV_TAB = ""
     inventory_sheet = sheets["Inventory"]
-# نسخة التجربة: لو في secret اسمه ORDERS_TAB (مثلاً DailyOrders_API) التطبيق بيقرا الطلبات منه بدل DailyOrders.
-# من غير الـ secret ده بيشتغل عادي 100% على DailyOrders.
-_ORDERS_TAB = str(os.environ.get("ORDERS_TAB") or st.secrets.get("ORDERS_TAB", "") or "").strip()
+# نسخة الـ API: الطلبات من تاب DailyOrders_API والمخزون من Inventory_API (تقدر تغيّرهم بـ secret ORDERS_TAB / INVENTORY_TAB).
+_ORDERS_TAB = str(os.environ.get("ORDERS_TAB") or st.secrets.get("ORDERS_TAB", "") or "DailyOrders_API").strip()
 if _ORDERS_TAB and _ORDERS_TAB != "DailyOrders":
     daily_orders_sheet = get_or_create_worksheet(_ORDERS_TAB, TABS_CONFIG["DailyOrders"])
 else:
@@ -4370,8 +4369,6 @@ ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الراب�
 
 # ══════════════════════════════════════════════
 st.title("🏢 عالم الرشاقة للتجارة | Fitness World Trading")
-if _ORDERS_TAB or _INV_TAB:
-    st.warning(f"🧪 نسخة تجربة: الطلبات من «{_ORDERS_TAB or 'DailyOrders'}» والمخزون من «{_INV_TAB or 'Inventory'}» — للمقارنة والعرض بس، ماتعملش رفع أو تعديل من هنا.")
 
 # ══ حساب المرحلين من المبيعات مسبقاً (قبل رسم التابات) ══
 def compute_transferred_from_sales(*args, **kwargs):
