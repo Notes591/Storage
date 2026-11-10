@@ -302,8 +302,34 @@ tacweed_amazon_sheet = sheets["TacweedAmazon"]
 warehouse_stock_sheet = sheets["WarehouseStock"]
 ads_sheet             = sheets["Advertisements"]
 ads_amz_sheet         = sheets["AdvertisementsAmz"]
-com_sheet             = sheets["COM"]
-live_sheet            = sheets["LIVE"]
+# العمولة والتوصيل: بيقرا من تاب COM_API (من المعاملات المالية للـ API) لو فيه بيانات، وإلا بيرجع لتاب COM العادي.
+com_sheet = sheets["COM"]
+_COM_TAB = str(os.environ.get("COM_TAB") or st.secrets.get("COM_TAB", "") or "COM_API").strip()
+if _COM_TAB and _COM_TAB != "COM":
+    try:
+        _cw = get_or_create_worksheet(_COM_TAB, TABS_CONFIG["COM"])
+        if len(_cw.col_values(1)) > 1:
+            com_sheet = _cw
+        else:
+            _COM_TAB = ""
+    except Exception:
+        _COM_TAB = ""
+else:
+    _COM_TAB = ""
+# الكتالوج: LIVE_TAB (env/secret) — لو التاب موجود وفيه بيانات بيتقرا منه، وإلا بيرجع لتاب LIVE العادي.
+_LIVE_TAB = str(os.environ.get("LIVE_TAB") or st.secrets.get("LIVE_TAB", "") or "LIVE_API").strip()
+live_sheet = sheets["LIVE"]
+if _LIVE_TAB and _LIVE_TAB != "LIVE":
+    try:
+        _lw = get_or_create_worksheet(_LIVE_TAB, TABS_CONFIG["LIVE"])
+        if len(_lw.col_values(1)) > 1:
+            live_sheet = _lw
+        else:
+            _LIVE_TAB = ""
+    except Exception:
+        _LIVE_TAB = ""
+else:
+    _LIVE_TAB = ""
 
 # ══ كاش ══
 def safe_get_all_values(sheet, retries=6, delay=1):
