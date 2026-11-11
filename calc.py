@@ -810,8 +810,8 @@ _CF_LINE = ["line_id","sku","model_no","barcode","product_name_en","product_name
 _CHINA_LABELS = {c[1]: c[2] for c in CHINA_FLAT_COLS}
 _AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 TY_EXCLUDED_STATUSES = {"returned", "undelivered", "undeliveredandreturned", "cancelled", "canceled", "waiting for payment"}
-# تريندول: العمولة المعلنة (18%) عليها ضريبة 15% → الخصم الفعلي ≈ 20.7%؛ والتوصيل صفر (متفق عليه) — لو النسبة فاضية نستخدم الافتراضي.
-TY_COMM_VAT = 1.15
+# تريندول: العمولة من غير ضريبة (النسبة المعلنة زي ما هي، مثلاً 18%). لو عايز تضيف ضريبة 15% على العمولة خليها 1.15. التوصيل صفر (متفق عليه).
+TY_COMM_VAT = 1.0
 TY_DEFAULT_COMM = 18.0
 TY_ADS_HEADERS = TABS_CONFIG["AdvertisementsTrendyol"]
 FAMILY_HOME_GROUP = {"kitchen_dining", "home_improvement", "gardening", "home_decor", "furniture", "bedding"}
