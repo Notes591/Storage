@@ -274,17 +274,25 @@ def build_scheduled_row(*args, **kwargs):
 cancelled_sheet   = sheets["CancelledSchedule"]
 reschedule_sheet  = sheets["Rescheduled"]
 expired_sheet     = sheets["Expired"]
+def _ws_once(tab, headers):
+    """نفس get_or_create_worksheet بس مرة واحدة في الجلسة (بدل ما تتنادى مع كل تفاعل وتعمل طلبات جوجل زيادة)."""
+    c = st.session_state.setdefault("_ws_once_cache", {})
+    if tab not in c:
+        c[tab] = get_or_create_worksheet(tab, headers)
+    return c[tab]
+
+
 # نسخة التجربة: secret اسمه INVENTORY_TAB (مثلاً Inventory_API) يخلي المخزون يتقرا منه بدل Inventory.
 _INV_TAB = str(os.environ.get("INVENTORY_TAB") or st.secrets.get("INVENTORY_TAB", "") or "Inventory_API").strip()
 if _INV_TAB and _INV_TAB != "Inventory":
-    inventory_sheet = get_or_create_worksheet(_INV_TAB, TABS_CONFIG["Inventory"])
+    inventory_sheet = _ws_once(_INV_TAB, TABS_CONFIG["Inventory"])
 else:
     _INV_TAB = ""
     inventory_sheet = sheets["Inventory"]
 # نسخة الـ API: الطلبات من تاب DailyOrders_API والمخزون من Inventory_API (تقدر تغيّرهم بـ secret ORDERS_TAB / INVENTORY_TAB).
 _ORDERS_TAB = str(os.environ.get("ORDERS_TAB") or st.secrets.get("ORDERS_TAB", "") or "DailyOrders_API").strip()
 if _ORDERS_TAB and _ORDERS_TAB != "DailyOrders":
-    daily_orders_sheet = get_or_create_worksheet(_ORDERS_TAB, TABS_CONFIG["DailyOrders"])
+    daily_orders_sheet = _ws_once(_ORDERS_TAB, TABS_CONFIG["DailyOrders"])
 else:
     _ORDERS_TAB = ""
     daily_orders_sheet = sheets["DailyOrders"]
@@ -304,14 +312,20 @@ ads_sheet             = sheets["Advertisements"]
 ads_amz_sheet         = sheets["AdvertisementsAmz"]
 # العمولة والتوصيل: الاعتماد كله على تاب COM_API (من المعاملات المالية للـ API) — من غير رجوع لتاب COM القديم.
 _COM_TAB = str(os.environ.get("COM_TAB") or st.secrets.get("COM_TAB", "") or "COM_API").strip()
-com_sheet = get_or_create_worksheet(_COM_TAB, TABS_CONFIG["COM"])
+com_sheet = _ws_once(_COM_TAB, TABS_CONFIG["COM"])
 # الكتالوج: LIVE_TAB (env/secret) — لو التاب موجود وفيه بيانات بيتقرا منه، وإلا بيرجع لتاب LIVE العادي.
 _LIVE_TAB = str(os.environ.get("LIVE_TAB") or st.secrets.get("LIVE_TAB", "") or "LIVE_API").strip()
 live_sheet = sheets["LIVE"]
 if _LIVE_TAB and _LIVE_TAB != "LIVE":
     try:
-        _lw = get_or_create_worksheet(_LIVE_TAB, TABS_CONFIG["LIVE"])
-        if len(_lw.col_values(1)) > 1:
+        _lw = st.session_state.get("_live_api_ws")        # متخزّن في الجلسة: من غير قراءة العمود كله مع كل تفاعل
+        if _lw is None:
+            _lw = get_or_create_worksheet(_LIVE_TAB, TABS_CONFIG["LIVE"])
+            if str(_lw.acell("A2").value or "").strip():   # خلية واحدة بدل col_values (كانت بتقرا العمود كله)
+                st.session_state["_live_api_ws"] = _lw
+            else:
+                _lw = None
+        if _lw is not None:
             live_sheet = _lw
         else:
             _LIVE_TAB = ""
@@ -5827,16 +5841,22 @@ def _ads_reco_load(force=False):
     c = st.session_state.get("_ads_reco_raw")
     if c and not force and time.time() - c[0] < ADS_RECO_TTL:
         return c[1]
-    raw = {}
-    try:
-        have = {w.title for w in ss.worksheets()}
-        names = [t for t in ADS_RECO_TABS if t in have]
-        if names:
-            res = ss.values_batch_get(["'" + t + "'" for t in names])
-            for t, vr in zip(names, res.get("valueRanges", [])):
-                raw[t] = vr.get("values", []) or []
-    except Exception:
-        raw = c[1] if c else {}
+    raw, ok = {}, False
+    for _try in range(2):          # محاولة تانية لو جوجل رفض مؤقتاً
+        try:
+            have = {w.title for w in ss.worksheets()}
+            names = [t for t in ADS_RECO_TABS if t in have]
+            if names:
+                res = ss.values_batch_get(["'" + t + "'" for t in names])
+                for t, vr in zip(names, res.get("valueRanges", [])):
+                    raw[t] = vr.get("values", []) or []
+            ok = True
+            break
+        except Exception:
+            time.sleep(1.5)
+    if not ok:
+        # فشل القراءة: ما نخزّنش نتيجة فاضية في الكاش (كانت بتخلّي التوصيات ترجع للشهري 10 دقايق)
+        return c[1] if c else {}
     st.session_state["_ads_reco_raw"] = (time.time(), raw)
     return raw
 
