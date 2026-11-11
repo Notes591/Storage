@@ -3705,8 +3705,12 @@ def _ty_prod_comm_map():
     return m
 
 def get_trendyol_bundle():
-    return _memo_from_sheet(daily_orders_trendyol_sheet, "trendyol_bundle",
-                            lambda raw: _build_trendyol_bundle(raw, _ty_prod_comm_map()))
+    def _b(raw):
+        try:
+            return _build_trendyol_bundle(raw, _ty_prod_comm_map())
+        except TypeError:      # calc.py قديم (بيقبل raw بس) — ارفع calc.py الجديد مع الملف ده
+            return _build_trendyol_bundle(raw)
+    return _memo_from_sheet(daily_orders_trendyol_sheet, "trendyol_bundle", _b)
 
 def get_trendyol_commission_map(*args, **kwargs):
     return calc.get_trendyol_commission_map(_ENV, *args, **kwargs)
