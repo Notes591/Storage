@@ -809,7 +809,10 @@ _CF_LINE = ["line_id","sku","model_no","barcode","product_name_en","product_name
             "actual_load_date","noon_sku","amazon_sku","trendyol_sku","image_url","notes"]
 _CHINA_LABELS = {c[1]: c[2] for c in CHINA_FLAT_COLS}
 _AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
-TY_EXCLUDED_STATUSES = {"returned", "undelivered", "cancelled", "canceled", "waiting for payment"}
+TY_EXCLUDED_STATUSES = {"returned", "undelivered", "undeliveredandreturned", "cancelled", "canceled", "waiting for payment"}
+# تريندول: العمولة المعلنة (18%) عليها ضريبة 15% → الخصم الفعلي ≈ 20.7%؛ والتوصيل صفر (متفق عليه) — لو النسبة فاضية نستخدم الافتراضي.
+TY_COMM_VAT = 1.15
+TY_DEFAULT_COMM = 18.0
 TY_ADS_HEADERS = TABS_CONFIG["AdvertisementsTrendyol"]
 FAMILY_HOME_GROUP = {"kitchen_dining", "home_improvement", "gardening", "home_decor", "furniture", "bedding"}
 FAMILY_LABELS = {
@@ -2599,7 +2602,7 @@ def build_daily_orders_family_stats_amazon_normal(dates, live_map=None): return 
 
 def build_daily_orders_family_stats_amazon_fba(dates, live_map=None):    return {}
 
-def _build_trendyol_bundle(raw):
+def _build_trendyol_bundle(raw, prod_comm=None):
     """يحوّل الصفوف الخام لقائمة طلبات جاهزة (تواريخ متحوّلة مرة واحدة) + خرائط العمولة والصور والأسماء."""
     out = {"rows": [], "comm": {}, "img": {}, "name": {}}
     if not raw or len(raw) < 2:
@@ -2638,6 +2641,15 @@ def _build_trendyol_bundle(raw):
         nm = g(row, "product name")
         if nm and bc not in out["name"]:
             out["name"][bc] = nm
+    # عمولة فعلية = النسبة × 1.15 (ضريبة على العمولة)؛ ولو الباركود من غير نسبة: من تاب المنتجات (Commission %) أو الافتراضي
+    prod_comm = prod_comm or {}
+    for r in out["rows"]:
+        bc = r["bc"]
+        if bc not in out["comm"]:
+            out["comm"][bc] = prod_comm.get(bc, TY_DEFAULT_COMM)
+    for bc, v in prod_comm.items():
+        out["comm"].setdefault(bc, v)
+    out["comm"] = {bc: round(v * TY_COMM_VAT, 2) for bc, v in out["comm"].items()}
     return out
 
 def get_trendyol_commission_map(env):

@@ -298,9 +298,12 @@ else:
     daily_orders_sheet = sheets["DailyOrders"]
 daily_orders_amazon_sheet = sheets["DailyOrdersAmazon"]
 stock_amazon_sheet   = sheets["StockAmazon"]
-daily_orders_trendyol_sheet = sheets["DailyOrdersTrendyol"]
+# تريندول: الطلبات والمنتجات من تابات الـ API (DailyOrdersTrendyol_API / TrendyolProducts_API) — الشيتات القديمة فاضلة زي ما هي.
+_TY_ORD_TAB = str(os.environ.get("TY_ORDERS_TAB") or st.secrets.get("TY_ORDERS_TAB", "") or "DailyOrdersTrendyol_API").strip()
+_TY_PRD_TAB = str(os.environ.get("TY_PRODUCTS_TAB") or st.secrets.get("TY_PRODUCTS_TAB", "") or "TrendyolProducts_API").strip()
+daily_orders_trendyol_sheet = _ws_once(_TY_ORD_TAB, TABS_CONFIG["DailyOrdersTrendyol"])
 ads_ty_sheet = sheets["AdvertisementsTrendyol"]
-ty_products_sheet = sheets["TrendyolProducts"]
+ty_products_sheet = _ws_once(_TY_PRD_TAB, TABS_CONFIG["TrendyolProducts"])
 china_img_sheet = sheets["ChinaImages"]
 contracts_sheet = sheets["Contracts"]
 settings_sheet       = sheets["Settings"]
@@ -501,7 +504,7 @@ def get_excluded_warehouses():
 
 # ══ links map ══
 def _images_api_map():
-    """روابط صور نون من تاب Images_API (كاش من نون API، بتكتبه أداة Noon API) — بتتقرا مرة واحدة في الجلسة."""
+    """روابط صور من الـ API: نون (تاب Images_API) وتريندول (تاب TrendyolProducts_API بالباركود) — بتتقرا مرة واحدة في الجلسة."""
     if "_img_api_map" in st.session_state:
         return st.session_state["_img_api_map"]
     m = {}
@@ -509,6 +512,12 @@ def _images_api_map():
         for row in safe_get_all_values(ss.worksheet("Images_API"))[1:]:
             if len(row) >= 2 and row[0].strip() and row[1].strip().startswith("http"):
                 m[row[0].strip().upper()] = row[1].strip()
+    except Exception:
+        pass
+    try:   # تريندول: Barcode → صورة من TrendyolProducts_API (أداة Trendyol API)
+        for row in safe_get_all_values(ss.worksheet("TrendyolProducts_API"))[1:]:
+            if len(row) >= 4 and row[1].strip() and row[3].strip().startswith("http"):
+                m[row[1].strip().upper()] = row[3].strip()
     except Exception:
         pass
     st.session_state["_img_api_map"] = m
@@ -3677,8 +3686,27 @@ amz_inv_map_asin = build_amazon_stock_map_by_asin()
 # حالات الطلب اللي مش بتتحسب كمبيعات (مرتجع/ما اتسلمش/لسه مدفوعش/ملغي)
 
 
+def _ty_prod_comm_map():
+    """Barcode (upper) -> Commission % من تاب TrendyolProducts_API (للمنتجات اللي مفيش لها طلبات بنسبة)."""
+    m = {}
+    try:
+        raw = get_cached(ty_products_sheet)
+        idx = {str(h).strip().lower(): i for i, h in enumerate(raw[0])} if raw else {}
+        bi, ci = idx.get("barcode"), idx.get("commission %")
+        if bi is not None and ci is not None:
+            for r in raw[1:]:
+                if len(r) > max(bi, ci) and str(r[bi]).strip() and str(r[ci]).strip():
+                    try:
+                        m[str(r[bi]).strip().upper()] = float(str(r[ci]).replace(",", ""))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return m
+
 def get_trendyol_bundle():
-    return _memo_from_sheet(daily_orders_trendyol_sheet, "trendyol_bundle", _build_trendyol_bundle)
+    return _memo_from_sheet(daily_orders_trendyol_sheet, "trendyol_bundle",
+                            lambda raw: _build_trendyol_bundle(raw, _ty_prod_comm_map()))
 
 def get_trendyol_commission_map(*args, **kwargs):
     return calc.get_trendyol_commission_map(_ENV, *args, **kwargs)
@@ -4759,9 +4787,9 @@ def render_upload_tab():
         render_generic_ads_upload("up", ads_amz_sheet, "AdvertisementsAmz", "📤 رفع إعلانات أمازون | Upload Amazon Ads", ["المنتجات"])
         st.caption("مخزون أمازون (StockAmazon) بيتحدّث يدويًا في الشيت نفسه | Amazon stock (StockAmazon) is updated manually in the sheet")
     elif _grp.startswith("🟣"):
-        render_trendyol_upload("up")
+        st.info("🟣 طلبات ومنتجات وعمولة تريندول بتتحدّث تلقائيًا من Trendyol API (تابات DailyOrdersTrendyol_API / TrendyolProducts_API / Finance_TY_Raw) — الرفع اليدوي اتقفل. "
+                "إعلانات تريندول لسه بالرفع لأن مفيش API ليها.")
         render_trendyol_ads_upload("up")
-        render_trendyol_products_upload("up")
     elif _grp.startswith("🔎"):
         render_sku_check_tab()
     else:
