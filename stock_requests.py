@@ -500,13 +500,29 @@ def get_excluded_warehouses():
     return {w.strip().upper() for w in val.split(",") if w.strip()}
 
 # ══ links map ══
-def get_links_map():
-    data = get_cached(links_ws)
+def _images_api_map():
+    """روابط صور نون من تاب Images_API (كاش من نون API، بتكتبه أداة Noon API) — بتتقرا مرة واحدة في الجلسة."""
+    if "_img_api_map" in st.session_state:
+        return st.session_state["_img_api_map"]
     m = {}
-    for row in data[1:]:
-        if len(row) >= 2 and row[0].strip():
-            m[row[0].strip().upper()] = row[1].strip()
+    try:
+        for row in safe_get_all_values(ss.worksheet("Images_API"))[1:]:
+            if len(row) >= 2 and row[0].strip() and row[1].strip().startswith("http"):
+                m[row[0].strip().upper()] = row[1].strip()
+    except Exception:
+        pass
+    st.session_state["_img_api_map"] = m
     return m
+
+def get_links_map():
+    def _build(data):
+        m = {}
+        for row in data[1:]:                         # links n: احتياطي بس (تريندول بالباركود + أي SKU نون ملوش صورة من الـ API)
+            if len(row) >= 2 and row[0].strip() and row[1].strip():
+                m[row[0].strip().upper()] = row[1].strip()
+        m.update(_images_api_map())                  # صور الـ API (Images_API) بتغلّب
+        return m
+    return _memo_from_sheet(links_ws, "_links_map_merged", _build)
 
 def get_links_map_asin():
     """خريطة ASIN -> رابط صورة من شيت 'links a' — المصدر الأساسي لصور تابات
