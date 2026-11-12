@@ -8184,7 +8184,7 @@ if st.session_state["nav_page"] == "tab14":
                 def _sku_table(rows, plat):
                     """جدول SKUs المنصة (مرتب بالمبيعات) — الضغط على صف بيفتح تفاصيله تحت. بيرجّع أرقام الصفوف المختارة."""
                     _df = pd.DataFrame([{
-                        "المعرّف": x["id"], "أمس": x["y"], f"آخر {sales_display_days} يوم": x["tot"], "شهري": x["mon"],
+                        "المعرّف": x["id"], "أمس": x["y"], f"{sales_display_days} أيام": x["tot"], "شهري": x["mon"],
                         "مخزون": x["stock"], "سعر البيع": x["price"],
                         "عمولة": ("—" if not x["ci"] else f'{x["ci"].get("commission_pct", 0):g}%'),
                         "توصيل": ("—" if not x["ci"] else f'{x["ci"].get("delivery", 0):g}'),
@@ -8192,8 +8192,8 @@ if st.session_state["nav_page"] == "tab14":
                     _vis = ["المعرّف"] + [c for c in (st.session_state.get("t14_cols_sel") or _T14_COLS) if c in _T14_COLS]
                     _df = _df[_vis]
                     # عرض ثابت ومضغوط: المعرّف مقفول على عرض صغير (الاسم الكامل جوه التفاصيل) وباقي الأعمدة ضيقة
-                    _wpx = {"المعرّف": 80, "أمس": 48, f"آخر {sales_display_days} يوم": 68, "شهري": 54, "مخزون": 92,
-                            "سعر البيع": 64, "عمولة": 56, "توصيل": 56, "صافي": 60}
+                    _wpx = {"المعرّف": 64, "أمس": 42, f"{sales_display_days} أيام": 52, "شهري": 48, "مخزون": 60,
+                            "سعر البيع": 54, "عمولة": 48, "توصيل": 46, "صافي": 52}
                     def _cfg(px):
                         _c = {"المعرّف": st.column_config.TextColumn(width=px["المعرّف"])}
                         for _n in _wpx:
@@ -8283,7 +8283,7 @@ if st.session_state["nav_page"] == "tab14":
                             _t14_channel_part(r_, "TY", True, part=_pt)
 
                 # ══ إخفاء/إظهار أعمدة الجداول — محفوظ في الإعدادات (مبيرجعش لما تفتح وتقفل) ══
-                _T14_COLS = ["أمس", f"آخر {sales_display_days} يوم", "شهري", "مخزون", "سعر البيع", "عمولة", "توصيل", "صافي"]
+                _T14_COLS = ["أمس", f"{sales_display_days} أيام", "شهري", "مخزون", "سعر البيع", "عمولة", "توصيل", "صافي"]
                 _hid_saved = {x for x in str(load_settings().get("t14_hidden_cols", "")).split("|") if x}
                 _ord_saved = [x for x in str(load_settings().get("t14_cols_order", "")).split("|") if x in _T14_COLS]
                 if "t14_cols_sel" not in st.session_state:
@@ -8370,7 +8370,7 @@ if st.session_state["nav_page"] == "tab14":
                                     for _s, _c in noon_tbl:
                                         _r = _mk_r_noon(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
-                                        _stk = " · ".join(f"{k} {_c[k]['stock']}" for k in ("FBN", "FBB") if k in _c)
+                                        _stk = "·".join(f"{_c[k]['stock']}" for k in ("FBN", "FBB") if k in _c)
                                         _rows.append({"id": _s, "y": _yv(_c, "FBN") + _yv(_c, "FBB"),
                                                       "tot": _tv(_c, "FBN") + _tv(_c, "FBB"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FBN", "FBB") if k in _c),
@@ -8426,7 +8426,7 @@ if st.session_state["nav_page"] == "tab14":
                                     for _a, _c in amz_tbl:
                                         _r = _mk_r_amz(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
-                                        _stk = " · ".join(f"{k} {_c[k]['stock']}" for k in ("FSAB", "FBA") if k in _c)
+                                        _stk = "·".join(f"{_c[k]['stock']}" for k in ("FSAB", "FBA") if k in _c)
                                         _rows.append({"id": _a, "y": _yv(_c, "FSAB") + _yv(_c, "FBA"),
                                                       "tot": _tv(_c, "FSAB") + _tv(_c, "FBA"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FSAB", "FBA") if k in _c),
