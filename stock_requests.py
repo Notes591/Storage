@@ -9043,9 +9043,19 @@ if st.session_state["nav_page"] == "tab_accts":
                         st.caption(f"الرصيد = المستحق − المدفوع = {_bal:,.0f} "
                                    f"({'مدفوع أكتر من المستحق في الفترة دي — غالباً رصيد من قبل 1/10' if _bal < 0 else 'لسه مستحق لك'}). "
                                    f"ملحوظة: بيان الفترة من تاريخ أول كشف تم سحبه فقط.")
-                        _sub = st.radio("العرض", ["🧾 الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
+                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "🧾 الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
                                         horizontal=True, key="acct_noon_view", label_visibility="collapsed")
-                        if _sub.startswith("🧾"):
+                        if _sub.startswith("📊"):
+                            _stm_all = _S["statements"]
+                            _refs = list(_stm_all["Reference Nr"]) if not _stm_all.empty else []
+                            _pick = st.multiselect("الكشوف (سيبها فاضية = كل الفترة المحددة فوق)", _refs, key="acct_noon_stm_pick",
+                                                   help="اختار نفس الكشوف اللي في صفحة نون عشان تطابق الأرقام — التحويلات البنكية بتتحسب لحد تاريخ آخر كشف مختار.")
+                            _L, _tot = calc.acct_noon_breakdown(_f, _pick or None, _df_from, _df_to)
+                            _bd = pd.DataFrame([{"البند": l, "القيمة": v} for l, v, _kd in _L])
+                            _bd.loc[len(_bd)] = {"البند": "الإجمالي (المستحق − المدفوع)", "القيمة": _tot}
+                            st.dataframe(_bd, use_container_width=True, hide_index=True, column_config={"القيمة": st.column_config.NumberColumn("القيمة", format="%.2f")})
+                            st.caption("الأرقام بتطابق كشوف نون في كل البنود تقريباً (فروق بسيطة بالقروش). نون بتفصل «عودة التالفة» عن «إدارية للإرجاع» لكن التقرير بيدمجهم في عمود واحد، فهنا سطر واحد.")
+                        elif _sub.startswith("🧾"):
                             _stm = _S["statements"]
                             st.markdown("**الكشوف الأسبوعية**")
                             if not _stm.empty:

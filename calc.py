@@ -5678,3 +5678,53 @@ def acct_noon_pending(fin, orders, today=None):
     ref = pd.Timestamp(today) if today else pd.Timestamp.now()
     o["أيام من التسليم"] = (ref - o["_dd"]).dt.days
     return o.sort_values("_dd")
+
+
+def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):
+    """ملخص زي صفحة نون (تفقيط الكشف). statements = قايمة Reference Nr لكشوف محددة (PS-...) — لو اتحددت الدفعات بتتحسب لحد تاريخ آخر كشف.
+    لو مفيش: كل صفوف الفترة (Transaction Date). يرجع (list of (label, value, kind), total).
+    الربط (متحقق منه على كشف حقيقي): الإحالة=Referral · الشحن المباشر=رسوم الشحن بدون Item Nr · الصادرة FBN=رسوم الشحن بـ Item Nr ·
+    الإعلان=Non-Order Fees في صفوف statement_fee · الضمان=Non-Order Fees في صفوف الأوردرات · تخفيض الإعلان=Non-Order Subsidies ·
+    التصدير الخارجي=Order Subsidies · Other Order Fees=عودة التالفة + إدارية للإرجاع مجمّعين (مش بينفصلوا في التقرير)."""
+    import pandas as pd
+    if fin is None or fin.empty:
+        return [], 0.0
+    df = fin.copy()
+    df["_d"] = pd.to_datetime(df["Transaction Date"], errors="coerce").dt.date
+    tt = df["Transaction Type"].astype(str)
+    if statements:
+        body = df[df["Reference Nr"].isin(statements) & tt.isin(["order", "order_update", "statement_fee"])]
+        dmax = body["_d"].max() if not body.empty else None
+        money = df[tt.isin(["payment", "balance_transfer"])]
+        if dmax is not None:
+            money = money[money["_d"] <= dmax]
+    else:
+        if d_from:
+            df = df[df["_d"] >= d_from]
+        if d_to:
+            df = df[df["_d"] <= d_to]
+        tt = df["Transaction Type"].astype(str)
+        body = df[tt.isin(["order", "order_update", "statement_fee"])]
+        money = df[tt.isin(["payment", "balance_transfer"])]
+    bt = body["Transaction Type"].astype(str)
+    noitem = body["Item Nr"].astype(str).str.strip() == ""
+    S = lambda d, c: float(d[c].sum())
+    oth = body["Other Order Fees including VAT"]
+    sf = body[bt == "statement_fee"]
+    it_rows = body[bt != "statement_fee"]
+    L = [
+        ("صافي العائدات", S(body, "Net Proceeds"), "in"),
+        ("رسوم الإعلان (تخفيض)", S(body, "Non-Order Subsidies including VAT"), "in"),
+        ("رسوم التصدير الخارجي", S(body, "Order Subsidies including VAT"), "in"),
+        ("رسوم عودة التالفة / إدارية للإرجاع (مجمّعة — نون بتفصلهم)", float(oth.sum()), "in"),
+        ("رسوم الإعلان", S(sf, "Non-Order Fees including VAT"), "out"),
+        ("رسوم الإحالة", S(body, "Referral Fee including VAT"), "out"),
+        ("رسوم الشحن المباشر", S(body[noitem], "Fullfilment & Logistics Fees including VAT"), "out"),
+        ("رسوم الصادرة FBN", S(body[~noitem], "Fullfilment & Logistics Fees including VAT"), "out"),
+        ("رسوم الضمان", S(it_rows, "Non-Order Fees including VAT"), "out"),
+    ]
+    mt = money["Transaction Type"].astype(str)
+    L.append(("تحويل بنكي", S(money[mt == "payment"], "Total"), "pay"))
+    L.append(("تحويل الرصيد", S(money[mt == "balance_transfer"], "Total"), "pay"))
+    total = sum(v for _l, v, _k in L)
+    return L, total
