@@ -8167,26 +8167,23 @@ if st.session_state["nav_page"] == "tab14":
                             _net = None
                     return _pr, _ci, _net
 
-                def _sku_table(rows):
-                    """جدول SKUs المنصة (مرتب بالمبيعات من الأكبر للأصغر) | Platform SKU table."""
-                    def _n(v):
-                        return "—" if v is None else f"{v:,.2f}"
-                    _h = ["المعرّف", "أمس", f"آخر {sales_display_days} يوم", "شهري", "مخزون", "سعر البيع", "عمولة", "توصيل", "صافي"]
-                    _th = "".join(f'<th style="text-align:right;padding:3px 6px;font-weight:600;white-space:nowrap;">{x}</th>' for x in _h)
-                    _tr = ""
-                    for x in rows:
-                        _ci = x["ci"]
-                        _cm = "—" if not _ci else f'{_ci.get("commission_pct", 0):g}%'
-                        _dl = "—" if not _ci else f'{_ci.get("delivery", 0):g}'
-                        _w = "800" if x["y"] > 0 else "500"
-                        _tr += (f'<tr style="border-top:1px solid rgba(148,163,184,.25);font-weight:{_w};">'
-                                f'<td style="padding:4px 6px;">{x["id"]}</td><td style="padding:4px 6px;">{x["y"]:g}</td>'
-                                f'<td style="padding:4px 6px;">{x["tot"]:g}</td><td style="padding:4px 6px;">{x["mon"]:g}</td>'
-                                f'<td style="padding:4px 6px;white-space:nowrap;">{x["stock"]}</td><td style="padding:4px 6px;">{_n(x["price"])}</td>'
-                                f'<td style="padding:4px 6px;">{_cm}</td><td style="padding:4px 6px;">{_dl}</td>'
-                                f'<td style="padding:4px 6px;">{_n(x["net"])}</td></tr>')
-                    st.markdown(f'<div dir="rtl" style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12.5px;">'
-                                f'<tr style="color:#94a3b8;">{_th}</tr>{_tr}</table></div>', unsafe_allow_html=True)
+                def _sku_table(rows, plat):
+                    """جدول SKUs المنصة (مرتب بالمبيعات) — الضغط على صف بيفتح تفاصيله تحت. بيرجّع أرقام الصفوف المختارة."""
+                    _df = pd.DataFrame([{
+                        "المعرّف": x["id"], "أمس": x["y"], f"آخر {sales_display_days} يوم": x["tot"], "شهري": x["mon"],
+                        "مخزون": x["stock"], "سعر البيع": x["price"],
+                        "عمولة": ("—" if not x["ci"] else f'{x["ci"].get("commission_pct", 0):g}%'),
+                        "توصيل": ("—" if not x["ci"] else f'{x["ci"].get("delivery", 0):g}'),
+                        "صافي": x["net"]} for x in rows])
+                    _ev = st.dataframe(_df, hide_index=True, use_container_width=True, on_select="rerun",
+                                       selection_mode="multi-row", key=f"t14tbl_{_t14_bn[0]}_{plat}",
+                                       column_config={"سعر البيع": st.column_config.NumberColumn(format="%.2f"),
+                                                      "صافي": st.column_config.NumberColumn(format="%.2f")})
+                    st.caption("👆 اضغط على صف المنتج لفتح تفاصيله")
+                    try:
+                        return sorted(_ev.selection.rows)
+                    except Exception:
+                        return []
 
                 def _top_cov2(chlist, src, shown, lvl):
                     _sink = []
@@ -8307,13 +8304,12 @@ if st.session_state["nav_page"] == "tab14":
                                         _r = _mk_r_noon(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
                                         _stk = " · ".join(f"{k} {_c[k]['stock']}" for k in ("FBN", "FBB") if k in _c)
-                                        _rows.append({"id": sku_link_html(_s), "y": _yv(_c, "FBN") + _yv(_c, "FBB"),
+                                        _rows.append({"id": _s, "y": _yv(_c, "FBN") + _yv(_c, "FBB"),
                                                       "tot": _tv(_c, "FBN") + _tv(_c, "FBB"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FBN", "FBB") if k in _c),
                                                       "stock": _stk, "price": _pr, "ci": _ci, "net": _net})
-                                    _sku_table(_rows)
-                                    for _s, _c in noon_items:
-                                        _detail_noon(_s, _c)
+                                    for _i in _sku_table(_rows, "noon"):
+                                        _detail_noon(*noon_items[_i])
                                 else:
                                     st.caption("— مفيش SKU نون لهذا الكود | no Noon SKU for this code")
                         if "ty" in _pcols:
@@ -8327,13 +8323,13 @@ if st.session_state["nav_page"] == "tab14":
                                         _r = _c["TY"]
                                         _pr, _ci, _net = _price_info(_r, com_map_ty_t14, {})
                                         _bc = (f'<span style="font-family:monospace;font-weight:700;user-select:all;">{_k}</span>')
-                                        _rows.append({"id": _bc, "y": _yv(_c, "TY"), "tot": _tv(_c, "TY"), "mon": _r["sales_month"],
+                                        _rows.append({"id": _k, "y": _yv(_c, "TY"), "tot": _tv(_c, "TY"), "mon": _r["sales_month"],
                                                       "stock": "—", "price": _pr, "ci": _ci, "net": _net})
-                                    _sku_table(_rows)
+                                    _sel_ty = _sku_table(_rows, "ty")
                                     if not ty_fee_set_t14:
                                         st.caption("ℹ️ توصيل تريندول محسوب 0 — ضيف trendyol_delivery_fee في Settings")
-                                    for _k, _c in ty_items:
-                                        _detail_ty(_k, _c)
+                                    for _i in _sel_ty:
+                                        _detail_ty(*ty_items[_i])
                                 elif _hb and get_trendyol_bundle()["rows"]:
                                     st.caption("— مفيش مبيعات تريندول أمس | no Trendyol sales yesterday")
                                     st.markdown(
@@ -8358,13 +8354,12 @@ if st.session_state["nav_page"] == "tab14":
                                         _r = _mk_r_amz(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
                                         _stk = " · ".join(f"{k} {_c[k]['stock']}" for k in ("FSAB", "FBA") if k in _c)
-                                        _rows.append({"id": asin_link_html(_a), "y": _yv(_c, "FSAB") + _yv(_c, "FBA"),
+                                        _rows.append({"id": _a, "y": _yv(_c, "FSAB") + _yv(_c, "FBA"),
                                                       "tot": _tv(_c, "FSAB") + _tv(_c, "FBA"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FSAB", "FBA") if k in _c),
                                                       "stock": _stk, "price": _pr, "ci": _ci, "net": _net})
-                                    _sku_table(_rows)
-                                    for _a, _c in amz_items:
-                                        _detail_amz(_a, _c)
+                                    for _i in _sku_table(_rows, "amz"):
+                                        _detail_amz(*amz_items[_i])
                                 else:
                                     _ha = next((bb.get("amz_hint") for bb in g["blocks"] if bb.get("amz_hint")), None)
                                     if _ha:
