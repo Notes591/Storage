@@ -8189,7 +8189,7 @@ if st.session_state["nav_page"] == "tab14":
                         "عمولة": ("—" if not x["ci"] else f'{x["ci"].get("commission_pct", 0):g}%'),
                         "توصيل": ("—" if not x["ci"] else f'{x["ci"].get("delivery", 0):g}'),
                         "صافي": x["net"]} for x in rows])
-                    _vis = ["المعرّف"] + [c for c in _T14_COLS if c in st.session_state.get("t14_cols_sel", _T14_COLS)]
+                    _vis = ["المعرّف"] + [c for c in _T14_COLS if c not in st.session_state.get("t14_hid_sel", [])]
                     _df = _df[_vis]
                     _ev = st.dataframe(_df, hide_index=True, use_container_width=True, on_select="rerun",
                                        selection_mode="multi-row", key=f"t14tbl_{_t14_bn[0]}_{plat}",
@@ -8263,14 +8263,18 @@ if st.session_state["nav_page"] == "tab14":
                 # ══ إخفاء/إظهار أعمدة الجداول — محفوظ في الإعدادات (مبيرجعش لما تفتح وتقفل) ══
                 _T14_COLS = ["أمس", f"آخر {sales_display_days} يوم", "شهري", "مخزون", "سعر البيع", "عمولة", "توصيل", "صافي"]
                 _hid_saved = {x for x in str(load_settings().get("t14_hidden_cols", "")).split("|") if x}
-                if "t14_cols_sel" not in st.session_state:
-                    st.session_state["t14_cols_sel"] = [c for c in _T14_COLS if c not in _hid_saved]
+                if "t14_hid_sel" not in st.session_state:
+                    st.session_state["t14_hid_sel"] = [c for c in _T14_COLS if c in _hid_saved]
                 def _save_t14_cols():
-                    _keep = st.session_state.get("t14_cols_sel", _T14_COLS)
-                    save_setting("t14_hidden_cols", "|".join(c for c in _T14_COLS if c not in _keep))
+                    save_setting("t14_hidden_cols", "|".join(st.session_state.get("t14_hid_sel", [])))
+                def _reset_t14_cols():
+                    st.session_state["t14_hid_sel"] = []
+                    save_setting("t14_hidden_cols", "")
                 with st.popover("⚙️ أعمدة الجداول | Table columns"):
-                    st.multiselect("الأعمدة الظاهرة | Visible columns", _T14_COLS, key="t14_cols_sel", on_change=_save_t14_cols)
-                    st.caption("الاختيار بيتحفظ ومبيرجعش لوحده")
+                    st.multiselect("الأعمدة المخفية | Hidden columns", _T14_COLS, key="t14_hid_sel", on_change=_save_t14_cols,
+                                   placeholder="مفيش أعمدة مخفية — كل الأعمدة ظاهرة")
+                    st.button("↺ إظهار كل الأعمدة", key="t14_cols_reset", on_click=_reset_t14_cols)
+                    st.caption("اللي تختاره هنا بيتخفي، وبيتحفظ ومبيرجعش لوحده")
                 for g in groups_show_t14:
                     top_b = g["blocks"][0]
                     noon_items = [(s, sku_rows_t14[s]) for s in sorted(g["skus"], key=_sku_sales, reverse=True)
