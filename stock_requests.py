@@ -8972,7 +8972,7 @@ if st.session_state["nav_page"] == "tab_accts":
                 ws = _acct_ws(tab)
                 if ws is None:
                     return None
-                return calc.acct_rows_to_df(get_cached(ws))
+                return _memo_from_sheet(ws, "acct_df_" + tab, calc.acct_rows_to_df)
 
             def _acct_fmt(df, cols=None):
                 cfg = {}
@@ -8981,6 +8981,9 @@ if st.session_state["nav_page"] == "tab_accts":
                         cfg[c] = st.column_config.NumberColumn(c, format="%.2f")
                 return cfg
 
+            if not hasattr(calc, "acct_rows_to_df"):
+                st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات المتاجر) جنب stock_requests.py.")
+                st.stop()
             _a_noon, _a_ty, _a_amz = st.tabs(["🟢 نون | Noon", "🟣 تريندول | Trendyol", "🟠 أمازون | Amazon"])
             with _a_ty:
                 st.info("قريباً — هنبدأ بنون الأول.")
