@@ -439,6 +439,7 @@ TAB_LOCK_OPTIONS = [
     ("tab13",     "📈 مراجعة المبيعات | Sales Review"),
     ("tab15",     "🗓️ تحليل الجدولة | Schedule Analysis"),
     ("tab16",     "📦 مخزون بدون بيع | No Sales"),
+    ("tab_accts", "🏦 حسابات المتاجر | Store Accounts"),
     ("tab_upload", "📤 رفع ملف | Upload Files"),
 ]
 TAB_LOCK_LABELS = dict(TAB_LOCK_OPTIONS)
@@ -4524,6 +4525,7 @@ NAV_ITEMS = [
     ("tab_contracts", "📑", "العقود | Contracts"),
     ("tab16",    "🗂️", "مخزون بدون بيع | No Sales"),
     ("tab_ads",  "📢", "الإعلانات | Ads"),
+    ("tab_accts", "🏦", "حسابات المتاجر | Store Accounts"),
     ("tab_upload", "📤", "رفع ملف | Upload Files"),
 ]
 NAV_KEY_LABELS = {k: lbl for k, _i, lbl in NAV_ITEMS}
@@ -4683,6 +4685,7 @@ tab_china = st.container(key="navpanel_tab_china")
 tab_contracts = st.container(key="navpanel_tab_contracts")
 tab16    = st.container(key="navpanel_tab16")
 tab_ads  = st.container(key="navpanel_tab_ads")
+tab_accts = st.container(key="navpanel_tab_accts")
 tab_upload = st.container(key="navpanel_tab_upload")
 
 for _key, _i, _l in NAV_ITEMS:
@@ -8950,3 +8953,120 @@ if st.session_state["nav_page"] == "tab_ads":
                 _render_ads_performance_tab_amazon()
             with _ty_ads_subtab:
                 _render_ads_performance_tab_trendyol()
+
+
+# ═══════════════ 🏦 حسابات المتاجر | Store Accounts ═══════════════
+# نون: من تابات الشيت Noon_Finance_API / Noon_Orders_API (بيكتبهم بوت Noon_Accounts.py). تريندول وأمازون لاحقاً.
+if st.session_state["nav_page"] == "tab_accts":
+    with tab_accts:
+        if _tab_gate("tab_accts", "🏦 حسابات المتاجر | Store Accounts"):
+            st.subheader("🏦 حسابات المتاجر | Store Accounts")
+
+            def _acct_ws(tab):
+                try:
+                    return ss.worksheet(tab)
+                except Exception:
+                    return None
+
+            def _acct_load(tab):
+                ws = _acct_ws(tab)
+                if ws is None:
+                    return None
+                return calc.acct_rows_to_df(get_cached(ws))
+
+            def _acct_fmt(df, cols=None):
+                cfg = {}
+                for c in df.columns:
+                    if pd.api.types.is_float_dtype(df[c]):
+                        cfg[c] = st.column_config.NumberColumn(c, format="%.2f")
+                return cfg
+
+            _a_noon, _a_ty, _a_amz = st.tabs(["🟢 نون | Noon", "🟣 تريندول | Trendyol", "🟠 أمازون | Amazon"])
+            with _a_ty:
+                st.info("قريباً — هنبدأ بنون الأول.")
+            with _a_amz:
+                st.info("قريباً — هنبدأ بنون الأول.")
+            with _a_noon:
+                if st.button("🔄 تحديث البيانات من الشيت", key="acct_noon_refresh"):
+                    for _t in ("Noon_Finance_API", "Noon_Orders_API"):
+                        _w = _acct_ws(_t)
+                        if _w is not None:
+                            clear_cache(_w)
+                    st.rerun()
+                _fin_all = _acct_load("Noon_Finance_API")
+                _ord_all = _acct_load("Noon_Orders_API")
+                if _fin_all is None or _fin_all.empty:
+                    st.warning("مفيش بيانات في تاب Noon_Finance_API لسه. شغّل بوت Noon_Accounts.py (سحب كامل) مع تفعيل خانة Google Sheet.")
+                else:
+                    _stores = sorted({x for x in _fin_all.get("Store", pd.Series(dtype=str)).astype(str) if x}) or [""]
+                    _c1, _c2, _c3 = st.columns([2, 1, 1])
+                    _sel = _c1.multiselect("المتجر | Store", _stores, default=_stores, key="acct_noon_stores")
+                    _dmin = pd.to_datetime(_fin_all["Transaction Date"], errors="coerce").dt.date.min()
+                    _dmax = pd.to_datetime(_fin_all["Transaction Date"], errors="coerce").dt.date.max()
+                    _df_from = _c2.date_input("من (تاريخ المعاملة)", value=_dmin, min_value=_dmin, max_value=_dmax, key="acct_noon_from")
+                    _df_to = _c3.date_input("إلى", value=_dmax, min_value=_dmin, max_value=_dmax, key="acct_noon_to")
+                    _f = _fin_all[_fin_all["Store"].isin(_sel)] if "Store" in _fin_all.columns and _sel else _fin_all
+                    _o = _ord_all
+                    if _o is not None and not _o.empty and "Store" in _o.columns and _sel:
+                        _o = _o[_o["Store"].isin(_sel)]
+                    _S = calc.acct_noon_summary(_f, _df_from, _df_to)
+                    _k = _S["kpi"]
+                    if not _k:
+                        st.info("مفيش معاملات في الفترة دي.")
+                    else:
+                        _m = lambda v: f"{v:,.0f}"
+                        _r1 = st.columns(4)
+                        _r1[0].metric("💰 صافي المبيعات (Net Proceeds)", _m(_k["net"]))
+                        _r1[1].metric("🏷️ عمولة نون", _m(_k["referral"]))
+                        _r1[2].metric("🚚 رسوم الشحن والتخزين", _m(_k["fulfil"]))
+                        _r1[3].metric("📢 رسوم الكشف (إعلانات وغيرها)", _m(_k["ads"]))
+                        _r2 = st.columns(4)
+                        _r2[0].metric("➕ دعم/خصومات نون", _m(_k["subsidy"] + _k["nonorder_sub"]))
+                        _r2[1].metric("↩️ مرتجعات", f"{_k['returns_n']:,} · {_m(_k['returns_amt'])}")
+                        _r2[2].metric("🧾 مستحق من الكشوف", _m(_k["earned"]))
+                        _r2[3].metric("🏦 اتدفع لك (تحويلات بنكية)", _m(_k["paid"] + _k["transfers"]))
+                        _bal = _k["balance"]
+                        st.caption(f"الرصيد = المستحق − المدفوع = {_bal:,.0f} "
+                                   f"({'مدفوع أكتر من المستحق في الفترة دي — غالباً رصيد من قبل 1/10' if _bal < 0 else 'لسه مستحق لك'}). "
+                                   f"ملحوظة: بيان الفترة من تاريخ أول كشف تم سحبه فقط.")
+                        _sub = st.radio("العرض", ["🧾 الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
+                                        horizontal=True, key="acct_noon_view", label_visibility="collapsed")
+                        if _sub.startswith("🧾"):
+                            _stm = _S["statements"]
+                            st.markdown("**الكشوف الأسبوعية**")
+                            if not _stm.empty:
+                                st.dataframe(_stm, use_container_width=True, hide_index=True, column_config=_acct_fmt(_stm))
+                            st.markdown("**الدفعات والتحويلات**")
+                            _pm = _S["payments"]
+                            if not _pm.empty:
+                                st.dataframe(_pm, use_container_width=True, hide_index=True, column_config=_acct_fmt(_pm))
+                        elif _sub.startswith("📦"):
+                            _sk = _S["skus"]
+                            _q = st.text_input("🔍 بحث SKU", key="acct_noon_skuq")
+                            if _q.strip() and not _sk.empty:
+                                _sk = _sk[_sk.astype(str).apply(lambda r: _q.strip().lower() in " ".join(r).lower(), axis=1)]
+                            if _sk.empty:
+                                st.info("مفيش أصناف.")
+                            else:
+                                st.dataframe(_sk, use_container_width=True, hide_index=True, column_config=_acct_fmt(_sk))
+                                st.caption(f"رسوم بدون صنف (شحن/تخزين على الشحنة): {_S['unallocated']:,.0f} — مش داخلة في الجدول ده.")
+                        elif _sub.startswith("📅"):
+                            _dl = _S["daily"]
+                            if not _dl.empty:
+                                st.bar_chart(_dl.set_index("التاريخ")[["Total"]])
+                                st.dataframe(_dl, use_container_width=True, hide_index=True, column_config=_acct_fmt(_dl))
+                        elif _sub.startswith("⏳"):
+                            _pd_ = calc.acct_noon_pending(_f, _o) if _o is not None else pd.DataFrame()
+                            if _pd_ is None or _pd_.empty:
+                                st.success("كل الأوردرات المسلّمة ظاهرة في كشوف المالية ✅")
+                            else:
+                                st.caption(f"{len(_pd_):,} صنف اتسلّم ومالوش صف مالي لسه (نون بتضيفه في الكشف الجاي، عادي لو أقل من أسبوع).")
+                                _show = [c for c in ("order_nr", "item_nr", "sku", "delivered_at", "أيام من التسليم", "Store") if c in _pd_.columns]
+                                st.dataframe(_pd_[_show], use_container_width=True, hide_index=True)
+                        else:
+                            _raw_df = _S["df"].drop(columns=[c for c in ("_d",) if c in _S["df"].columns])
+                            st.dataframe(_raw_df, use_container_width=True, hide_index=True)
+                        _xl_df = _S["df"].drop(columns=[c for c in ("_d",) if c in _S["df"].columns])
+                        st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_df),
+                                           file_name=f"noon_accounts_{file_timestamp()}.xlsx",
+                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_dl")

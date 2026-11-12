@@ -5551,3 +5551,107 @@ ADS_GLOSSARY_HTML = (
     '<b>تغطية</b> = عدد أيام المخزون الكافية على معدل البيع الحالي.'
     '</div>'
 )
+
+
+# ═══════════════════════ حسابات المتاجر (نون) | Store accounts — Noon ═══════════════════════
+ACCT_FIN_NUM = ("Net Proceeds", "Referral Fee including VAT", "Fullfilment & Logistics Fees including VAT",
+                "Other Order Fees including VAT", "Order Subsidies including VAT", "Non-Order Fees including VAT",
+                "Non-Order Subsidies including VAT", "Others including VAT", "Total")
+
+
+def acct_rows_to_df(raw):
+    """raw = قيم الشيت (أول صف عناوين) → DataFrame. الأعمدة الرقمية بتتحوّل لأرقام."""
+    import pandas as pd
+    if not raw or len(raw) < 2:
+        return pd.DataFrame()
+    hdr = [str(h).strip() for h in raw[0]]
+    rows = [list(r) + [""] * (len(hdr) - len(r)) for r in raw[1:] if any(str(c).strip() for c in r)]
+    df = pd.DataFrame([r[:len(hdr)] for r in rows], columns=hdr)
+    for c in ACCT_FIN_NUM:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0.0)
+    return df
+
+
+def acct_noon_summary(fin, d_from=None, d_to=None):
+    """يلخّص دفتر المالية (DataFrame لمتجر واحد أو أكتر). يرجع dict فيه الإجماليات والجداول."""
+    import pandas as pd
+    out = {"kpi": {}, "statements": pd.DataFrame(), "payments": pd.DataFrame(), "skus": pd.DataFrame(), "daily": pd.DataFrame(), "df": fin}
+    if fin is None or fin.empty:
+        return out
+    df = fin.copy()
+    df["_d"] = pd.to_datetime(df["Transaction Date"], errors="coerce").dt.date
+    if d_from:
+        df = df[df["_d"] >= d_from]
+    if d_to:
+        df = df[df["_d"] <= d_to]
+    out["df"] = df
+    if df.empty:
+        return out
+    tt = df["Transaction Type"].astype(str)
+    earn = df[tt.isin(["order", "order_update", "statement_fee"])]
+    pay = df[tt == "payment"]
+    bt = df[tt == "balance_transfer"]
+    sf = df[tt == "statement_fee"]
+    orow = df[tt == "order"]
+    upd = df[tt == "order_update"]
+    S = lambda d, c: float(d[c].sum()) if c in d.columns else 0.0
+    k = {
+        "net": S(earn, "Net Proceeds"),
+        "referral": S(earn, "Referral Fee including VAT"),
+        "fulfil": S(earn, "Fullfilment & Logistics Fees including VAT"),
+        "other_fees": S(earn, "Other Order Fees including VAT"),
+        "subsidy": S(earn, "Order Subsidies including VAT"),
+        "ads": S(sf, "Non-Order Fees including VAT"),                      # إعلانات/رسوم الكشف
+        "nonorder_fees_other": S(earn[tt.loc[earn.index] != "statement_fee"], "Non-Order Fees including VAT"),
+        "nonorder_sub": S(earn, "Non-Order Subsidies including VAT"),
+        "earned": S(earn, "Total"),
+        "paid": -S(pay, "Total"),
+        "transfers": -S(bt, "Total"),
+        "balance": S(df, "Total"),
+        "orders_n": int((orow["Net Proceeds"] > 0).sum()),
+        "returns_n": int((upd["Net Proceeds"] < 0).sum()),
+        "returns_amt": S(upd[upd["Net Proceeds"] < 0], "Net Proceeds"),
+    }
+    out["kpi"] = k
+    cols = [c for c in ACCT_FIN_NUM if c in df.columns]
+    # الكشوف الأسبوعية: Reference Nr بيبدأ بـ PS-
+    st_ = earn[earn["Reference Nr"].astype(str).str.startswith("PS-")]
+    if not st_.empty:
+        g = st_.groupby("Reference Nr").agg(**{"تاريخ الكشف": ("_d", "max"), "صفوف": ("Total", "size")},
+                                           **{c: (c, "sum") for c in cols if c != "Others including VAT"}).reset_index()
+        out["statements"] = g.sort_values("تاريخ الكشف", ascending=False)
+    p = df[tt.isin(["payment", "balance_transfer"])]
+    if not p.empty:
+        out["payments"] = p[["_d", "Reference Nr", "Title", "Transaction Type", "Total"]].rename(columns={"_d": "التاريخ"}).sort_values("التاريخ", ascending=False)
+    # حسب الصنف (SKU) — الصفوف اللي ليها SKU بس (رسوم الشحن بدون صنف بتتحسب لوحدها)
+    it = earn[(earn["Item Nr"].astype(str).str.strip() != "") & (earn["SKUs"].astype(str).str.strip() != "")]
+    if not it.empty:
+        it = it.assign(_sold=((it["Transaction Type"] == "order") & (it["Net Proceeds"] > 0)).astype(int),
+                       _ret=((it["Transaction Type"] == "order_update") & (it["Net Proceeds"] < 0)).astype(int))
+        sk = it.groupby("SKUs").agg(**{"Partner SKU": ("Partner SKUs", "first"), "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum")},
+                                    **{c: (c, "sum") for c in ("Net Proceeds", "Referral Fee including VAT", "Fullfilment & Logistics Fees including VAT",
+                                                               "Other Order Fees including VAT", "Order Subsidies including VAT", "Total") if c in it.columns}).reset_index()
+        out["skus"] = sk.sort_values("Total", ascending=False)
+    unalloc = earn[(earn["Item Nr"].astype(str).str.strip() == "") & (tt.loc[earn.index] != "statement_fee")]
+    out["unallocated"] = float(unalloc["Total"].sum()) if not unalloc.empty else 0.0
+    dly = earn.groupby("_d")[["Net Proceeds", "Total"]].sum().reset_index().rename(columns={"_d": "التاريخ"})
+    out["daily"] = dly.sort_values("التاريخ")
+    return out
+
+
+def acct_noon_pending(fin, orders, today=None):
+    """أوردرات اتسلّمت (item_status=delivered) ومالهاش أي صف في دفتر المالية = لسه ماظهرتش في كشف."""
+    import pandas as pd
+    if orders is None or orders.empty:
+        return pd.DataFrame()
+    today = today or datetime.now().date()
+    seen = set(fin["Item Nr"].astype(str).str.strip()) if fin is not None and not fin.empty and "Item Nr" in fin.columns else set()
+    o = orders[orders["item_status"].astype(str).str.lower() == "delivered"].copy()
+    o = o[~o["item_nr"].astype(str).str.strip().isin(seen)]
+    if o.empty:
+        return o
+    o["_dd"] = pd.to_datetime(o["delivered_at"].astype(str).str.replace(" UTC", "", regex=False), errors="coerce")
+    ref = pd.Timestamp(today) if today else pd.Timestamp.now()
+    o["أيام من التسليم"] = (ref - o["_dd"]).dt.days
+    return o.sort_values("_dd")
