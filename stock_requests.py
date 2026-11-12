@@ -8359,6 +8359,8 @@ if st.session_state["nav_page"] == "tab14":
                     for _s, _c in items:
                         if _s in _shown or "FBN" not in _c:
                             continue
+                        if recent_sched_map_t14.get(_s.upper()) or _s.upper() in pending_approval_skus_t14:     # مجدول آخر 4 أيام أو قيد الموافقة — مش محتاج متابعة
+                            continue
                         try:
                             _stk, _mon = float(_c["FBN"].get("stock") or 0), float(_c["FBN"].get("sales_month") or 0)
                         except Exception:
@@ -8367,7 +8369,7 @@ if st.session_state["nav_page"] == "tab14":
                             _low.append((_s, _stk, _mon))
                     if _low:
                         _low.sort(key=lambda x: -x[2])
-                        st.markdown('<div dir="rtl" style="font-size:12px;color:#fbbf24;line-height:1.9;">🔎 <b>متابعة مخزون (FBN):</b> ' +
+                        st.markdown('<div dir="rtl" style="font-size:12px;color:#f87171;line-height:1.9;">🔎 <b>متابعة مخزون (FBN):</b> ' +
                                     " &nbsp;|&nbsp; ".join(f'{sku_link_html(s)} مخزون <b>{a:g}</b> من شهري <b>{m:g}</b>' for s, a, m in _low) + '</div>',
                                     unsafe_allow_html=True)
 
