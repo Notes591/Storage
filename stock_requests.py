@@ -8281,6 +8281,10 @@ if st.session_state["nav_page"] == "tab14":
                                  if a in asin_rows_t14] if _vw in ("all", "amz") else []
                     if not (noon_items or ty_items or amz_items):
                         continue
+                    # الجداول: مفيهاش المنتجات اللي مباعتش أمس (بتكبّر الجدول على الفاضي) — إلا لو بتبحث
+                    noon_tbl = [x for x in noon_items if q_t14 or _yv(x[1], "FBN") + _yv(x[1], "FBB") > 0]
+                    ty_tbl = [x for x in ty_items if q_t14 or _yv(x[1], "TY") > 0]
+                    amz_tbl = [x for x in amz_items if q_t14 or _yv(x[1], "FSAB") + _yv(x[1], "FBA") > 0]
                     first_key = ((noon_items[0][0] if noon_items else None) or (amz_items[0][0] if amz_items else None)
                                  or (ty_items[0][0] if ty_items else None))
                     first_row = ((noon_items[0][1].get("FBN") or noon_items[0][1].get("FBB")) if noon_items
@@ -8330,11 +8334,11 @@ if st.session_state["nav_page"] == "tab14":
                         if "noon" in _pcols:
                             with _pcols["noon"]:
                                 st.markdown('<span class="wh-badge" style="background:#064e3b;color:#6ee7b7;">' + plat_badge("noon", 16) + 'نون | Noon</span>', unsafe_allow_html=True)
-                                if noon_items:
+                                if noon_tbl:
                                     _t14_yday_line([("تخزين FBN", sum(_yv(c, "FBN") for _s, c in noon_items)),
                                                     ("عادي FBB", sum(_yv(c, "FBB") for _s, c in noon_items))], "noon")
                                     _rows = []
-                                    for _s, _c in noon_items:
+                                    for _s, _c in noon_tbl:
                                         _r = _mk_r_noon(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
                                         _stk = " · ".join(f"{k} {_c[k]['stock']}" for k in ("FBN", "FBB") if k in _c)
@@ -8343,17 +8347,21 @@ if st.session_state["nav_page"] == "tab14":
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FBN", "FBB") if k in _c),
                                                       "stock": _stk, "price": _pr, "ci": _ci, "net": _net})
                                     for _i in _sku_table(_rows, "noon"):
-                                        _detail_noon(*noon_items[_i])
+                                        _detail_noon(*noon_tbl[_i])
+                                    if len(noon_items) > len(noon_tbl):
+                                        st.caption(f"+ {len(noon_items) - len(noon_tbl)} SKU بدون مبيعات أمس (مخفية — ابحث بالكود لإظهارها)")
+                                elif noon_items:
+                                    st.caption(f"— مفيش مبيعات نون أمس ({len(noon_items)} SKU) | no Noon sales yesterday")
                                 else:
                                     st.caption("— مفيش SKU نون لهذا الكود | no Noon SKU for this code")
                         if "ty" in _pcols:
                             with _pcols["ty"]:
                                 _hb = next((bb.get("ty_hint") for bb in g["blocks"] if bb.get("ty_hint")), None)
                                 st.markdown('<span class="wh-badge" style="background:#4c1d95;color:#ddd6fe;">' + plat_badge("trendyol", 16) + 'تريندول | Trendyol</span>', unsafe_allow_html=True)
-                                if ty_items:
+                                if ty_tbl:
                                     _t14_yday_line([("", sum(_yv(c, "TY") for _k, c in ty_items))], "ty")
                                     _rows = []
-                                    for _k, _c in ty_items:
+                                    for _k, _c in ty_tbl:
                                         _r = _c["TY"]
                                         _pr, _ci, _net = _price_info(_r, com_map_ty_t14, {})
                                         _bc = (f'<span style="font-family:monospace;font-weight:700;user-select:all;">{_k}</span>')
@@ -8363,7 +8371,9 @@ if st.session_state["nav_page"] == "tab14":
                                     if not ty_fee_set_t14:
                                         st.caption("ℹ️ توصيل تريندول محسوب 0 — ضيف trendyol_delivery_fee في Settings")
                                     for _i in _sel_ty:
-                                        _detail_ty(*ty_items[_i])
+                                        _detail_ty(*ty_tbl[_i])
+                                    if len(ty_items) > len(ty_tbl):
+                                        st.caption(f"+ {len(ty_items) - len(ty_tbl)} Barcode بدون مبيعات أمس (مخفية)")
                                 elif _hb and get_trendyol_bundle()["rows"]:
                                     st.caption("— مفيش مبيعات تريندول أمس | no Trendyol sales yesterday")
                                     st.markdown(
@@ -8380,11 +8390,11 @@ if st.session_state["nav_page"] == "tab14":
                         if "amz" in _pcols:
                             with _pcols["amz"]:
                                 st.markdown('<span class="wh-badge" style="background:#7c2d12;color:#fed7aa;">' + plat_badge("amazon", 16) + 'أمازون | Amazon</span>', unsafe_allow_html=True)
-                                if amz_items:
+                                if amz_tbl:
                                     _t14_yday_line([("تخزين FBA", sum(_yv(c, "FBA") for _a, c in amz_items)),
                                                     ("عادي FSAB", sum(_yv(c, "FSAB") for _a, c in amz_items))], "amz")
                                     _rows = []
-                                    for _a, _c in amz_items:
+                                    for _a, _c in amz_tbl:
                                         _r = _mk_r_amz(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
                                         _stk = " · ".join(f"{k} {_c[k]['stock']}" for k in ("FSAB", "FBA") if k in _c)
@@ -8393,7 +8403,11 @@ if st.session_state["nav_page"] == "tab14":
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FSAB", "FBA") if k in _c),
                                                       "stock": _stk, "price": _pr, "ci": _ci, "net": _net})
                                     for _i in _sku_table(_rows, "amz"):
-                                        _detail_amz(*amz_items[_i])
+                                        _detail_amz(*amz_tbl[_i])
+                                    if len(amz_items) > len(amz_tbl):
+                                        st.caption(f"+ {len(amz_items) - len(amz_tbl)} ASIN بدون مبيعات أمس (مخفية)")
+                                elif amz_items:
+                                    st.caption(f"— مفيش مبيعات أمازون أمس ({len(amz_items)} ASIN) | no Amazon sales yesterday")
                                 else:
                                     _ha = next((bb.get("amz_hint") for bb in g["blocks"] if bb.get("amz_hint")), None)
                                     if _ha:
