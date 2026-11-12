@@ -5559,6 +5559,29 @@ ACCT_FIN_NUM = ("Net Proceeds", "Referral Fee including VAT", "Fullfilment & Log
                 "Non-Order Subsidies including VAT", "Others including VAT", "Total")
 
 
+def _acct_num(x):
+    """يقرا رقم من نص الشيت: فواصل آلاف، فاصلة عشرية، سالب بأقواس أو علامة − ، أرقام هندية."""
+    if isinstance(x, (int, float)):
+        return float(x)
+    t = str(x).strip()
+    if not t:
+        return 0.0
+    t = t.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٫٬", "0123456789.,"))
+    t = t.replace("\u2212", "-").replace("\u2013", "-").replace("\xa0", "").replace(" ", "")
+    neg = t.startswith("(") and t.endswith(")")
+    t = t.strip("()")
+    if "," in t and "." in t:
+        t = t.replace(",", "") if t.rfind(".") > t.rfind(",") else t.replace(".", "").replace(",", ".")
+    elif "," in t:
+        parts = t.split(",")
+        t = t.replace(",", "") if (len(parts[-1]) == 3 and len(parts) > 1 and parts[0].lstrip("-") != "0") else t.replace(",", ".")
+    try:
+        v = float(t)
+    except Exception:
+        return 0.0
+    return -v if neg else v
+
+
 def acct_rows_to_df(raw):
     """raw = قيم الشيت (أول صف عناوين) → DataFrame. الأعمدة الرقمية بتتحوّل لأرقام."""
     import pandas as pd
@@ -5569,7 +5592,7 @@ def acct_rows_to_df(raw):
     df = pd.DataFrame([r[:len(hdr)] for r in rows], columns=hdr)
     for c in ACCT_FIN_NUM:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0.0)
+            df[c] = df[c].map(_acct_num)
     return df
 
 

@@ -8998,6 +8998,17 @@ if st.session_state["nav_page"] == "tab_accts":
                     st.rerun()
                 _fin_all = _acct_load("Noon_Finance_API")
                 _ord_all = _acct_load("Noon_Orders_API")
+                if _fin_all is not None and not _fin_all.empty:
+                    with st.expander("🔧 تشخيص البيانات المقروءة من الشيت", expanded=False):
+                        _rw = get_cached(_acct_ws("Noon_Finance_API"))
+                        st.caption(f"صفوف الشيت: {len(_rw) - 1:,} · أعمدة: {len(_rw[0]) if _rw else 0}")
+                        _dg = []
+                        for _c in calc.ACCT_FIN_NUM:
+                            if _c in _fin_all.columns:
+                                _ix = _rw[0].index(_c) if _c in _rw[0] else -1
+                                _smp = [str(r[_ix]) for r in _rw[1:400] if _ix >= 0 and len(r) > _ix and str(r[_ix]).strip() not in ("", "0")][:4]
+                                _dg.append({"العمود": _c, "صفوف غير صفرية": int((_fin_all[_c] != 0).sum()), "المجموع": round(float(_fin_all[_c].sum()), 2), "عيّنة من الشيت": " | ".join(_smp)})
+                        st.dataframe(pd.DataFrame(_dg), use_container_width=True, hide_index=True)
                 if _fin_all is None or _fin_all.empty:
                     st.warning("مفيش بيانات في تاب Noon_Finance_API لسه. شغّل بوت Noon_Accounts.py (سحب كامل) مع تفعيل خانة Google Sheet.")
                 else:
