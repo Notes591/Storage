@@ -8191,10 +8191,30 @@ if st.session_state["nav_page"] == "tab14":
                         "صافي": x["net"]} for x in rows])
                     _vis = ["المعرّف"] + [c for c in (st.session_state.get("t14_cols_sel") or _T14_COLS) if c in _T14_COLS]
                     _df = _df[_vis]
-                    _ev = st.dataframe(_df, hide_index=True, use_container_width=True, on_select="rerun",
-                                       selection_mode="multi-row", key=f"t14tbl_{_t14_bn[0]}_{plat}",
-                                       column_config={"سعر البيع": st.column_config.NumberColumn(format="%.2f"),
-                                                      "صافي": st.column_config.NumberColumn(format="%.2f")})
+                    # عرض كل عمود على قد محتواه (جدول مضغوط من غير فراغات)
+                    _idw = int(min(max(max(len(str(x["id"])) for x in rows) * 8.5 + 24, 90), 260))
+                    _wpx = {"المعرّف": _idw, "أمس": 58, f"آخر {sales_display_days} يوم": 82, "شهري": 62, "مخزون": 112,
+                            "سعر البيع": 80, "عمولة": 66, "توصيل": 66, "صافي": 72}
+                    def _cfg(px):
+                        _c = {"المعرّف": st.column_config.TextColumn(width=px["المعرّف"])}
+                        for _n in _wpx:
+                            if _n == "المعرّف":
+                                continue
+                            if _n in ("سعر البيع", "صافي"):
+                                _c[_n] = st.column_config.NumberColumn(format="%.2f", width=px[_n])
+                            elif _n in ("عمولة", "توصيل", "مخزون"):
+                                _c[_n] = st.column_config.TextColumn(width=px[_n])
+                            else:
+                                _c[_n] = st.column_config.NumberColumn(width=px[_n])
+                        return _c
+                    _kw = dict(hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t14tbl_{_t14_bn[0]}_{plat}")
+                    try:
+                        _ev = st.dataframe(_df, column_config=_cfg(_wpx), width="content", **_kw)
+                    except Exception:
+                        try:
+                            _ev = st.dataframe(_df, column_config=_cfg({k: "small" for k in _wpx}), use_container_width=False, **_kw)
+                        except Exception:
+                            _ev = st.dataframe(_df, use_container_width=True, **_kw)
                     st.caption("👆 اضغط على صف المنتج لفتح تفاصيله")
                     try:
                         return sorted(_ev.selection.rows)
