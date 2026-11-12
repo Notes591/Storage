@@ -8352,6 +8352,25 @@ if st.session_state["nav_page"] == "tab14":
                         with _ec:
                             fn(r_, _pt)
 
+                def _noon_low_note(items, shown):
+                    """SKUs نون (FBN) مباعتش أمس (مخفية من الجدول) بس مخزونها أقل من نص مبيعاتها الشهرية — سطر صغير «متابعة مخزون»."""
+                    _shown = {s for s, _c in shown}
+                    _low = []
+                    for _s, _c in items:
+                        if _s in _shown or "FBN" not in _c:
+                            continue
+                        try:
+                            _stk, _mon = float(_c["FBN"].get("stock") or 0), float(_c["FBN"].get("sales_month") or 0)
+                        except Exception:
+                            continue
+                        if _mon > 0 and _stk * 2 < _mon:
+                            _low.append((_s, _stk, _mon))
+                    if _low:
+                        _low.sort(key=lambda x: -x[2])
+                        st.markdown('<div dir="rtl" style="font-size:12px;color:#fbbf24;line-height:1.9;">🔎 <b>متابعة مخزون (FBN):</b> ' +
+                                    " &nbsp;|&nbsp; ".join(f'{sku_link_html(s)} مخزون <b>{a:g}</b> من شهري <b>{m:g}</b>' for s, a, m in _low) + '</div>',
+                                    unsafe_allow_html=True)
+
                 def _detail_noon(sku, chs):
                     r_ = _mk_r_noon(chs)
                     _sn = _t14_noon_shown(chs)
@@ -8490,8 +8509,10 @@ if st.session_state["nav_page"] == "tab14":
                                         _detail_noon(*noon_tbl[_i])
                                     if len(noon_items) > len(noon_tbl):
                                         st.caption(f"+ {len(noon_items) - len(noon_tbl)} SKU بدون مبيعات أمس (مخفية — ابحث بالكود لإظهارها)")
+                                        _noon_low_note(noon_items, noon_tbl)
                                 elif noon_items:
                                     st.caption(f"— مفيش مبيعات نون أمس ({len(noon_items)} SKU) | no Noon sales yesterday")
+                                    _noon_low_note(noon_items, noon_tbl)
                                 else:
                                     st.caption("— مفيش SKU نون لهذا الكود | no Noon SKU for this code")
                         if "ty" in _pcols:
