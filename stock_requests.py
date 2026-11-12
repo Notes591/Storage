@@ -274,26 +274,36 @@ def build_scheduled_row(*args, **kwargs):
 cancelled_sheet   = sheets["CancelledSchedule"]
 reschedule_sheet  = sheets["Rescheduled"]
 expired_sheet     = sheets["Expired"]
+def _ws_once(tab, headers):
+    """نفس get_or_create_worksheet بس مرة واحدة في الجلسة (بدل ما تتنادى مع كل تفاعل وتعمل طلبات جوجل زيادة)."""
+    c = st.session_state.setdefault("_ws_once_cache", {})
+    if tab not in c:
+        c[tab] = get_or_create_worksheet(tab, headers)
+    return c[tab]
+
+
 # نسخة التجربة: secret اسمه INVENTORY_TAB (مثلاً Inventory_API) يخلي المخزون يتقرا منه بدل Inventory.
-_INV_TAB = str(os.environ.get("INVENTORY_TAB") or st.secrets.get("INVENTORY_TAB", "") or "").strip()
+_INV_TAB = str(os.environ.get("INVENTORY_TAB") or st.secrets.get("INVENTORY_TAB", "") or "Inventory_API").strip()
 if _INV_TAB and _INV_TAB != "Inventory":
-    inventory_sheet = get_or_create_worksheet(_INV_TAB, TABS_CONFIG["Inventory"])
+    inventory_sheet = _ws_once(_INV_TAB, TABS_CONFIG["Inventory"])
 else:
     _INV_TAB = ""
     inventory_sheet = sheets["Inventory"]
-# نسخة التجربة: لو في secret اسمه ORDERS_TAB (مثلاً DailyOrders_API) التطبيق بيقرا الطلبات منه بدل DailyOrders.
-# من غير الـ secret ده بيشتغل عادي 100% على DailyOrders.
-_ORDERS_TAB = str(os.environ.get("ORDERS_TAB") or st.secrets.get("ORDERS_TAB", "") or "").strip()
+# نسخة الـ API: الطلبات من تاب DailyOrders_API والمخزون من Inventory_API (تقدر تغيّرهم بـ secret ORDERS_TAB / INVENTORY_TAB).
+_ORDERS_TAB = str(os.environ.get("ORDERS_TAB") or st.secrets.get("ORDERS_TAB", "") or "DailyOrders_API").strip()
 if _ORDERS_TAB and _ORDERS_TAB != "DailyOrders":
-    daily_orders_sheet = get_or_create_worksheet(_ORDERS_TAB, TABS_CONFIG["DailyOrders"])
+    daily_orders_sheet = _ws_once(_ORDERS_TAB, TABS_CONFIG["DailyOrders"])
 else:
     _ORDERS_TAB = ""
     daily_orders_sheet = sheets["DailyOrders"]
 daily_orders_amazon_sheet = sheets["DailyOrdersAmazon"]
 stock_amazon_sheet   = sheets["StockAmazon"]
-daily_orders_trendyol_sheet = sheets["DailyOrdersTrendyol"]
+# تريندول: الطلبات والمنتجات من تابات الـ API (DailyOrdersTrendyol_API / TrendyolProducts_API) — الشيتات القديمة فاضلة زي ما هي.
+_TY_ORD_TAB = str(os.environ.get("TY_ORDERS_TAB") or st.secrets.get("TY_ORDERS_TAB", "") or "DailyOrdersTrendyol_API").strip()
+_TY_PRD_TAB = str(os.environ.get("TY_PRODUCTS_TAB") or st.secrets.get("TY_PRODUCTS_TAB", "") or "TrendyolProducts_API").strip()
+daily_orders_trendyol_sheet = _ws_once(_TY_ORD_TAB, TABS_CONFIG["DailyOrdersTrendyol"])
 ads_ty_sheet = sheets["AdvertisementsTrendyol"]
-ty_products_sheet = sheets["TrendyolProducts"]
+ty_products_sheet = _ws_once(_TY_PRD_TAB, TABS_CONFIG["TrendyolProducts"])
 china_img_sheet = sheets["ChinaImages"]
 contracts_sheet = sheets["Contracts"]
 settings_sheet       = sheets["Settings"]
@@ -303,14 +313,22 @@ tacweed_amazon_sheet = sheets["TacweedAmazon"]
 warehouse_stock_sheet = sheets["WarehouseStock"]
 ads_sheet             = sheets["Advertisements"]
 ads_amz_sheet         = sheets["AdvertisementsAmz"]
-com_sheet             = sheets["COM"]
+# العمولة والتوصيل: الاعتماد كله على تاب COM_API (من المعاملات المالية للـ API) — من غير رجوع لتاب COM القديم.
+_COM_TAB = str(os.environ.get("COM_TAB") or st.secrets.get("COM_TAB", "") or "COM_API").strip()
+com_sheet = _ws_once(_COM_TAB, TABS_CONFIG["COM"])
 # الكتالوج: LIVE_TAB (env/secret) — لو التاب موجود وفيه بيانات بيتقرا منه، وإلا بيرجع لتاب LIVE العادي.
-_LIVE_TAB = str(os.environ.get("LIVE_TAB") or st.secrets.get("LIVE_TAB", "") or "").strip()
+_LIVE_TAB = str(os.environ.get("LIVE_TAB") or st.secrets.get("LIVE_TAB", "") or "LIVE_API").strip()
 live_sheet = sheets["LIVE"]
 if _LIVE_TAB and _LIVE_TAB != "LIVE":
     try:
-        _lw = get_or_create_worksheet(_LIVE_TAB, TABS_CONFIG["LIVE"])
-        if len(_lw.col_values(1)) > 1:
+        _lw = st.session_state.get("_live_api_ws")        # متخزّن في الجلسة: من غير قراءة العمود كله مع كل تفاعل
+        if _lw is None:
+            _lw = get_or_create_worksheet(_LIVE_TAB, TABS_CONFIG["LIVE"])
+            if str(_lw.acell("A2").value or "").strip():   # خلية واحدة بدل col_values (كانت بتقرا العمود كله)
+                st.session_state["_live_api_ws"] = _lw
+            else:
+                _lw = None
+        if _lw is not None:
             live_sheet = _lw
         else:
             _LIVE_TAB = ""
@@ -485,13 +503,35 @@ def get_excluded_warehouses():
     return {w.strip().upper() for w in val.split(",") if w.strip()}
 
 # ══ links map ══
-def get_links_map():
-    data = get_cached(links_ws)
+def _images_api_map():
+    """روابط صور من الـ API: نون (تاب Images_API) وتريندول (تاب TrendyolProducts_API بالباركود) — بتتقرا مرة واحدة في الجلسة."""
+    if "_img_api_map" in st.session_state:
+        return st.session_state["_img_api_map"]
     m = {}
-    for row in data[1:]:
-        if len(row) >= 2 and row[0].strip():
-            m[row[0].strip().upper()] = row[1].strip()
+    try:
+        for row in safe_get_all_values(ss.worksheet("Images_API"))[1:]:
+            if len(row) >= 2 and row[0].strip() and row[1].strip().startswith("http"):
+                m[row[0].strip().upper()] = row[1].strip()
+    except Exception:
+        pass
+    try:   # تريندول: Barcode → صورة من TrendyolProducts_API (أداة Trendyol API)
+        for row in safe_get_all_values(ss.worksheet("TrendyolProducts_API"))[1:]:
+            if len(row) >= 4 and row[1].strip() and row[3].strip().startswith("http"):
+                m[row[1].strip().upper()] = row[3].strip()
+    except Exception:
+        pass
+    st.session_state["_img_api_map"] = m
     return m
+
+def get_links_map():
+    def _build(data):
+        m = {}
+        for row in data[1:]:                         # links n: احتياطي بس (تريندول بالباركود + أي SKU نون ملوش صورة من الـ API)
+            if len(row) >= 2 and row[0].strip() and row[1].strip():
+                m[row[0].strip().upper()] = row[1].strip()
+        m.update(_images_api_map())                  # صور الـ API (Images_API) بتغلّب
+        return m
+    return _memo_from_sheet(links_ws, "_links_map_merged", _build)
 
 def get_links_map_asin():
     """خريطة ASIN -> رابط صورة من شيت 'links a' — المصدر الأساسي لصور تابات
@@ -616,6 +656,25 @@ def render_price_profit_block_t14(r, com_map_t14, live_map_t14, sales_dates, ads
     com_missing_t14 = com_info_t14 is None
     if com_missing_t14:
         com_info_t14 = {"delivery": 0.0, "commission_pct": 0.0}
+    # ── عمولة/توصيل حسب نوع التنفيذ: نوع التنفيذ اللي اتباع منه الـ SKU مؤخرًا (أحدث يوم بيع في فترة العرض،
+    #    ولو الاتنين في نفس اليوم فاللي قطعه أكتر) — بنستخدم عمولة وتوصيل **آخر بيع مكتمل** للنوع ده من COM_API.
+    #    لو النوع ملوش رقم، بنرجع للرقم العام (آخر بيع مكتمل من أي نوع) ──
+    _mix = r.get("_mix") or {}
+    if _mix and not com_missing_t14:
+        _best = None
+        for _k, _v in _mix.items():
+            if _v.get("idx") is None:
+                continue
+            _score = (_v["idx"], -_v.get("units", 0))
+            if _best is None or _score < _best[0]:
+                _best = (_score, _k)
+        if _best:
+            _sfx = "fbn" if _best[1] == "FBN" else "fbb"
+            _d = com_info_t14.get("delivery_" + _sfx)
+            _c = com_info_t14.get("commission_pct_" + _sfx)
+            com_info_t14 = dict(com_info_t14,
+                                delivery=com_info_t14.get("delivery", 0.0) if _d is None else _d,
+                                commission_pct=com_info_t14.get("commission_pct", 0.0) if _c is None else _c)
 
     offer_price_t14 = get_latest_sku_price(r, sales_dates)
     latest_price_t14, price_from_live_t14 = get_base_price(r["sku_up"], live_map_t14, offer_price_t14)
@@ -3627,8 +3686,31 @@ amz_inv_map_asin = build_amazon_stock_map_by_asin()
 # حالات الطلب اللي مش بتتحسب كمبيعات (مرتجع/ما اتسلمش/لسه مدفوعش/ملغي)
 
 
+def _ty_prod_comm_map():
+    """Barcode (upper) -> Commission % من تاب TrendyolProducts_API (للمنتجات اللي مفيش لها طلبات بنسبة)."""
+    m = {}
+    try:
+        raw = get_cached(ty_products_sheet)
+        idx = {str(h).strip().lower(): i for i, h in enumerate(raw[0])} if raw else {}
+        bi, ci = idx.get("barcode"), idx.get("commission %")
+        if bi is not None and ci is not None:
+            for r in raw[1:]:
+                if len(r) > max(bi, ci) and str(r[bi]).strip() and str(r[ci]).strip():
+                    try:
+                        m[str(r[bi]).strip().upper()] = float(str(r[ci]).replace(",", ""))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return m
+
 def get_trendyol_bundle():
-    return _memo_from_sheet(daily_orders_trendyol_sheet, "trendyol_bundle", _build_trendyol_bundle)
+    def _b(raw):
+        try:
+            return _build_trendyol_bundle(raw, _ty_prod_comm_map())
+        except TypeError:      # calc.py قديم (بيقبل raw بس) — ارفع calc.py الجديد مع الملف ده
+            return _build_trendyol_bundle(raw)
+    return _memo_from_sheet(daily_orders_trendyol_sheet, "trendyol_bundle", _b)
 
 def get_trendyol_commission_map(*args, **kwargs):
     return calc.get_trendyol_commission_map(_ENV, *args, **kwargs)
@@ -4383,8 +4465,6 @@ ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الراب�
 
 # ══════════════════════════════════════════════
 st.title("🏢 عالم الرشاقة للتجارة | Fitness World Trading")
-if _ORDERS_TAB or _INV_TAB or _LIVE_TAB:
-    st.warning(f"🧪 نسخة تجربة: الطلبات من «{_ORDERS_TAB or 'DailyOrders'}» والمخزون من «{_INV_TAB or 'Inventory'}» والكتالوج من «{_LIVE_TAB or 'LIVE'}» — للمقارنة والعرض بس، ماتعملش رفع أو تعديل من هنا.")
 
 # ══ حساب المرحلين من المبيعات مسبقاً (قبل رسم التابات) ══
 def compute_transferred_from_sales(*args, **kwargs):
@@ -4711,9 +4791,9 @@ def render_upload_tab():
         render_generic_ads_upload("up", ads_amz_sheet, "AdvertisementsAmz", "📤 رفع إعلانات أمازون | Upload Amazon Ads", ["المنتجات"])
         st.caption("مخزون أمازون (StockAmazon) بيتحدّث يدويًا في الشيت نفسه | Amazon stock (StockAmazon) is updated manually in the sheet")
     elif _grp.startswith("🟣"):
-        render_trendyol_upload("up")
+        st.info("🟣 طلبات ومنتجات وعمولة تريندول بتتحدّث تلقائيًا من Trendyol API (تابات DailyOrdersTrendyol_API / TrendyolProducts_API / Finance_TY_Raw) — الرفع اليدوي اتقفل. "
+                "إعلانات تريندول لسه بالرفع لأن مفيش API ليها.")
         render_trendyol_ads_upload("up")
-        render_trendyol_products_upload("up")
     elif _grp.startswith("🔎"):
         render_sku_check_tab()
     else:
@@ -5809,16 +5889,22 @@ def _ads_reco_load(force=False):
     c = st.session_state.get("_ads_reco_raw")
     if c and not force and time.time() - c[0] < ADS_RECO_TTL:
         return c[1]
-    raw = {}
-    try:
-        have = {w.title for w in ss.worksheets()}
-        names = [t for t in ADS_RECO_TABS if t in have]
-        if names:
-            res = ss.values_batch_get(["'" + t + "'" for t in names])
-            for t, vr in zip(names, res.get("valueRanges", [])):
-                raw[t] = vr.get("values", []) or []
-    except Exception:
-        raw = c[1] if c else {}
+    raw, ok = {}, False
+    for _try in range(2):          # محاولة تانية لو جوجل رفض مؤقتاً
+        try:
+            have = {w.title for w in ss.worksheets()}
+            names = [t for t in ADS_RECO_TABS if t in have]
+            if names:
+                res = ss.values_batch_get(["'" + t + "'" for t in names])
+                for t, vr in zip(names, res.get("valueRanges", [])):
+                    raw[t] = vr.get("values", []) or []
+            ok = True
+            break
+        except Exception:
+            time.sleep(1.5)
+    if not ok:
+        # فشل القراءة: ما نخزّنش نتيجة فاضية في الكاش (كانت بتخلّي التوصيات ترجع للشهري 10 دقايق)
+        return c[1] if c else {}
     st.session_state["_ads_reco_raw"] = (time.time(), raw)
     return raw
 
@@ -8155,6 +8241,14 @@ if st.session_state["nav_page"] == "tab14":
                     if "FBB" in chs:
                         for d in sales_dates:
                             r_["day_prices"][d] = r_["day_prices"].get(d, []) + list(chs["FBB"]["day_prices"].get(d, []))
+                    # عدد القطع المباعة لكل نوع تنفيذ — بلوك الربح بيطبّق عمولة/توصيل كل نوع حسب ده
+                    r_["_mix"] = {}
+                    for _k in ("FBN", "FBB"):
+                        if _k in chs:
+                            _idx = next((_i for _i, _d in enumerate(sales_dates)
+                                         if float(chs[_k]["day_counts"].get(_d, 0) or 0) > 0), None)
+                            r_["_mix"][_k] = {"idx": _idx,
+                                              "units": sum(float(chs[_k]["day_counts"].get(_d, 0) or 0) for _d in sales_dates)}
                     return r_
 
                 def _mk_r_amz(chs):
@@ -8173,6 +8267,20 @@ if st.session_state["nav_page"] == "tab14":
                     except Exception:
                         _pr = None
                     _ci = cm.get(r_["sku_up"])
+                    _mx = r_.get("_mix") or {}
+                    if _mx and _ci:
+                        _best = None
+                        for _k, _v in _mx.items():
+                            if _v.get("idx") is None:
+                                continue
+                            _sc = (_v["idx"], -_v.get("units", 0))
+                            if _best is None or _sc < _best[0]:
+                                _best = (_sc, _k)
+                        if _best:
+                            _sf = "fbn" if _best[1] == "FBN" else "fbb"
+                            _dd = _ci.get("delivery_" + _sf); _cc = _ci.get("commission_pct_" + _sf)
+                            _ci = dict(_ci, delivery=_ci.get("delivery", 0.0) if _dd is None else _dd,
+                                       commission_pct=_ci.get("commission_pct", 0.0) if _cc is None else _cc)
                     _net = None
                     if _pr is not None and _ci:
                         try:
@@ -8462,7 +8570,7 @@ if st.session_state["nav_page"] == "tab14":
                     st.session_state["transferred_skus_t14"] = _new_transferred
                 if len(groups_all_t14) > len(groups_show_t14):
                     _rest = len(groups_all_t14) - len(groups_show_t14)
-                    st.info(f"معروض {len(groups_show_t14)} من {len(groups_all_t14)} كود (مرتبين بمبيعات أمس) | Showing {len(groups_show_t14)} of {len(groups_all_t14)}")
+                    st.info(f"معروض {len(groups_show_t14)} من {len(groups_all_t14)} كود (مرتبين بمبيعات نون أمس) | Showing {len(groups_show_t14)} of {len(groups_all_t14)}")
                     cm1, cm2 = st.columns(2)
                     with cm1:
                         if st.button(f"⬇️ كمان 30 بلوك | 30 more (باقي {_rest})", key="t14_more", use_container_width=True):
