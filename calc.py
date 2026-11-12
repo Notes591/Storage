@@ -453,7 +453,7 @@ def _ty_num(v):
         return 0.0
 
 def _build_ty_products(raw):
-    by_cid, img, name = {}, {}, {}
+    by_cid, img, name, url = {}, {}, {}, {}
     for row in (raw or [])[1:]:
         if len(row) < 2 or not str(row[0]).strip() or not str(row[1]).strip():
             continue
@@ -465,7 +465,9 @@ def _build_ty_products(raw):
             name[bc] = row[2]
         if len(row) > 3 and row[3] and bc not in img:
             img[bc] = row[3]
-    return {"by_cid": by_cid, "img": img, "name": name}
+        if len(row) > 13 and str(row[13]).strip().startswith("http") and bc not in url:     # عمود Product URL (من productUrl في الـ API)
+            url[bc] = str(row[13]).strip()
+    return {"by_cid": by_cid, "img": img, "name": name, "url": url}
 
 def build_warehouse_stockout_sku_lookup(rows):
     """يرجع dict: sku_up -> صف كود المستودع بتاعه، لاستخدام سريع (O(1)) جوه البادچات

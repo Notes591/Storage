@@ -8576,7 +8576,7 @@ if st.session_state["nav_page"] == "tab14":
                                         _r = _c["TY"]
                                         _pr, _ci, _net = _price_info(_r, com_map_ty_t14, {})
                                         _bc = (f'<span style="font-family:monospace;font-weight:700;user-select:all;">{_k}</span>')
-                                        _rows.append({"id": _k, "img": _r.get("img"), "link": None, "y": _yv(_c, "TY"), "tot": _tv(_c, "TY"), "mon": _r["sales_month"],
+                                        _rows.append({"id": _k, "img": _r.get("img"), "link": get_ty_products().get("url", {}).get(str(_k).upper()), "y": _yv(_c, "TY"), "tot": _tv(_c, "TY"), "mon": _r["sales_month"],
                                                       "stock": "—", "price": _pr, "ci": _ci, "net": _net})
                                     _sel_ty = _sku_table(_rows, "ty")
                                     if not ty_fee_set_t14:
