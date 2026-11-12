@@ -8292,20 +8292,23 @@ if st.session_state["nav_page"] == "tab14":
                 def _sku_table(rows, plat):
                     """جدول SKUs المنصة (مرتب بالمبيعات) — الضغط على صف بيفتح تفاصيله تحت. بيرجّع أرقام الصفوف المختارة."""
                     _df = pd.DataFrame([{
-                        "المعرّف": x["id"], "أمس": x["y"], f"{sales_display_days} أيام": x["tot"], "شهري": x["mon"],
+                        "📷": (x.get("img") or None), "المعرّف": x["id"], "🔗": (x.get("link") or None), "أمس": x["y"], f"{sales_display_days} أيام": x["tot"], "شهري": x["mon"],
                         "مخزون": x["stock"], "سعر البيع": x["price"],
                         "عمولة": ("—" if not x["ci"] else f'{x["ci"].get("commission_pct", 0):g}%'),
                         "توصيل": ("—" if not x["ci"] else f'{x["ci"].get("delivery", 0):g}'),
                         "صافي": x["net"]} for x in rows])
-                    _vis = ["المعرّف"] + [c for c in (st.session_state.get("t14_cols_sel") or _T14_COLS) if c in _T14_COLS]
+                    _vis = ["📷", "المعرّف", "🔗"] + [c for c in (st.session_state.get("t14_cols_sel") or _T14_COLS) if c in _T14_COLS]
                     _df = _df[_vis]
                     # عرض ثابت ومضغوط: المعرّف مقفول على عرض صغير (الاسم الكامل جوه التفاصيل) وباقي الأعمدة ضيقة
-                    _wpx = {"المعرّف": 64, "أمس": 42, f"{sales_display_days} أيام": 52, "شهري": 48, "مخزون": 60,
+                    _wpx = {"📷": 36, "🔗": 34, "المعرّف": 64, "أمس": 42, f"{sales_display_days} أيام": 52, "شهري": 48, "مخزون": 60,
                             "سعر البيع": 54, "عمولة": 48, "توصيل": 46, "صافي": 52}
                     def _cfg(px):
                         _c = {"المعرّف": st.column_config.TextColumn(width=px["المعرّف"])}
+                        if "📷" in px:
+                            _c["📷"] = st.column_config.ImageColumn(" ", width=px["📷"])
+                            _c["🔗"] = st.column_config.LinkColumn(" ", width=px["🔗"], display_text="🔗")
                         for _n in _wpx:
-                            if _n == "المعرّف":
+                            if _n in ("المعرّف", "📷", "🔗"):
                                 continue
                             if _n in ("سعر البيع", "صافي"):
                                 _c[_n] = st.column_config.NumberColumn(format="%.2f", width=px[_n])
@@ -8479,7 +8482,7 @@ if st.session_state["nav_page"] == "tab14":
                                         _r = _mk_r_noon(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
                                         _stk = "·".join(f"{_c[k]['stock']}" for k in ("FBN", "FBB") if k in _c)
-                                        _rows.append({"id": _s, "y": _yv(_c, "FBN") + _yv(_c, "FBB"),
+                                        _rows.append({"id": _s, "img": _r.get("img"), "link": build_noon_link(_s), "y": _yv(_c, "FBN") + _yv(_c, "FBB"),
                                                       "tot": _tv(_c, "FBN") + _tv(_c, "FBB"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FBN", "FBB") if k in _c),
                                                       "stock": _stk, "price": _pr, "ci": _ci, "net": _net})
@@ -8502,7 +8505,7 @@ if st.session_state["nav_page"] == "tab14":
                                         _r = _c["TY"]
                                         _pr, _ci, _net = _price_info(_r, com_map_ty_t14, {})
                                         _bc = (f'<span style="font-family:monospace;font-weight:700;user-select:all;">{_k}</span>')
-                                        _rows.append({"id": _k, "y": _yv(_c, "TY"), "tot": _tv(_c, "TY"), "mon": _r["sales_month"],
+                                        _rows.append({"id": _k, "img": _r.get("img"), "link": None, "y": _yv(_c, "TY"), "tot": _tv(_c, "TY"), "mon": _r["sales_month"],
                                                       "stock": "—", "price": _pr, "ci": _ci, "net": _net})
                                     _sel_ty = _sku_table(_rows, "ty")
                                     if not ty_fee_set_t14:
@@ -8535,7 +8538,7 @@ if st.session_state["nav_page"] == "tab14":
                                         _r = _mk_r_amz(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
                                         _stk = "·".join(f"{_c[k]['stock']}" for k in ("FSAB", "FBA") if k in _c)
-                                        _rows.append({"id": _a, "y": _yv(_c, "FSAB") + _yv(_c, "FBA"),
+                                        _rows.append({"id": _a, "img": _r.get("img"), "link": calc.build_amazon_asin_link(_a), "y": _yv(_c, "FSAB") + _yv(_c, "FBA"),
                                                       "tot": _tv(_c, "FSAB") + _tv(_c, "FBA"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FSAB", "FBA") if k in _c),
                                                       "stock": _stk, "price": _pr, "ci": _ci, "net": _net})
