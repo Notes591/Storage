@@ -9043,7 +9043,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         st.caption(f"الرصيد = المستحق − المدفوع = {_bal:,.0f} "
                                    f"({'مدفوع أكتر من المستحق في الفترة دي — غالباً رصيد من قبل 1/10' if _bal < 0 else 'لسه مستحق لك'}). "
                                    f"ملحوظة: بيان الفترة من تاريخ أول كشف تم سحبه فقط.")
-                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "🧾 الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
+                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "💹 ربحية المنتجات", "🧾 الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
                                         horizontal=True, key="acct_noon_view", label_visibility="collapsed")
                         if _sub.startswith("📊"):
                             _stm_all = _S["statements"]
@@ -9055,6 +9055,63 @@ if st.session_state["nav_page"] == "tab_accts":
                             _bd.loc[len(_bd)] = {"البند": "الإجمالي (المستحق − المدفوع)", "القيمة": _tot}
                             st.dataframe(_bd, use_container_width=True, hide_index=True, column_config={"القيمة": st.column_config.NumberColumn("القيمة", format="%.2f")})
                             st.caption("الأرقام بتطابق كشوف نون في كل البنود تقريباً (فروق بسيطة بالقروش). نون بتفصل «عودة التالفة» عن «إدارية للإرجاع» لكن التقرير بيدمجهم في عمود واحد، فهنا سطر واحد.")
+                        elif _sub.startswith("💹"):
+                            _use_ads = st.checkbox("خصم إعلانات الشهر الحالي (من AdsMonthly)", value=False, key="acct_noon_p_ads",
+                                                   help="بيانات الإعلانات شهرية مش مقسّمة بالتاريخ — فعّلها لو الفترة المختارة هي الشهر الحالي، وإلا الإعلانات هتتحسب غلط.")
+                            _ads_m = {}
+                            if _use_ads:
+                                try:
+                                    _ads_m = get_ads_map() or {}
+                                except Exception:
+                                    _ads_m = {}
+
+                            def _p_cost(su, pu):
+                                for _kx in (su, su.rsplit("-", 1)[0] if "-" in su else su, pu):
+                                    try:
+                                        _cv = resolve_unit_cost(_kx, None)
+                                    except Exception:
+                                        _cv = None
+                                    if _cv is not None:
+                                        return _cv
+                                return None
+
+                            def _p_ads(su, pu):
+                                for _kx in (su, su.rsplit("-", 1)[0] if "-" in su else su, pu):
+                                    if _kx in _ads_m:
+                                        return sum(a["spends"] for a in _ads_m[_kx])
+                                return None
+                            _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None)
+                            if _pf.empty:
+                                st.info("مفيش مبيعات في الفترة.")
+                            else:
+                                _tl = _pf["الربح"].sum()
+                                _pc = st.columns(4)
+                                _pc[0].metric("📦 صافي الكمية", f"{int(_pf['صافي الكمية'].sum()):,}")
+                                _pc[1].metric("💰 صافي بعد الرسوم", f"{_pf['الصافي بعد الرسوم'].sum():,.0f}")
+                                _pc[2].metric("🧮 التكلفة + الإعلانات", f"{(_pf['إجمالي التكلفة'].sum() + _pf['الإعلانات'].sum()):,.0f}")
+                                _pc[3].metric("✅ الربح" if _tl >= 0 else "🔻 الخسارة", f"{_tl:,.0f}")
+                                _nm = int(_pf["تكلفة ناقصة"].sum())
+                                if _nm:
+                                    st.warning(f"⚠️ {_nm} منتج تكلفته غير مسجلة (محسوبة صفر) — ربحهم أعلى من الحقيقي. فلترهم بخانة «تكلفة ناقصة».")
+                                _only = st.radio("إظهار", ["الكل", "🔴 الخاسر بس", "🟢 الرابح بس", "⚠️ تكلفة ناقصة"], horizontal=True, key="acct_noon_p_f")
+                                _sh = _pf
+                                if _only.startswith("🔴"):
+                                    _sh = _pf[_pf["الربح"] < 0]
+                                elif _only.startswith("🟢"):
+                                    _sh = _pf[_pf["الربح"] >= 0]
+                                elif _only.startswith("⚠️"):
+                                    _sh = _pf[_pf["تكلفة ناقصة"]]
+                                _sh = _sh.assign(**{"الحالة": ["🟢" if v >= 0 else "🔴" for v in _sh["الربح"]]})
+                                _cols = ["الحالة", "المنتج", "SKU", "مبيع", "مرتجع", "صافي الكمية", "صافي المبيعات", "الرسوم", "دعم",
+                                         "الصافي بعد الرسوم", "تكلفة الوحدة", "إجمالي التكلفة"] + (["الإعلانات"] if _use_ads else []) + ["الربح", "هامش %"]
+                                _cfg = {c: st.column_config.NumberColumn(c, format="%.0f") for c in ("صافي المبيعات", "الرسوم", "دعم", "الصافي بعد الرسوم", "إجمالي التكلفة", "الإعلانات", "الربح")}
+                                _cfg["تكلفة الوحدة"] = st.column_config.NumberColumn("تكلفة الوحدة", format="%.2f")
+                                _cfg["هامش %"] = st.column_config.NumberColumn("هامش %", format="%.1f")
+                                st.dataframe(_sh[_cols], use_container_width=True, hide_index=True, column_config=_cfg)
+                                st.caption("مرتبة من الأكتر كمية. الصافي بعد الرسوم = صافي المبيعات − العمولة − رسوم الشحن/FBN − رسوم أخرى + الدعم، وبعد خصم المرتجعات. "
+                                           "التكلفة = تكلفة الوحدة × (مبيع − مرتجع) (على افتراض إن المرتجع رجع للمخزون). رسوم الشحن المباشر ورسوم الإعلانات في الكشف مش داخلة هنا لأنها مش على صنف.")
+                                st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_sh[_cols]), file_name=f"noon_profit_{file_timestamp()}.xlsx",
+                                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_p_dl")
                         elif _sub.startswith("🧾"):
                             _stm = _S["statements"]
                             st.markdown("**الكشوف الأسبوعية**")

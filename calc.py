@@ -5728,3 +5728,47 @@ def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):
     L.append(("تحويل الرصيد", S(money[mt == "balance_transfer"], "Total"), "pay"))
     total = sum(v for _l, v, _k in L)
     return L, total
+
+
+def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None):
+    """ربحية كل منتج (SKU) في الفترة، من الأكتر كمية للأقل.
+    cost_fn(sku_up, psku_up) -> تكلفة الوحدة أو None · ads_fn(sku_up, psku_up) -> إنفاق إعلانات أو None.
+    الصافي بعد الرسوم = عمود Total (صافي المبيعات + العمولة + الشحن + رسوم أخرى + الدعم، بعد خصم المرتجع).
+    الربح = الصافي بعد الرسوم − (التكلفة × الكمية الصافية) − الإعلانات."""
+    import pandas as pd
+    if fin is None or fin.empty:
+        return pd.DataFrame()
+    df = fin.copy()
+    df["_d"] = pd.to_datetime(df["Transaction Date"], errors="coerce").dt.date
+    if d_from:
+        df = df[df["_d"] >= d_from]
+    if d_to:
+        df = df[df["_d"] <= d_to]
+    tt = df["Transaction Type"].astype(str)
+    it = df[tt.isin(["order", "order_update"]) & (df["Item Nr"].astype(str).str.strip() != "") & (df["SKUs"].astype(str).str.strip() != "")]
+    if it.empty:
+        return pd.DataFrame()
+    it = it.assign(_sold=((it["Transaction Type"] == "order") & (it["Net Proceeds"] > 0)).astype(int),
+                   _ret=((it["Transaction Type"] == "order_update") & (it["Net Proceeds"] < 0)).astype(int),
+                   _fee=it["Referral Fee including VAT"] + it["Fullfilment & Logistics Fees including VAT"] + it["Other Order Fees including VAT"] + it["Non-Order Fees including VAT"],
+                   _sub=it["Order Subsidies including VAT"] + it["Non-Order Subsidies including VAT"])
+    g = it.groupby("SKUs").agg(**{"المنتج": ("Title", "first"), "Partner SKU": ("Partner SKUs", "first"),
+                                  "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum"),
+                                  "صافي المبيعات": ("Net Proceeds", "sum"), "الرسوم": ("_fee", "sum"),
+                                  "دعم": ("_sub", "sum"), "الصافي بعد الرسوم": ("Total", "sum")}).reset_index().rename(columns={"SKUs": "SKU"})
+    g["صافي الكمية"] = g["مبيع"] - g["مرتجع"]
+    costs, ads, missing = [], [], []
+    for _, r in g.iterrows():
+        su, pu = str(r["SKU"]).strip().upper(), str(r["Partner SKU"]).strip().upper()
+        c = cost_fn(su, pu) if cost_fn else None
+        missing.append(c is None)
+        costs.append(float(c) if c is not None else 0.0)
+        a = ads_fn(su, pu) if ads_fn else None
+        ads.append(float(a) if a else 0.0)
+    g["تكلفة الوحدة"] = costs
+    g["إجمالي التكلفة"] = g["تكلفة الوحدة"] * g["صافي الكمية"]
+    g["الإعلانات"] = ads
+    g["الربح"] = g["الصافي بعد الرسوم"] - g["إجمالي التكلفة"] - g["الإعلانات"]
+    g["هامش %"] = (g["الربح"] / g["صافي المبيعات"].where(g["صافي المبيعات"] != 0)).fillna(0) * 100
+    g["تكلفة ناقصة"] = missing
+    return g.sort_values(["صافي الكمية", "الربح"], ascending=False).reset_index(drop=True)
