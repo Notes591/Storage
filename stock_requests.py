@@ -8051,7 +8051,7 @@ if st.session_state["nav_page"] == "tab14":
                     if _pick:
                         _g["sort"] = (-_g[_pick[0]], -_g[_pick[1]])
                     else:
-                        _g["sort"] = (-(_g["yn"] + _g["ya"] + _g["yt"]), -(_g["tn"] + _g["ta"] + _g["tt"]))
+                        _g["sort"] = (-_g["yn"], -_g["tn"], -(_g["ya"] + _g["yt"]), -(_g["ta"] + _g["tt"]))     # الأكتر مبيعًا في نون الأول
                 groups_all_t14.sort(key=lambda _g: _g["sort"])
                 groups_show_t14 = groups_all_t14[:_lim_t14]
                 blocks_show_t14 = [_b for _g in groups_show_t14 for _b in _g["blocks"]]
