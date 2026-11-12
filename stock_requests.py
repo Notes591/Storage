@@ -8181,6 +8181,49 @@ if st.session_state["nav_page"] == "tab14":
                                                file_name=st.session_state.get("t14_dl_name", "sales_daily.xlsx"),
                                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                                use_container_width=True, key="dlbtn_t14")
+                        if _vw in ("all", "noon"):
+                            # ملف «متابعة مخزون FBN»: كل SKU نون FBN مخزونه أقل من نص مبيعاته الشهرية (باع أمس أو لأ) ومش مجدول 4 أيام ولا قيد موافقة
+                            _recent_s_xl = get_recent_schedule_rows(days_back=4)
+                            _pend_xl = get_pending_approval_skus()
+                            _lowrows = []
+                            for _g in groups_all_t14:
+                                for _s in _g["skus"]:
+                                    _c = sku_rows_t14.get(_s)
+                                    if not _c or "FBN" not in _c:
+                                        continue
+                                    if _recent_s_xl.get(_s.upper()) or _s.upper() in _pend_xl:
+                                        continue
+                                    try:
+                                        _stk, _mon = float(_c["FBN"].get("stock") or 0), float(_c["FBN"].get("sales_month") or 0)
+                                    except Exception:
+                                        continue
+                                    if _mon > 0 and _stk * 2 < _mon:
+                                        _lowrows.append({"الكود | Code": _g["code"], "SKU": _s, "مخزون FBN | Stock": _stk,
+                                                         "مبيع شهري | Monthly Sales": _mon,
+                                                         f"مبيعات آخر {sales_display_days} يوم": _tv(_c, "FBN") + _tv(_c, "FBB"),
+                                                         "تغطية (يوم) | Cover days": round(_stk / (_mon / 30.0), 1)})
+                            _lowrows.sort(key=lambda x: -x["مبيع شهري | Monthly Sales"])
+                            # نفس شكل ملف «قرب يخلص» في عرض FBN: شيت «يُرسل إلى FBN» + «يلزم توريد» + «أخرى» (كفاية/مجدول…)
+                            _low_keys = {r_["SKU"].upper() for r_ in _lowrows}
+                            _gap_fbn = [r_ for r_ in channel_gap_cached()["fbn"] if r_["key_up"] in _low_keys]
+                            _g_send = [r_ for r_ in _gap_fbn if r_["action"] == "send"]
+                            _g_supply = [r_ for r_ in _gap_fbn if r_["action"] in ("low_wh", "send_nowh")]
+                            _g_other = [r_ for r_ in _gap_fbn if r_["action"] not in ("send", "low_wh", "send_nowh")]
+                            if st.button(f"📥 جهّز ملف متابعة مخزون FBN ({len(_gap_fbn)}) | Low-stock file", key="t14_low_prep",
+                                         use_container_width=True, disabled=not _gap_fbn):
+                                _buf_l = io.BytesIO()
+                                with pd.ExcelWriter(_buf_l, engine="openpyxl") as _w:
+                                    channel_gap_df(_g_send, "fbn").to_excel(_w, sheet_name="يُرسل إلى FBN", index=False)
+                                    channel_gap_df(_g_supply, "fbn").to_excel(_w, sheet_name="يلزم توريد", index=False)
+                                    channel_gap_df(_g_other, "fbn").to_excel(_w, sheet_name="أخرى", index=False)
+                                st.session_state["t14_low_bytes"] = _buf_l.getvalue()
+                                st.session_state["t14_low_name"] = f"fbn_stock_watch_{file_timestamp()}.xlsx"
+                            st.caption(f"🚚 يُرسل: {len(_g_send)} | ⛔ يلزم توريد: {len(_g_supply)} | أخرى: {len(_g_other)}")
+                            if st.session_state.get("t14_low_bytes"):
+                                st.download_button("⬇️ تحميل ملف متابعة المخزون | Download", data=st.session_state["t14_low_bytes"],
+                                                   file_name=st.session_state.get("t14_low_name", "fbn_stock_watch.xlsx"),
+                                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                                   use_container_width=True, key="dlbtn_t14_low")
                     with c2: st.info(f"📦 أكواد: {len(groups_all_t14)} | 📅 {sales_display_days} يوم")
 
                 # ══ قائمة SKUs المرحلة من المبيعات (محتاج جدولة فقط) ══
@@ -8353,11 +8396,11 @@ if st.session_state["nav_page"] == "tab14":
                             fn(r_, _pt)
 
                 def _noon_low_note(items, shown):
-                    """SKUs نون (FBN) مباعتش أمس (مخفية من الجدول) بس مخزونها أقل من نص مبيعاتها الشهرية — سطر صغير «متابعة مخزون»."""
+                    """SKUs نون (FBN) مخزونها أقل من نص مبيعاتها الشهرية (ومش مجدولة 4 أيام ولا قيد الموافقة) — سطر صغير «متابعة مخزون»."""
                     _shown = {s for s, _c in shown}
                     _low = []
                     for _s, _c in items:
-                        if _s in _shown or "FBN" not in _c:
+                        if "FBN" not in _c:
                             continue
                         if recent_sched_map_t14.get(_s.upper()) or _s.upper() in pending_approval_skus_t14:     # مجدول آخر 4 أيام أو قيد الموافقة — مش محتاج متابعة
                             continue
@@ -8503,6 +8546,13 @@ if st.session_state["nav_page"] == "tab14":
                                         _r = _mk_r_noon(_c)
                                         _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
                                         _stk = "·".join(f"{_c[k]['stock']}" for k in ("FBN", "FBB") if k in _c)
+                                        try:
+                                            if ("FBN" in _c and float(_c["FBN"].get("sales_month") or 0) > 0
+                                                    and float(_c["FBN"].get("stock") or 0) * 2 < float(_c["FBN"].get("sales_month") or 0)
+                                                    and not recent_sched_map_t14.get(_s.upper()) and _s.upper() not in pending_approval_skus_t14):
+                                                _stk = "🔴 " + _stk
+                                        except Exception:
+                                            pass
                                         _rows.append({"id": _s, "img": _r.get("img"), "link": build_noon_link(_s), "y": _yv(_c, "FBN") + _yv(_c, "FBB"),
                                                       "tot": _tv(_c, "FBN") + _tv(_c, "FBB"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FBN", "FBB") if k in _c),
@@ -8511,7 +8561,7 @@ if st.session_state["nav_page"] == "tab14":
                                         _detail_noon(*noon_tbl[_i])
                                     if len(noon_items) > len(noon_tbl):
                                         st.caption(f"+ {len(noon_items) - len(noon_tbl)} SKU بدون مبيعات أمس (مخفية — ابحث بالكود لإظهارها)")
-                                        _noon_low_note(noon_items, noon_tbl)
+                                    _noon_low_note(noon_items, noon_tbl)
                                 elif noon_items:
                                     st.caption(f"— مفيش مبيعات نون أمس ({len(noon_items)} SKU) | no Noon sales yesterday")
                                     _noon_low_note(noon_items, noon_tbl)
