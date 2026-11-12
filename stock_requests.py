@@ -8039,6 +8039,20 @@ if st.session_state["nav_page"] == "tab14":
                     for _f, _k in (("skus", "sku"), ("asins", "asin"), ("tbs", "tb")):
                         if _b[_k] and _b[_k] not in _g[_f]:
                             _g[_f].append(_b[_k])
+                # ══ إجمالي مبيعات الكود (أمس + الفترة) على كل المنصات — والأعلى مبيعًا فوق ══
+                for _g in groups_all_t14:
+                    _sn_ = [_sku_sales(s) for s in _g["skus"]]
+                    _sa_ = [_asin_sales(a) for a in _g["asins"]]
+                    _st_ = [_ty_sales(k) for k in _g["tbs"]]
+                    _g["yn"], _g["tn"] = sum(x[0] for x in _sn_), sum(x[1] for x in _sn_)
+                    _g["ya"], _g["ta"] = sum(x[0] for x in _sa_), sum(x[1] for x in _sa_)
+                    _g["yt"], _g["tt"] = sum(x[0] for x in _st_), sum(x[1] for x in _st_)
+                    _pick = {"noon": ("yn", "tn"), "amz": ("ya", "ta"), "ty": ("yt", "tt")}.get(_vw)
+                    if _pick:
+                        _g["sort"] = (-_g[_pick[0]], -_g[_pick[1]])
+                    else:
+                        _g["sort"] = (-(_g["yn"] + _g["ya"] + _g["yt"]), -(_g["tn"] + _g["ta"] + _g["tt"]))
+                groups_all_t14.sort(key=lambda _g: _g["sort"])
                 groups_show_t14 = groups_all_t14[:_lim_t14]
                 blocks_show_t14 = [_b for _g in groups_show_t14 for _b in _g["blocks"]]
                 blocks_rest_t14 = [_b for _g in groups_all_t14[_lim_t14:] for _b in _g["blocks"]]
@@ -8175,6 +8189,8 @@ if st.session_state["nav_page"] == "tab14":
                         "عمولة": ("—" if not x["ci"] else f'{x["ci"].get("commission_pct", 0):g}%'),
                         "توصيل": ("—" if not x["ci"] else f'{x["ci"].get("delivery", 0):g}'),
                         "صافي": x["net"]} for x in rows])
+                    _vis = ["المعرّف"] + [c for c in _T14_COLS if c in st.session_state.get("t14_cols_sel", _T14_COLS)]
+                    _df = _df[_vis]
                     _ev = st.dataframe(_df, hide_index=True, use_container_width=True, on_select="rerun",
                                        selection_mode="multi-row", key=f"t14tbl_{_t14_bn[0]}_{plat}",
                                        column_config={"سعر البيع": st.column_config.NumberColumn(format="%.2f"),
@@ -8244,6 +8260,17 @@ if st.session_state["nav_page"] == "tab14":
                         for _pt in ("sales", "stock"):
                             _t14_channel_part(r_, "TY", True, part=_pt)
 
+                # ══ إخفاء/إظهار أعمدة الجداول — محفوظ في الإعدادات (مبيرجعش لما تفتح وتقفل) ══
+                _T14_COLS = ["أمس", f"آخر {sales_display_days} يوم", "شهري", "مخزون", "سعر البيع", "عمولة", "توصيل", "صافي"]
+                _hid_saved = {x for x in str(load_settings().get("t14_hidden_cols", "")).split("|") if x}
+                if "t14_cols_sel" not in st.session_state:
+                    st.session_state["t14_cols_sel"] = [c for c in _T14_COLS if c not in _hid_saved]
+                def _save_t14_cols():
+                    _keep = st.session_state.get("t14_cols_sel", _T14_COLS)
+                    save_setting("t14_hidden_cols", "|".join(c for c in _T14_COLS if c not in _keep))
+                with st.popover("⚙️ أعمدة الجداول | Table columns"):
+                    st.multiselect("الأعمدة الظاهرة | Visible columns", _T14_COLS, key="t14_cols_sel", on_change=_save_t14_cols)
+                    st.caption("الاختيار بيتحفظ ومبيرجعش لوحده")
                 for g in groups_show_t14:
                     top_b = g["blocks"][0]
                     noon_items = [(s, sku_rows_t14[s]) for s in sorted(g["skus"], key=_sku_sales, reverse=True)
@@ -8278,6 +8305,13 @@ if st.session_state["nav_page"] == "tab14":
                             else:
                                 st.markdown('<span class="tacweed-badge" style="background:#374151;color:#e5e7eb;">🏷️ بدون تكويد</span>',
                                             unsafe_allow_html=True)
+                            _gy = g["yn"] + g["ya"] + g["yt"]
+                            _gtot = g["tn"] + g["ta"] + g["tt"]
+                            st.markdown(f'<div dir="rtl" style="display:inline-block;background:#1e293b;border:1px solid #475569;border-radius:6px;'
+                                        f'padding:4px 10px;margin:4px 0;font-size:14px;font-weight:700;color:#ffffff;line-height:1.6;">'
+                                        f'📅 الكود كله أمس: <b style="font-size:16px;">{_gy:g}</b> '
+                                        f'<span style="font-weight:600;color:#f1f5f9;">( نون {g["yn"]:g} | تريندول {g["yt"]:g} | أمازون {g["ya"]:g} )</span>'
+                                        f' &nbsp;·&nbsp; آخر {sales_display_days} يوم: <b>{_gtot:g}</b></div>', unsafe_allow_html=True)
                             wh_g = wh_lookup_t14.get(first_key)
                             if wh_g and wh_g.get("daily_draw") is not None:
                                 st.caption(f"🧮 سحب المستودع اليومي للكود (آخر 30 يوم): نون {wh_g.get('draw_noon', 0):g} + أمازون {wh_g.get('draw_amz', 0):g} + تريندول {wh_g.get('draw_ty', 0):g} "
