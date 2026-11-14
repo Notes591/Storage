@@ -8251,6 +8251,14 @@ if st.session_state["nav_page"] == "tab14":
                 ads_map_t14 = get_ads_map()
                 ads_map_amz_t14 = get_ads_map_amazon()
                 com_map_t14 = get_com_map()
+                # أمازون: صفوفه بتدوّر بالـ ASIN — العمولة والتوصيل من معاملات أمازون الفعلية (Amazon_Finance_API) من غير ما تلمس مفاتيح SKU بتاعة نون
+                try:
+                    _wfa = ss.worksheet("Amazon_Finance_API")
+                    _fin_c = _memo_from_sheet(_wfa, "acct_amz_df", calc.acct_amz_rows_to_df)
+                    for _k, _v in calc.get_com_map_amz(_fin_c, include_sku=False).items():
+                        com_map_t14.setdefault(_k, _v)
+                except Exception:
+                    pass
                 live_map_t14 = get_live_map()
                 xdock_threshold_t14 = int(load_settings().get("xdock_low_stock_threshold","10") or 10)
                 # تريندول: العمولة من الملف، والتوصيل من إعداد trendyol_delivery_fee في Settings (لو مش موجود = 0)
@@ -8983,6 +8991,39 @@ if st.session_state["nav_page"] == "tab_accts":
                 except Exception:
                     return None
 
+            def _acct_com_view(_cdf, _idc, _key, _note, _extra=None):
+                """جدول عمولة/توصيل لكل منتج (نون/تريندول) — الأعمدة والعرض نفس أمازون."""
+                if _cdf is None or _cdf.empty:
+                    st.info("مفيش مبيعات في الفترة.")
+                    return
+                _w = float(_cdf["مبيعات"].sum()); _q = float(_cdf["قطع"].sum())
+                _cc = st.columns(4)
+                _cc[0].metric("🏷️ متوسط العمولة", f"{(_cdf['عمولة'].sum() * 100 / _w) if _w else 0:.1f}%")
+                _cc[1].metric("🚚 متوسط التوصيل / وحدة", f"{(_cdf['توصيل'].sum() / _q) if _q else 0:.2f}")
+                _cc[2].metric("🧾 متوسط كل الرسوم / وحدة", f"{((_cdf['عمولة'].sum() + _cdf['توصيل'].sum() + _cdf['تانية'].sum()) / _q) if _q else 0:.2f}")
+                _cc[3].metric("🛒 قطع مباعة", f"{int(_q):,}")
+                _lm = get_links_map()
+                _cdf = _cdf.assign(**{"📷": [_lm.get(str(a).strip().upper(), "") or None for a in _cdf[_idc]]})
+                _qs = st.text_input("🔎 بحث", key=_key + "_q")
+                if _qs.strip():
+                    _qq = _qs.strip().lower()
+                    _cdf = _cdf[_cdf.apply(lambda r: _qq in f"{r[_idc]} {r.get('SKU', '')} {r['المنتج']}".lower(), axis=1)]
+                _cols = ["📷", "المنتج", _idc] + ([c for c in (_extra or []) if c in _cdf.columns]) + ["قطع", "متوسط سعر البيع", "عمولة %", "عمولة/وحدة", "توصيل/وحدة",
+                         "رسوم تانية/وحدة", "إجمالي الرسوم/وحدة", "إجمالي الرسوم %", "صافي/وحدة بعد الرسوم"]
+                _cfg = {c: st.column_config.NumberColumn(c, format="%.2f") for c in _cols if c in ("متوسط سعر البيع", "عمولة/وحدة", "توصيل/وحدة", "رسوم تانية/وحدة", "إجمالي الرسوم/وحدة", "صافي/وحدة بعد الرسوم")}
+                _cfg["قطع"] = st.column_config.NumberColumn("قطع", format="%.0f")
+                _cfg["عمولة %"] = st.column_config.NumberColumn("عمولة %", format="%.1f")
+                _cfg["إجمالي الرسوم %"] = st.column_config.NumberColumn("إجمالي الرسوم %", format="%.1f")
+                try:
+                    _cfg["📷"] = st.column_config.ImageColumn(" ", width="small")
+                except Exception:
+                    pass
+                st.dataframe(_cdf[_cols], use_container_width=True, hide_index=True, column_config=_cfg)
+                st.caption(_note)
+                st.download_button("⬇️ تحميل العمولة والتوصيل (Excel)", data=to_excel(_cdf[[c for c in _cols if c != "📷"]]),
+                                   file_name=f"{_key}_{file_timestamp()}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=_key + "_dl")
+
             def _acct_load(tab):
                 ws = _acct_ws(tab)
                 if ws is None:
@@ -9054,7 +9095,7 @@ if st.session_state["nav_page"] == "tab_accts":
                                sub=f"{_unp_n:,} صف", help_="صافي الصفوف اللي ماليهاش أمر دفع لسه — ده اللي ليك عند تريندول (بغض النظر عن فلتر التاريخ).")
                         _kc_ty(_g2[3], "🎟️ خصم سلة (معلومة)", _m2(_tk["discount"]), "out",
                                "خصومات السلة بتظهر في التقرير بس مش بتتخصم من الدفعة (اتأكدت بمطابقة أمر دفع للقرش).")
-                        _tsub = st.radio("العرض", ["💹 ربحية المنتجات", "🧮 تسوية أوامر الدفع", "⏳ غير المدفوع", "⚠️ الغرامات والفواتير", "📅 يومي", "📄 كل الصفوف"],
+                        _tsub = st.radio("العرض", ["💹 ربحية المنتجات", "🏷️ العمولة والتوصيل", "🧮 تسوية أوامر الدفع", "⏳ غير المدفوع", "⚠️ الغرامات والفواتير", "📅 يومي", "📄 كل الصفوف"],
                                          horizontal=True, key="acct_ty_view", label_visibility="collapsed")
                         if _tsub.startswith("💹"):
                             _tpm = {}
@@ -9117,6 +9158,15 @@ if st.session_state["nav_page"] == "tab_accts":
                                            "(على افتراض إن المرتجع رجع للمخزون). الغرامات والفواتير والإعلانات مش على منتج فمش داخلة هنا.")
                                 st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_tsh[[c for c in _tcols if c != "📷"]]), file_name=f"trendyol_profit_{file_timestamp()}.xlsx",
                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_ty_p_dl")
+                        elif _tsub.startswith("🏷️"):
+                            try:
+                                _tfee = abs(float(str(load_settings().get("trendyol_delivery_fee", "") or 0)))
+                            except Exception:
+                                _tfee = 0.0
+                            _acct_com_view(calc.acct_ty_com(_ft, _tf, _tt, _tfee), "Barcode", "acct_ty_com",
+                                           "محسوبة من دفتر تريندول الفعلي (عمليات البيع بس): عمولة % = العمولة ÷ سعر البيع. "
+                                           + ("التوصيل = " + f"{_tfee:g}" + " للقطعة من إعداد trendyol_delivery_fee في Settings (تريندول مابتبعتش التوصيل في الدفتر)."
+                                              if _tfee else "التوصيل صفر لأن إعداد trendyol_delivery_fee مش متحط في Settings (تريندول مابتبعتش التوصيل في الدفتر) — حط مبلغ التوصيل للقطعة هناك."))
                         elif _tsub.startswith("🧮"):
                             if _rc_t is None or _rc_t.empty:
                                 st.info("مفيش أوامر دفع.")
@@ -9451,7 +9501,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         st.caption(f"الرصيد = المستحق − المدفوع = {_bal:,.0f} "
                                    f"({'مدفوع أكتر من المستحق في الفترة دي — غالباً رصيد من قبل 1/10' if _bal < 0 else 'لسه مستحق لك'}). "
                                    f"ملحوظة: بيان الفترة من تاريخ أول كشف تم سحبه فقط.")
-                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "💹 ربحية المنتجات", "🧾 الكشوف والدفعات", "🧮 تسوية الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
+                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "💹 ربحية المنتجات", "🏷️ العمولة والتوصيل", "🧾 الكشوف والدفعات", "🧮 تسوية الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
                                         horizontal=True, key="acct_noon_view", label_visibility="collapsed")
                         if _sub.startswith("📊"):
                             _stm_all = _S["statements"]
@@ -9560,6 +9610,10 @@ if st.session_state["nav_page"] == "tab_accts":
                                            "التكلفة = تكلفة الوحدة × (مبيع − مرتجع) (على افتراض إن المرتجع رجع للمخزون). رسوم الشحن المباشر ورسوم الإعلانات في الكشف مش داخلة هنا لأنها مش على صنف.")
                                 st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_sh[[c for c in _cols if c not in ("📷",)]]), file_name=f"noon_profit_{file_timestamp()}.xlsx",
                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_p_dl")
+                        elif _sub.startswith("🏷️"):
+                            _acct_com_view(calc.acct_noon_com(_f, _df_from, _df_to), "SKU", "acct_noon_com",
+                                           "محسوبة من دفتر نون الفعلي (طلبات البيع بس، من غير المرتجعات): عمولة % = Referral Fee ÷ Net Proceeds، والتوصيل = رسوم Fulfilment & Logistics ÷ القطع "
+                                           "(كلها شاملة الضريبة زي ما نون بتعرضها). مستقلة عن تاب COM_API.", ["Partner SKU"])
                         elif _sub.startswith("🧮"):
                             if _rc is None or _rc.empty:
                                 st.info("مفيش كشوف.")

@@ -6321,7 +6321,7 @@ def acct_amz_com(fin, d_from=None, d_to=None, orders=None, channel="all"):
     return g.sort_values("قطع", ascending=False).reset_index(drop=True)
 
 
-def get_com_map_amz(fin, d_from=None, d_to=None):
+def get_com_map_amz(fin, d_from=None, d_to=None, include_sku=True):
     """{ASIN أو SKU (upper) → {delivery, commission_pct}} بنفس مفاتيح get_com_map بتاعة نون عشان تتوصّل بنفس الأماكن."""
     c = acct_amz_com(fin, d_from, d_to)
     m = {}
@@ -6329,6 +6329,61 @@ def get_com_map_amz(fin, d_from=None, d_to=None):
         d = {"delivery": float(r["توصيل FBA/وحدة"]), "commission_pct": float(r["عمولة %"]),
              "delivery_fbn": None, "commission_pct_fbn": None, "delivery_fbb": None, "commission_pct_fbb": None}
         m[str(r["ASIN"]).strip().upper()] = d
-        if str(r["SKU"]).strip():
+        if include_sku and str(r["SKU"]).strip():
             m.setdefault(str(r["SKU"]).strip().upper(), d)
     return m
+
+
+def _com_finish(g):
+    """يكمّل جدول عمولة/توصيل: أعمدة % ولكل وحدة والصافي — مشترك بين نون وتريندول (أمازون ليه نسخته)."""
+    q = g["قطع"].where(g["قطع"] != 0)
+    g["متوسط سعر البيع"] = g["مبيعات"] / q
+    g["عمولة %"] = (g["عمولة"] / g["مبيعات"].where(g["مبيعات"] != 0)).fillna(0) * 100
+    g["عمولة/وحدة"] = (g["عمولة"] / q).fillna(0)
+    g["توصيل/وحدة"] = (g["توصيل"] / q).fillna(0)
+    g["رسوم تانية/وحدة"] = (g["تانية"] / q).fillna(0)
+    g["إجمالي الرسوم/وحدة"] = g["عمولة/وحدة"] + g["توصيل/وحدة"] + g["رسوم تانية/وحدة"]
+    g["إجمالي الرسوم %"] = (g["إجمالي الرسوم/وحدة"] / g["متوسط سعر البيع"].where(g["متوسط سعر البيع"] != 0)).fillna(0) * 100
+    g["صافي/وحدة بعد الرسوم"] = g["متوسط سعر البيع"].fillna(0) - g["إجمالي الرسوم/وحدة"]
+    return g.sort_values("قطع", ascending=False).reset_index(drop=True)
+
+
+def acct_noon_com(fin, d_from=None, d_to=None):
+    """عمولة وتوصيل كل SKU في نون من دفتر المالية الفعلي (صفوف البيع بس، من غير المرتجعات).
+    عمولة % = Referral Fee ÷ Net Proceeds · توصيل = Fullfilment & Logistics Fees ÷ القطع (الأرقام شاملة الضريبة زي ما نون بتعرضها)."""
+    import pandas as pd
+    if fin is None or fin.empty or "Transaction Date" not in fin.columns:
+        return pd.DataFrame()
+    df = fin.copy()
+    df["_d"] = pd.to_datetime(df["Transaction Date"], errors="coerce").dt.date
+    if d_from:
+        df = df[df["_d"] >= d_from]
+    if d_to:
+        df = df[df["_d"] <= d_to]
+    it = df[(df["Transaction Type"] == "order") & (df["Net Proceeds"] > 0) & (df["Item Nr"].astype(str).str.strip() != "") & (df["SKUs"].astype(str).str.strip() != "")]
+    if it.empty:
+        return pd.DataFrame()
+    it = it.assign(_ref=it["Referral Fee including VAT"].abs(), _ful=it["Fullfilment & Logistics Fees including VAT"].abs(),
+                   _oth=it["Other Order Fees including VAT"].abs(), _one=1.0)
+    g = it.groupby("SKUs").agg(**{"Partner SKU": ("Partner SKUs", "first"), "المنتج": ("Title", "first"), "قطع": ("_one", "sum"),
+                                  "مبيعات": ("Net Proceeds", "sum"), "عمولة": ("_ref", "sum"), "توصيل": ("_ful", "sum"),
+                                  "تانية": ("_oth", "sum")}).reset_index().rename(columns={"SKUs": "SKU"})
+    return _com_finish(g)
+
+
+def acct_ty_com(fin, d_from=None, d_to=None, delivery_per_unit=0.0):
+    """عمولة كل Barcode في تريندول من الدفتر الفعلي (Sale بس). التوصيل مش موجود في دفتر تريندول،
+    فبيتاخد من إعداد trendyol_delivery_fee (مبلغ ثابت للقطعة) لو متحط، وإلا صفر."""
+    import pandas as pd
+    if fin is None or fin.empty or "_ttype" not in fin.columns:
+        return pd.DataFrame()
+    df = _ty_prep(fin, d_from, d_to)
+    it = df[df["barcode"].astype(str).str.strip().ne("") & (df["_ttype"] == "Sale")]
+    if it.empty:
+        return pd.DataFrame()
+    it = it.assign(_one=1.0, _cm=it["_comm"].abs())
+    g = it.groupby("barcode").agg(**{"المنتج": ("description", "first"), "قطع": ("_one", "sum"), "مبيعات": ("credit", "sum"),
+                                     "عمولة": ("_cm", "sum")}).reset_index().rename(columns={"barcode": "Barcode"})
+    g["توصيل"] = g["قطع"] * abs(float(delivery_per_unit or 0.0))
+    g["تانية"] = 0.0
+    return _com_finish(g)
