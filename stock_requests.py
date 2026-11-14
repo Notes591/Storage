@@ -9038,7 +9038,10 @@ if st.session_state["nav_page"] == "tab_accts":
                         _r2[0].metric("➕ دعم/خصومات نون", _m(_k["subsidy"] + _k["nonorder_sub"]))
                         _r2[1].metric("↩️ مرتجعات", f"{_k['returns_n']:,} · {_m(_k['returns_amt'])}")
                         _r2[2].metric("🧾 مستحق من الكشوف", _m(_k["earned"]))
-                        _r2[3].metric("🏦 اتدفع لك (تحويلات بنكية)", _m(_k["paid"] + _k["transfers"]))
+                        _r2[3].metric("🏦 اتحوّل لبنكك (تحويلات بنكية)", _m(_k["paid"]))
+                        _r3 = st.columns(4)
+                        _r3[0].metric("🔁 تحويل رصيد", _m(_k["transfers"]), help="خصم من رصيدك عند نون لجهة تانية — مش وصل لحسابك البنكي (مثلاً تسوية بين حسابين).")
+                        _r3[1].metric("⚖️ الرصيد (مستحق − بنك − تحويل رصيد)", _m(_k["balance"]))
                         _bal = _k["balance"]
                         st.caption(f"الرصيد = المستحق − المدفوع = {_bal:,.0f} "
                                    f"({'مدفوع أكتر من المستحق في الفترة دي — غالباً رصيد من قبل 1/10' if _bal < 0 else 'لسه مستحق لك'}). "
