@@ -8323,6 +8323,22 @@ if st.session_state["nav_page"] == "tab14":
                 ads_map_t14 = get_ads_map()
                 ads_map_amz_t14 = get_ads_map_amazon()
                 com_map_t14 = get_com_map()
+                # تحميل مؤقت: عمولة وتوصيل FBB بالظبط زي ما التاب بيعرضها (من تاب COM_API) بصيغة COM
+                with st.expander("⬇️ تحميل عمولة وتوصيل FBB (من نفس مصدر التاب)", expanded=False):
+                    _fb_rows = []
+                    for _k, _v in com_map_t14.items():
+                        _d, _c = _v.get("delivery_fbb"), _v.get("commission_pct_fbb")
+                        if _d is None or _c is None:
+                            continue
+                        _fb_rows.append({"SKU": _k, "مصاريف توصيل": round(float(_d), 2), "العمولة %": float(_c)})
+                    if _fb_rows:
+                        _fb_df = pd.DataFrame(_fb_rows)
+                        st.caption(f"{len(_fb_df)} SKU عندهم توصيل وعمولة FBB في COM_API")
+                        st.download_button("⬇️ تحميل Excel (FBB)", data=calc.to_excel_com(_fb_df),
+                                           file_name=f"com_fbb_{file_timestamp()}.xlsx",
+                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_com_fbb_t14")
+                    else:
+                        st.info("مفيش أعمدة توصيل/عمولة FBB في تاب COM_API.")
                 # أمازون: صفوفه بتدوّر بالـ ASIN — العمولة والتوصيل من معاملات أمازون الفعلية (Amazon_Finance_API) من غير ما تلمس مفاتيح SKU بتاعة نون
                 try:
                     _wfa = _ws_title("Amazon_Finance_API")
