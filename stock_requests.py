@@ -104,6 +104,17 @@ def _shared_store():
 
 
 _SH = _shared_store()
+_SH.setdefault("thr", threading.Lock())      # تباعد بين طلبات جوجل (عشان ماننفّدش حد الطلبات في الدقيقة)
+_SH.setdefault("rd", threading.RLock())      # قراءة واحدة في المرة لنفس السيرفر (من غير ما كل الجلسات تضرب جوجل مع بعض)
+_SH.setdefault("hdr_ok", set())
+
+
+def _gs_throttle(gap=1.0):
+    with _SH["thr"]:
+        wait = _SH.get("last", 0) + gap - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _SH["last"] = time.time()
 
 
 @st.cache_resource(show_spinner=False)
@@ -132,7 +143,7 @@ def open_spreadsheet(retries=5, delay=2):
 def get_or_create_worksheet(tab, headers, retries=5, delay=2):
     for attempt in range(retries):
         try:
-            ws = ss.worksheet(tab)
+            ws = _SH["existing"].get(tab) or ss.worksheet(tab)
             # sync header: أضيف الأعمدة الجديدة لو ناقصة فعلاً — المقارنة بتتجاهل حالة
             # الحروف والمسافات الزيادة، عشان عمود موجود فعلاً (زي "Cost") متتضافش نسخة
             # منه تاني في كل جلسة جديدة بسبب فرق بسيط في التنسيق | Header-sync check
@@ -140,7 +151,10 @@ def get_or_create_worksheet(tab, headers, retries=5, delay=2):
             # doesn't get a duplicate appended every new session just from a formatting
             # mismatch.
             try:
+              if tab not in _SH["hdr_ok"]:        # فحص الهيدر مرة واحدة للسيرفر كله مش لكل جلسة
+                _gs_throttle()
                 existing_hdr = ws.row_values(1)
+                _SH["hdr_ok"].add(tab)
                 existing_hdr_norm = {str(h).strip().lower() for h in existing_hdr}
                 missing = [h for h in headers if h.strip().lower() not in existing_hdr_norm]
                 if missing:
@@ -185,6 +199,7 @@ def _init_all_sheets():
     for i in range(0, len(wanted), 6):
         part = wanted[i:i + 6]
         try:
+            _gs_throttle(1.5)
             res = ss.values_batch_get(["'" + t.replace("'", "''") + "'" for t in part])
             for t, vr in zip(part, res.get("valueRanges", [])):
                 rows = vr.get("values", []) or []
@@ -374,6 +389,7 @@ def safe_get_all_values(sheet, retries=6, delay=1):
     last_err = None
     for attempt in range(retries):
         try:
+            _gs_throttle()
             return sheet.get_all_values()
         except gspread.exceptions.APIError as e:
             last_err = e
@@ -399,9 +415,15 @@ def get_cached(sheet, force=False):
     t = sheet.title
     e = _SH["data"].get(t)
     if force or e is None or time.time() - e[0] > SHEET_TTL:
-        rows = safe_get_all_values(sheet)
-        _SH["data"][t] = (time.time(), rows)
-        return rows
+        with _SH["rd"]:      # قراءة واحدة في المرة؛ ولو جلسة تانية جدّدت نفس الشيت وإحنا مستنيين، نستخدم نتيجتها
+            e2 = _SH["data"].get(t)
+            if not force and e2 is not None and time.time() - e2[0] <= SHEET_TTL:
+                return e2[1]
+            if force and e2 is not None and time.time() - e2[0] < 3:
+                return e2[1]
+            rows = safe_get_all_values(sheet)
+            _SH["data"][t] = (time.time(), rows)
+            return rows
     return e[1]
 
 def clear_cache(sheet):
