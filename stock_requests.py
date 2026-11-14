@@ -91,24 +91,40 @@ html, body {
 
 # ══ اتصال ══
 scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-if "_gs_client" not in st.session_state:
-    _creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
-    st.session_state["_gs_client"] = gspread.authorize(_creds)
-client = st.session_state["_gs_client"]
+# ══ مخزن مشترك بين كل الجلسات (على مستوى السيرفر) ══
+# قبل كده كل جلسة (أي موظف/أي ريفريش) كانت بتفتح اتصال جديد بجوجل وتقرا كل التابات وتحتفظ بنسخة كاملة في ذاكرتها —
+# ده كان سبب البطء في أول فتح وسبب وقوع التطبيق («Oh no») لما الذاكرة بتخلص. دلوقتي نسخة واحدة للكل.
+import threading
+SHEET_TTL = 600     # ثواني — الشيت بيتقرا تاني من جوجل لو عدّى الوقت ده أو اتمسح كاشه بعد كتابة
+
+
+@st.cache_resource(show_spinner=False)
+def _shared_store():
+    return {"data": {}, "memo": {}, "ws_once": {}, "existing": {}, "boot": None, "live_ws": None, "lock": threading.RLock()}
+
+
+_SH = _shared_store()
+
+
+@st.cache_resource(show_spinner=False)
+def _shared_gs():
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
+    cl = gspread.authorize(creds)
+    for attempt in range(5):
+        try:
+            return cl, cl.open("Complaints")
+        except gspread.exceptions.APIError:
+            if attempt == 4:
+                raise
+            time.sleep(2 * (2 ** attempt))
+
+
+client, ss = _shared_gs()
+st.session_state["_gs_client"], st.session_state["_gs_ss"] = client, ss
+
 
 def open_spreadsheet(retries=5, delay=2):
-    for attempt in range(retries):
-        try:
-            return client.open("Complaints")
-        except gspread.exceptions.APIError as e:
-            if attempt < retries - 1:
-                time.sleep(delay * (2 ** attempt))
-            else:
-                raise e
-
-if "_gs_ss" not in st.session_state:
-    st.session_state["_gs_ss"] = open_spreadsheet()
-ss = st.session_state["_gs_ss"]
+    return ss
 
 # ══ الأوراق ══
 
@@ -160,17 +176,22 @@ def _init_all_sheets():
         existing = {w.title: w for w in ss.worksheets()}
     except Exception:
         existing = {}
+    _SH["existing"] = existing
     st.session_state["_ws_existing"] = existing
     wanted = [t for t in list(TABS_CONFIG.keys()) + ["links n", "links a"] if t in existing]
     vals = {}
-    try:
-        res = ss.values_batch_get(["'" + t.replace("'", "''") + "'" for t in wanted])
-        for t, vr in zip(wanted, res.get("valueRanges", [])):
-            rows = vr.get("values", []) or []
-            w = max((len(r) for r in rows), default=0)
-            vals[t] = [list(r) + [""] * (w - len(r)) for r in rows]
-    except Exception:
-        vals = {}
+    # دفعات صغيرة (6 تابات في الطلب) بدل طلب واحد ضخم: بيقلل ذروة الذاكرة وبيمنع انتهاء المهلة لو الشيتات كبيرة
+    for i in range(0, len(wanted), 6):
+        part = wanted[i:i + 6]
+        try:
+            res = ss.values_batch_get(["'" + t.replace("'", "''") + "'" for t in part])
+            for t, vr in zip(part, res.get("valueRanges", [])):
+                rows = vr.get("values", []) or []
+                w = max((len(r) for r in rows), default=0)
+                vals[t] = [list(r) + [""] * (w - len(r)) for r in rows]
+            del res
+        except Exception:
+            pass     # التابات اللي فشلت هتتقرا لوحدها عند أول استخدام (get_cached)
     out = {}
     for tab, headers in TABS_CONFIG.items():
         if tab in existing and tab in vals:
@@ -185,18 +206,26 @@ def _init_all_sheets():
                 except Exception:
                     pass
             else:
-                st.session_state[f"cache_{tab}"] = vals[tab]
+                _SH["data"][tab] = (time.time(), vals[tab])
             out[tab] = ws
         else:
             out[tab] = get_or_create_worksheet(tab, headers)
     for t in ("links n", "links a"):
         if t in vals:
-            st.session_state[f"cache_{t}"] = vals[t]
+            _SH["data"][t] = (time.time(), vals[t])
     return out
 
-if "sheets_initialized" not in st.session_state:
-    st.session_state["sheets_initialized"] = _init_all_sheets()
-sheets = st.session_state["sheets_initialized"]
+def _boot_sheets():
+    """بتتنفّذ مرة واحدة للسيرفر كله (مش لكل جلسة): قراءة كل التابات + فحص الهيدرز."""
+    with _SH["lock"]:
+        if _SH["boot"] is None:
+            _SH["boot"] = _init_all_sheets()
+        return _SH["boot"]
+
+
+sheets = _boot_sheets()
+st.session_state["sheets_initialized"] = sheets
+st.session_state["_ws_existing"] = _SH.get("existing", {})
 
 def get_or_create_links_ws(retries=5, delay=2):
     for attempt in range(retries):
@@ -276,7 +305,7 @@ reschedule_sheet  = sheets["Rescheduled"]
 expired_sheet     = sheets["Expired"]
 def _ws_once(tab, headers):
     """نفس get_or_create_worksheet بس مرة واحدة في الجلسة (بدل ما تتنادى مع كل تفاعل وتعمل طلبات جوجل زيادة)."""
-    c = st.session_state.setdefault("_ws_once_cache", {})
+    c = _SH["ws_once"]
     if tab not in c:
         c[tab] = get_or_create_worksheet(tab, headers)
     return c[tab]
@@ -321,11 +350,11 @@ _LIVE_TAB = str(os.environ.get("LIVE_TAB") or st.secrets.get("LIVE_TAB", "") or 
 live_sheet = sheets["LIVE"]
 if _LIVE_TAB and _LIVE_TAB != "LIVE":
     try:
-        _lw = st.session_state.get("_live_api_ws")        # متخزّن في الجلسة: من غير قراءة العمود كله مع كل تفاعل
+        _lw = _SH.get("live_ws")        # متخزّن على مستوى السيرفر: من غير قراءة العمود كله مع كل تفاعل
         if _lw is None:
             _lw = get_or_create_worksheet(_LIVE_TAB, TABS_CONFIG["LIVE"])
             if str(_lw.acell("A2").value or "").strip():   # خلية واحدة بدل col_values (كانت بتقرا العمود كله)
-                st.session_state["_live_api_ws"] = _lw
+                _SH["live_ws"] = _lw
             else:
                 _lw = None
         if _lw is not None:
@@ -356,23 +385,25 @@ def safe_get_all_values(sheet, retries=6, delay=1):
             last_err = e
             time.sleep(delay)
     # خلصت كل المحاولات — ارجع آخر قيمة كانت متخزنة في الكاش لو موجودة بدل ما الابب يقع كله
-    key = f"cache_{sheet.title}"
-    if key in st.session_state:
+    _old = _SH["data"].get(sheet.title)
+    if _old is not None:
         st.warning(f"⚠️ تعذر تحديث '{sheet.title}' من Google Sheets الآن — بيتم عرض آخر نسخة محفوظة | Showing last cached version")
-        return st.session_state[key]
+        return _old[1]
     st.error(f"❌ تعذر تحميل '{sheet.title}' من Google Sheets — حاول تاني بعد شوية | Could not load this sheet right now, please retry shortly.")
     st.stop()
 
 def get_cached(sheet, force=False):
-    key = f"cache_{sheet.title}"
-    if force or key not in st.session_state:
-        st.session_state[key] = safe_get_all_values(sheet)
-    return st.session_state[key]
+    """بيانات الشيت الخام — نسخة واحدة مشتركة بين كل الجلسات، بتتجدد كل SHEET_TTL ثانية أو بعد clear_cache/force."""
+    t = sheet.title
+    e = _SH["data"].get(t)
+    if force or e is None or time.time() - e[0] > SHEET_TTL:
+        rows = safe_get_all_values(sheet)
+        _SH["data"][t] = (time.time(), rows)
+        return rows
+    return e[1]
 
 def clear_cache(sheet):
-    key = f"cache_{sheet.title}"
-    if key in st.session_state:
-        del st.session_state[key]
+    _SH["data"].pop(sheet.title, None)
 
 # ══ كاش لأي "خريطة مشتقة" من شيت معيّن (زي SKU -> كود، أو كود -> كمية) — بيتم إعادة
 #    بنائها بس أول مرة بعد ما بيانات الشيت الخام تتغيّر (بعد clear_cache)، مش في كل مرة
@@ -385,12 +416,12 @@ def clear_cache(sheet):
 #    scratch for every single SKU rendered — the actual cause of the slowdown.
 def _memo_from_sheet(sheet, cache_key, builder):
     raw = get_cached(sheet)
-    src_key = f"{cache_key}__src"
-    if src_key in st.session_state and st.session_state[src_key] is raw:
-        return st.session_state[cache_key]
+    m = _SH["memo"].get(cache_key)
+    if m is not None and m[0] is raw:
+        return m[1]
     result = builder(raw)
+    _SH["memo"][cache_key] = (raw, result)
     st.session_state[cache_key] = result
-    st.session_state[src_key] = raw
     return result
 
 # ══ إعدادات ══
