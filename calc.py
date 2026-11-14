@@ -6066,7 +6066,7 @@ def acct_amz_groups_to_df(raw):
     hdr = [str(h).strip() for h in raw[0]]
     rows = [list(r) + [""] * (len(hdr) - len(r)) for r in raw[1:] if any(str(c).strip() for c in r)]
     df = pd.DataFrame([r[:len(hdr)] for r in rows], columns=hdr)
-    for c in ("total", "begin_balance"):
+    for c in ("total", "begin_balance", "released_sum", "released_n"):
         if c in df.columns:
             df[c] = df[c].map(lambda v: _acct_num(v) if str(v).strip() != "" else None)
     return df.reset_index(drop=True)
@@ -6115,8 +6115,12 @@ def acct_amz_recon(fin, groups):
     empty = (pd.DataFrame(), pd.DataFrame(), {"paid": 0.0, "open": 0.0, "held": 0.0, "held_n": 0, "open_n": 0, "paid_n": 0})
     if fin is None or fin.empty or "counted" not in fin.columns:
         return empty
-    rel = fin[(fin["status"] == "RELEASED") & (fin["type"] != "Transfer")]
-    sums = rel.groupby(["Store", "group_id"]).agg(_s=("total", "sum"), _n=("total", "size")).reset_index() if not rel.empty else pd.DataFrame(columns=["Store", "group_id", "_s", "_n"])
+    if groups is not None and not groups.empty and "released_sum" in groups.columns:
+        # الشيت فيه الصفوف المحسوبة بس، فمجموع الإفراج لكل دفعة جاي جاهز من تاب Amazon_Payouts_API
+        sums = groups[["Store", "group_id", "released_sum", "released_n"]].rename(columns={"released_sum": "_s", "released_n": "_n"}).fillna(0.0)
+    else:
+        rel = fin[(fin["status"] == "RELEASED") & (fin["type"] != "Transfer")]
+        sums = rel.groupby(["Store", "group_id"]).agg(_s=("total", "sum"), _n=("total", "size")).reset_index() if not rel.empty else pd.DataFrame(columns=["Store", "group_id", "_s", "_n"])
     gmap = {}
     if groups is not None and not groups.empty:
         for _, g in groups.iterrows():
@@ -6211,3 +6215,120 @@ def acct_amz_fees(fin, d_from=None, d_to=None):
     ad = pd.DataFrame({"التاريخ": a["_d"], "المتجر": a["Store"], "المبلغ": -a["total"]}) if not a.empty else pd.DataFrame()
     sv = pd.DataFrame({"التاريخ": s["_d"], "المتجر": s["Store"], "الوصف": s["title"].str[:80], "المبلغ": -s["total"]}) if not s.empty else pd.DataFrame()
     return ad, sv
+
+
+ACCT_AMZ_ORD_NUM = ("quantity", "item-price", "item-tax", "shipping-price", "item-promotion-discount", "ship-promotion-discount")
+
+
+def acct_amz_orders_to_df(raw):
+    """تاب Amazon_Orders_API → DataFrame (صف لكل صنف في الأوردر)."""
+    import pandas as pd
+    if not raw or len(raw) < 2:
+        return pd.DataFrame()
+    hdr = [str(h).strip() for h in raw[0]]
+    rows = [list(r) + [""] * (len(hdr) - len(r)) for r in raw[1:] if any(str(c).strip() for c in r)]
+    df = pd.DataFrame([r[:len(hdr)] for r in rows], columns=hdr)
+    for c in ACCT_AMZ_ORD_NUM:
+        if c in df.columns:
+            df[c] = df[c].map(_acct_num)
+    for c in ("Store", "amazon-order-id", "order-status", "item-status", "sku", "asin", "fulfillment-channel"):
+        if c in df.columns:
+            df[c] = df[c].astype(str).replace("nan", "").str.strip()
+    df["_purchase"] = pd.to_datetime(df["purchase-date"], errors="coerce")
+    df["_d"] = df["_purchase"].dt.date
+    return df.reset_index(drop=True)
+
+
+def _amz_ord_label(item_status, order_status, refunded):
+    s = (str(item_status) or str(order_status)).strip().lower() or str(order_status).strip().lower()
+    if "cancel" in s:
+        return "❌ ملغي"
+    if refunded:
+        return "↩️ مرتجع"
+    if "pending" in s or "unship" in s:
+        return "🆕 جديد (لسه ماتشحنش)"
+    if "shipping" in s:
+        return "🚚 جاري الشحن"
+    if "ship" in s or "deliver" in s:
+        return "✅ اتشحن"
+    return "❔ " + (s or "غير معروف")
+
+
+def acct_amz_orders_view(orders, fin, d_from=None, d_to=None):
+    """حالة كل أوردر: جديد / جاري الشحن / اتشحن / ملغي / مرتجع (المرتجع من المالية: أوردر عليه Refund) + حالة الفلوس (محجوز / اتفرج عنه).
+    يرجع (ملخص الحالات, التفاصيل)."""
+    import pandas as pd
+    if orders is None or orders.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    df = orders.copy()
+    if d_from:
+        df = df[df["_d"] >= d_from]
+    if d_to:
+        df = df[df["_d"] <= d_to]
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    refunded, held, released = set(), set(), set()
+    if fin is not None and not fin.empty and "counted" in fin.columns:
+        c = fin[(fin["counted"] == 1) & (fin["order_id"] != "")]
+        refunded = set(c[c["type"] == "Refund"]["order_id"])
+        sh = c[c["type"] == "Shipment"]
+        held = set(sh[sh["pay_group"] == ""]["order_id"])
+        released = set(sh[sh["pay_group"] != ""]["order_id"])
+    oid = df["amazon-order-id"]
+    df["الحالة"] = [_amz_ord_label(i, o, x in refunded) for i, o, x in zip(df.get("item-status", ""), df.get("order-status", ""), oid)]
+    df["الفلوس"] = ["🔒 محجوز" if x in held else ("🏦 اتفرج عنه" if x in released else "—") for x in oid]
+    amt = df["item-price"] if "item-price" in df.columns else 0.0
+    df["_amt"] = amt
+    s = df.groupby("الحالة").agg(**{"عدد الأصناف": ("amazon-order-id", "size"), "عدد الأوردرات": ("amazon-order-id", "nunique"), "قيمة (سعر البيع)": ("_amt", "sum")}).reset_index()
+    s = s.sort_values("عدد الأصناف", ascending=False).reset_index(drop=True)
+    return s, df
+
+
+def acct_amz_com(fin, d_from=None, d_to=None, orders=None, channel="all"):
+    """عمولة وتوصيل (FBA) كل منتج من الدفتر الفعلي — زي COM_API في نون لكن محسوبة من أرقام أمازون الحقيقية.
+    عمولة % = عمولة ÷ سعر المنتج، توصيل/وحدة = رسوم FBA ÷ القطع المباعة، الصافي/وحدة بعد الرسوم (مرتجعات داخلة)."""
+    import pandas as pd
+    if fin is None or fin.empty or "counted" not in fin.columns:
+        return pd.DataFrame()
+    df = _amz_counted(fin, d_from, d_to)
+    sh = df[(df["type"] == "Shipment") & (df["asin"] != "")]
+    if sh.empty:
+        return pd.DataFrame()
+    # نوع التنفيذ: من تقرير الأوردرات (Amazon = FBA تخزين أمازون / Merchant = عادي)، وإلا من وجود رسوم FBA على الصف
+    fba = sh["fba_fee"] != 0
+    if orders is not None and not orders.empty and "fulfillment-channel" in orders.columns and "amazon-order-id" in orders.columns:
+        ch = orders.drop_duplicates("amazon-order-id").set_index("amazon-order-id")["fulfillment-channel"].astype(str).str.lower()
+        known = sh["order_id"].map(ch)
+        fba = fba.where(known.isna(), known.str.startswith("amazon"))
+    if channel == "FBA":
+        sh = sh[fba]
+    elif channel == "FBM":
+        sh = sh[~fba]
+    if sh.empty:
+        return pd.DataFrame()
+    sh = sh.assign(_q=sh["qty"].where(sh["qty"] > 0, 1.0))
+    g = sh.groupby("asin").agg(SKU=("sku", "first"), المنتج=("title", "first"), قطع=("_q", "sum"), مبيعات=("product_charges", "sum"),
+                              عمولة=("commission", lambda s: -s.sum()), توصيل=("fba_fee", lambda s: -s.sum()),
+                              تانية=("other_fees", lambda s: -s.sum())).reset_index().rename(columns={"asin": "ASIN"})
+    g["متوسط سعر البيع"] = g["مبيعات"] / g["قطع"].where(g["قطع"] != 0)
+    g["عمولة %"] = (g["عمولة"] / g["مبيعات"].where(g["مبيعات"] != 0)).fillna(0) * 100
+    g["عمولة/وحدة"] = (g["عمولة"] / g["قطع"].where(g["قطع"] != 0)).fillna(0)
+    g["توصيل FBA/وحدة"] = (g["توصيل"] / g["قطع"].where(g["قطع"] != 0)).fillna(0)
+    g["رسوم تانية/وحدة"] = (g["تانية"] / g["قطع"].where(g["قطع"] != 0)).fillna(0)
+    g["إجمالي الرسوم/وحدة"] = g["عمولة/وحدة"] + g["توصيل FBA/وحدة"] + g["رسوم تانية/وحدة"]
+    g["إجمالي الرسوم %"] = (g["إجمالي الرسوم/وحدة"] / g["متوسط سعر البيع"].where(g["متوسط سعر البيع"] != 0)).fillna(0) * 100
+    g["صافي/وحدة بعد الرسوم"] = g["متوسط سعر البيع"].fillna(0) - g["إجمالي الرسوم/وحدة"]
+    return g.sort_values("قطع", ascending=False).reset_index(drop=True)
+
+
+def get_com_map_amz(fin, d_from=None, d_to=None):
+    """{ASIN أو SKU (upper) → {delivery, commission_pct}} بنفس مفاتيح get_com_map بتاعة نون عشان تتوصّل بنفس الأماكن."""
+    c = acct_amz_com(fin, d_from, d_to)
+    m = {}
+    for _, r in c.iterrows():
+        d = {"delivery": float(r["توصيل FBA/وحدة"]), "commission_pct": float(r["عمولة %"]),
+             "delivery_fbn": None, "commission_pct_fbn": None, "delivery_fbb": None, "commission_pct_fbb": None}
+        m[str(r["ASIN"]).strip().upper()] = d
+        if str(r["SKU"]).strip():
+            m.setdefault(str(r["SKU"]).strip().upper(), d)
+    return m
