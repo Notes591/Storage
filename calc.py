@@ -6348,7 +6348,7 @@ def _com_finish(g):
     return g.sort_values("قطع", ascending=False).reset_index(drop=True)
 
 
-def acct_noon_com(fin, d_from=None, d_to=None):
+def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all"):
     """عمولة وتوصيل كل SKU في نون من دفتر المالية الفعلي (صفوف البيع بس، من غير المرتجعات).
     عمولة % = Referral Fee ÷ Net Proceeds · توصيل = Fullfilment & Logistics Fees ÷ القطع (الأرقام شاملة الضريبة زي ما نون بتعرضها)."""
     import pandas as pd
@@ -6370,14 +6370,29 @@ def acct_noon_com(fin, d_from=None, d_to=None):
             keep &= d <= d_to
         mask.loc[d.index[~keep.values]] = False
     it = fin.loc[mask, need]
+    unknown = 0
+    if channel != "all":
+        # نوع التنفيذ من تاب أوردرات نون (is_fulfilled_by_noon: true = تخزين نون FBN، false = عادي FBP/FBB) بالربط على Item Nr
+        if orders is None or orders.empty or "is_fulfilled_by_noon" not in orders.columns or "item_nr" not in orders.columns:
+            return pd.DataFrame()
+        o_ = orders.loc[:, ~orders.columns.duplicated()][["item_nr", "is_fulfilled_by_noon"]].copy()
+        o_["item_nr"] = o_["item_nr"].astype(str).str.strip()
+        fm = o_.drop_duplicates("item_nr").set_index("item_nr")["is_fulfilled_by_noon"].astype(str).str.strip().str.lower()
+        kind = it["Item Nr"].astype(str).str.strip().map(fm)
+        unknown = int(kind.isna().sum())
+        it = it[(kind == "true")] if channel == "FBN" else it[(kind == "false")]
     if it.empty:
-        return pd.DataFrame()
+        out = pd.DataFrame()
+        out.attrs["unknown"] = unknown
+        return out
     it = it.assign(_ref=it["Referral Fee including VAT"].abs(), _ful=it["Fullfilment & Logistics Fees including VAT"].abs(),
                    _oth=it["Other Order Fees including VAT"].abs(), _one=1.0)
     g = it.groupby("SKUs").agg(**{"Partner SKU": ("Partner SKUs", "first"), "المنتج": ("Title", "first"), "قطع": ("_one", "sum"),
                                   "مبيعات": ("Net Proceeds", "sum"), "عمولة": ("_ref", "sum"), "توصيل": ("_ful", "sum"),
                                   "تانية": ("_oth", "sum")}).reset_index().rename(columns={"SKUs": "SKU"})
-    return _com_finish(g)
+    g = _com_finish(g)
+    g.attrs["unknown"] = unknown
+    return g
 
 
 def acct_ty_com(fin, d_from=None, d_to=None, delivery_per_unit=0.0):

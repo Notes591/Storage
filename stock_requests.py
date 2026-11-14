@@ -9683,7 +9683,14 @@ if st.session_state["nav_page"] == "tab_accts":
                                 st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_sh[[c for c in _cols if c not in ("📷",)]]), file_name=f"noon_profit_{file_timestamp()}.xlsx",
                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_p_dl")
                         elif _sub.startswith("🏷️"):
-                            _acct_com_view(calc.acct_noon_com(_f, _df_from, _df_to), "SKU", "acct_noon_com",
+                            _nch = st.radio("نوع التنفيذ", ["الكل", "📦 تخزين نون (FBN)", "🏠 عادي (FBP / FBB)"], horizontal=True, key="acct_noon_com_ch")
+                            _nkey = "FBN" if "FBN" in _nch else ("FBP" if "FBP" in _nch else "all")
+                            _ncom = calc.acct_noon_com(_f, _df_from, _df_to, _ord_all, _nkey)
+                            if _nkey != "all" and (_ord_all is None or _ord_all.empty):
+                                st.warning("تاب Noon_Orders_API فاضي — مفيش طريقة نفصل بيها نوع التنفيذ. شغّل بوت نون وحدّث الأوردرات.")
+                            elif _nkey != "all" and _ncom.attrs.get("unknown"):
+                                st.caption(f"⚠️ {_ncom.attrs['unknown']} صف بيع مالوش أوردر في Noon_Orders_API (قديم أو لسه ماتسحبش) — مش داخل في الفصل ده.")
+                            _acct_com_view(_ncom, "SKU", "acct_noon_com",
                                            "محسوبة من دفتر نون الفعلي (طلبات البيع بس، من غير المرتجعات): عمولة % = Referral Fee ÷ Net Proceeds، والتوصيل = رسوم Fulfilment & Logistics ÷ القطع "
                                            "(كلها شاملة الضريبة زي ما نون بتعرضها). مستقلة عن تاب COM_API.", ["Partner SKU"])
                         elif _sub.startswith("🧮"):
