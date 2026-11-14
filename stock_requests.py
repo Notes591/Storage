@@ -9029,19 +9029,27 @@ if st.session_state["nav_page"] == "tab_accts":
                         st.info("مفيش معاملات في الفترة دي.")
                     else:
                         _m = lambda v: f"{v:,.0f}"
+
+                        def _kc(col, label, val, kind, help_=None):
+                            # أخضر = ليك · أحمر = مخصوم منك
+                            _cl = {"in": "#16a34a", "out": "#dc2626"}.get(kind, "inherit")
+                            _tt = f' title="{help_}"' if help_ else ""
+                            col.markdown(f'<div{_tt} style="padding:2px 0 10px 0"><div style="font-size:0.85rem;opacity:0.75">{label}</div>'
+                                         f'<div style="font-size:1.9rem;font-weight:600;color:{_cl};line-height:1.25">{val}</div></div>',
+                                         unsafe_allow_html=True)
                         _r1 = st.columns(4)
-                        _r1[0].metric("💰 صافي المبيعات (Net Proceeds)", _m(_k["net"]))
-                        _r1[1].metric("🏷️ عمولة نون", _m(_k["referral"]))
-                        _r1[2].metric("🚚 رسوم الشحن والتخزين", _m(_k["fulfil"]))
-                        _r1[3].metric("📢 رسوم الكشف (إعلانات وغيرها)", _m(_k["ads"]))
+                        _kc(_r1[0], "💰 صافي المبيعات (Net Proceeds)", _m(_k["net"]), "in")
+                        _kc(_r1[1], "🏷️ عمولة نون", _m(_k["referral"]), "out")
+                        _kc(_r1[2], "🚚 رسوم الشحن والتخزين", _m(_k["fulfil"]), "out")
+                        _kc(_r1[3], "📢 رسوم الكشف (إعلانات وغيرها)", _m(_k["ads"]), "out")
                         _r2 = st.columns(4)
-                        _r2[0].metric("➕ دعم/خصومات نون", _m(_k["subsidy"] + _k["nonorder_sub"]))
-                        _r2[1].metric("↩️ مرتجعات", f"{_k['returns_n']:,} · {_m(_k['returns_amt'])}")
-                        _r2[2].metric("🧾 مستحق من الكشوف", _m(_k["earned"]))
-                        _r2[3].metric("🏦 اتحوّل لبنكك (تحويلات بنكية)", _m(_k["paid"]))
+                        _kc(_r2[0], "➕ دعم/خصومات نون", _m(_k["subsidy"] + _k["nonorder_sub"]), "in")
+                        _kc(_r2[1], "↩️ مرتجعات", f"{_k['returns_n']:,} · {_m(_k['returns_amt'])}", "out")
+                        _kc(_r2[2], "🧾 مستحق من الكشوف", _m(_k["earned"]), "in" if _k["earned"] >= 0 else "out")
+                        _kc(_r2[3], "🏦 اتحوّل لبنكك (تحويلات بنكية)", _m(_k["paid"]), "in")
                         _r3 = st.columns(4)
-                        _r3[0].metric("🔁 تحويل رصيد", _m(_k["transfers"]), help="خصم من رصيدك عند نون لجهة تانية — مش وصل لحسابك البنكي (مثلاً تسوية بين حسابين).")
-                        _r3[1].metric("⚖️ الرصيد (مستحق − بنك − تحويل رصيد)", _m(_k["balance"]))
+                        _kc(_r3[0], "🔁 تحويل رصيد", _m(_k["transfers"]), "out", "خصم من رصيدك عند نون لجهة تانية — مش وصل لحسابك البنكي (مثلاً تسوية بين حسابين).")
+                        _kc(_r3[1], "⚖️ الرصيد (مستحق − بنك − تحويل رصيد)", _m(_k["balance"]), "in" if _k["balance"] >= 0 else "out")
                         _bal = _k["balance"]
                         st.caption(f"الرصيد = المستحق − المدفوع = {_bal:,.0f} "
                                    f"({'مدفوع أكتر من المستحق في الفترة دي — غالباً رصيد من قبل 1/10' if _bal < 0 else 'لسه مستحق لك'}). "
@@ -9056,7 +9064,18 @@ if st.session_state["nav_page"] == "tab_accts":
                             _L, _tot = calc.acct_noon_breakdown(_f, _pick or None, _df_from, _df_to)
                             _bd = pd.DataFrame([{"البند": l, "القيمة": v} for l, v, _kd in _L])
                             _bd.loc[len(_bd)] = {"البند": "الإجمالي (المستحق − المدفوع)", "القيمة": _tot}
-                            st.dataframe(_bd, use_container_width=True, hide_index=True, column_config={"القيمة": st.column_config.NumberColumn("القيمة", format="%.2f")})
+                            _kmap = {l: _kd for l, v, _kd in _L}
+                            _kmap["تحويل بنكي"] = "in"
+                            _kmap["تحويل الرصيد"] = "out"
+
+                            def _row_color(r):
+                                _kd = _kmap.get(r["البند"])
+                                _cl = "#16a34a" if _kd == "in" else ("#dc2626" if _kd == "out" else ("#16a34a" if r["القيمة"] >= 0 else "#dc2626"))
+                                return [f"color: {_cl}; font-weight: 600" if c == "القيمة" else "" for c in r.index]
+                            try:
+                                st.dataframe(_bd.style.apply(_row_color, axis=1).format({"القيمة": "{:,.2f}"}), use_container_width=True, hide_index=True)
+                            except Exception:
+                                st.dataframe(_bd, use_container_width=True, hide_index=True, column_config={"القيمة": st.column_config.NumberColumn("القيمة", format="%.2f")})
                             st.caption("الأرقام بتطابق كشوف نون في كل البنود تقريباً (فروق بسيطة بالقروش). نون بتفصل «عودة التالفة» عن «إدارية للإرجاع» لكن التقرير بيدمجهم في عمود واحد، فهنا سطر واحد.")
                         elif _sub.startswith("💹"):
                             _use_ads = st.checkbox("خصم إعلانات الشهر الحالي (من AdsMonthly)", value=False, key="acct_noon_p_ads",
