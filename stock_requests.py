@@ -9048,13 +9048,20 @@ if st.session_state["nav_page"] == "tab_accts":
                         _kc(_r2[2], "🧾 مستحق من الكشوف", _m(_k["earned"]), "in" if _k["earned"] >= 0 else "out")
                         _kc(_r2[3], "🏦 اتحوّل لبنكك (تحويلات بنكية)", _m(_k["paid"]), "in")
                         _r3 = st.columns(4)
-                        _kc(_r3[0], "🔁 تحويل رصيد", _m(_k["transfers"]), "out", "خصم من رصيدك عند نون لجهة تانية — مش وصل لحسابك البنكي (مثلاً تسوية بين حسابين).")
+                        _kc(_r3[0], "🔁 تحويل رصيد", _m(_k["transfers"]), "out", "جزء بيتخصم من قيمة كشف وبيتسوّى بتحويل رصيد بدل ما ينزل في البنك (اتأكدت من مطابقة الكشوف في عرض التسوية).")
+                        try:
+                            _rc, _orph = calc.acct_noon_recon(_f)
+                            _unp = _rc[_rc["الحالة"].str.contains("لسه")]
+                            _kc(_r3[1], f"⏳ لسه ماتحوّلش ({len(_unp)} كشف)", _m(float(_unp["قيمة الكشف"].sum())), "in",
+                                "مجموع الكشوف اللي ماليها دفعة لسه — ده اللي ليك عند نون. (بغض النظر عن فلتر التاريخ فوق)")
+                        except Exception:
+                            _rc, _orph = None, None
                         _kc(_r3[1], "⚖️ الرصيد (مستحق − بنك − تحويل رصيد)", _m(_k["balance"]), "in" if _k["balance"] >= 0 else "out")
                         _bal = _k["balance"]
                         st.caption(f"الرصيد = المستحق − المدفوع = {_bal:,.0f} "
                                    f"({'مدفوع أكتر من المستحق في الفترة دي — غالباً رصيد من قبل 1/10' if _bal < 0 else 'لسه مستحق لك'}). "
                                    f"ملحوظة: بيان الفترة من تاريخ أول كشف تم سحبه فقط.")
-                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "💹 ربحية المنتجات", "🧾 الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
+                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "💹 ربحية المنتجات", "🧾 الكشوف والدفعات", "🧮 تسوية الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
                                         horizontal=True, key="acct_noon_view", label_visibility="collapsed")
                         if _sub.startswith("📊"):
                             _stm_all = _S["statements"]
@@ -9163,6 +9170,30 @@ if st.session_state["nav_page"] == "tab_accts":
                                            "التكلفة = تكلفة الوحدة × (مبيع − مرتجع) (على افتراض إن المرتجع رجع للمخزون). رسوم الشحن المباشر ورسوم الإعلانات في الكشف مش داخلة هنا لأنها مش على صنف.")
                                 st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_sh[[c for c in _cols if c not in ("📷",)]]), file_name=f"noon_profit_{file_timestamp()}.xlsx",
                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_p_dl")
+                        elif _sub.startswith("🧮"):
+                            if _rc is None or _rc.empty:
+                                st.info("مفيش كشوف.")
+                            else:
+                                _show_rc = _rc.copy()
+                                _show_rc = _show_rc[["المتجر", "الكشف", "تاريخ الكشف", "قيمة الكشف", "التفاصيل", "الحالة", "دفعة بنكية", "تحويل رصيد", "تاريخ الدفع", "الميعاد المتوقع", "الفرق"]]
+                                for _cc in ("تاريخ الكشف", "تاريخ الدفع", "الميعاد المتوقع"):
+                                    _show_rc[_cc] = _show_rc[_cc].astype(str).replace("None", "")
+                                st.caption("كل كشف أسبوعي مقابل الدفعة البنكية اللي سدّدته (ولو في تحويل رصيد اتخصم منه بيظهر جنبها). الربط بالمبلغ، والفروق بالقروش عادية. "
+                                           "«⏳ لسه ماتحوّلش» = كشف ماله دفعة لسه — ده فلوسك عند نون.")
+
+                                def _rc_color(r):
+                                    _cl = "#16a34a" if str(r["الحالة"]).startswith("✅") else "#d97706"
+                                    return [f"color: {_cl}; font-weight: 600" if c == "الحالة" else "" for c in r.index]
+                                try:
+                                    st.dataframe(_show_rc.style.apply(_rc_color, axis=1).format({c: "{:,.2f}" for c in ("قيمة الكشف", "دفعة بنكية", "تحويل رصيد", "الفرق")}),
+                                                 use_container_width=True, hide_index=True)
+                                except Exception:
+                                    st.dataframe(_show_rc, use_container_width=True, hide_index=True)
+                                if _orph is not None and not _orph.empty:
+                                    st.markdown("**دفعات ملهاش كشف في البيانات** (غالباً عن كشوف أقدم من تاريخ بداية السحب)")
+                                    _o2 = _orph.copy()
+                                    _o2["التاريخ"] = _o2["التاريخ"].astype(str)
+                                    st.dataframe(_o2, use_container_width=True, hide_index=True, column_config={"المبلغ": st.column_config.NumberColumn("المبلغ", format="%.2f")})
                         elif _sub.startswith("🧾"):
                             _stm = _S["statements"]
                             st.markdown("**الكشوف الأسبوعية**")

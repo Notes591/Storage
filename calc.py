@@ -5772,3 +5772,79 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None):
     g["هامش %"] = (g["الربح"] / g["صافي المبيعات"].where(g["صافي المبيعات"] != 0)).fillna(0) * 100
     g["تكلفة ناقصة"] = missing
     return g.sort_values(["صافي الكمية", "الربح"], ascending=False).reset_index(drop=True)
+
+
+def acct_noon_recon(fin):
+    """تسوية: كل كشف أسبوعي (PS-...) مقابل الدفعة البنكية اللي سدّدته (+ تحويلات الرصيد اللي اتخصمت منه).
+    بيرجّع (df الكشوف، df دفعات ملهاش كشف في البيانات). الربط بالمبلغ (فرق أقل من ~0.1% أو 2 ريال) والدفعة بعد تاريخ الكشف.
+    كشف ماله دفعة = لسه ماتحوّلش (فلوس ليك عند نون)."""
+    import pandas as pd
+    from itertools import combinations
+    cols = ["المتجر", "الكشف", "تاريخ الكشف", "قيمة الكشف", "دفعة بنكية", "تحويل رصيد", "تاريخ الدفع", "الفرق", "الحالة"]
+    if fin is None or fin.empty:
+        return pd.DataFrame(columns=cols), pd.DataFrame()
+    df = fin.copy()
+    if "Store" not in df.columns:
+        df["Store"] = ""
+    df["_d"] = pd.to_datetime(df["Transaction Date"], errors="coerce").dt.date
+    tt = df["Transaction Type"].astype(str)
+    out, orphans = [], []
+    for sname, g in df.groupby("Store"):
+        ttg = g["Transaction Type"].astype(str)
+        stm = g[g["Reference Nr"].astype(str).str.startswith("PS-") & ttg.isin(["order", "order_update", "statement_fee"])]
+        sts = stm.groupby("Reference Nr").agg(d=("_d", "max"), v=("Total", "sum")).reset_index().sort_values("d")
+        pays = [dict(d=r["_d"], v=-float(r["Total"]), used=False) for _, r in g[ttg == "payment"].iterrows()]
+        bts = [dict(d=r["_d"], v=-float(r["Total"]), used=False) for _, r in g[ttg == "balance_transfer"].iterrows()]
+        pays.sort(key=lambda x: x["d"])
+        for _, s in sts.iterrows():
+            best = None
+            for p in pays:
+                if p["used"] or p["d"] < s["d"]:
+                    continue
+                free = [b for b in bts if not b["used"]]
+                for n in range(0, min(len(free), 3) + 1):
+                    for sub in combinations(free, n):
+                        tot = p["v"] + sum(b["v"] for b in sub)
+                        diff = tot - float(s["v"])
+                        tol = max(2.0, abs(float(s["v"])) * 0.001)
+                        if abs(diff) <= tol and (best is None or abs(diff) < abs(best[2])):
+                            best = (p, sub, diff)
+            if best:
+                p, sub, diff = best
+                p["used"] = True
+                for b in sub:
+                    b["used"] = True
+                out.append({"المتجر": sname, "الكشف": s["Reference Nr"], "تاريخ الكشف": s["d"], "قيمة الكشف": float(s["v"]),
+                            "دفعة بنكية": p["v"], "تحويل رصيد": sum(b["v"] for b in sub), "تاريخ الدفع": p["d"], "الفرق": diff, "الحالة": "✅ اتحوّل"})
+            else:
+                out.append({"المتجر": sname, "الكشف": s["Reference Nr"], "تاريخ الكشف": s["d"], "قيمة الكشف": float(s["v"]),
+                            "دفعة بنكية": 0.0, "تحويل رصيد": 0.0, "تاريخ الدفع": None, "الفرق": 0.0, "الحالة": "⏳ لسه ماتحوّلش"})
+        for p in pays:
+            if not p["used"]:
+                orphans.append({"المتجر": sname, "التاريخ": p["d"], "النوع": "دفعة بنكية", "المبلغ": p["v"]})
+        for b in bts:
+            if not b["used"]:
+                orphans.append({"المتجر": sname, "التاريخ": b["d"], "النوع": "تحويل رصيد", "المبلغ": b["v"]})
+    res = pd.DataFrame(out, columns=cols)
+    # الميعاد المتوقع للكشوف اللي لسه ماتحوّلتش = تاريخ الكشف + الفرق المعتاد (الوسيط) بين الكشف والدفعة
+    import datetime as _dt
+    lags = [(r["تاريخ الدفع"] - r["تاريخ الكشف"]).days for _, r in res.iterrows() if r["تاريخ الدفع"] is not None and not pd.isna(r["تاريخ الدفع"])]
+    lag = int(sorted(lags)[len(lags) // 2]) if lags else 8
+    as_of = df["_d"].max()
+    exp_dates, details = [], []
+    for _, r in res.iterrows():
+        if r["الحالة"].startswith("✅"):
+            exp_dates.append(None)
+            d = f"اتحوّل {r['دفعة بنكية']:,.2f} بتاريخ {r['تاريخ الدفع']}"
+            if r["تحويل رصيد"]:
+                d += f" + تحويل رصيد {r['تحويل رصيد']:,.2f}"
+            details.append(d)
+        else:
+            ex = r["تاريخ الكشف"] + _dt.timedelta(days=lag)
+            exp_dates.append(ex)
+            late = (as_of is not None and ex < as_of)
+            details.append(f"لسه ماتحوّلش — متوقع حوالي {ex}" + (" (متأخر عن الميعاد المعتاد ⚠️)" if late else ""))
+    res["الميعاد المتوقع"] = exp_dates
+    res["التفاصيل"] = details
+    res = res.sort_values(["المتجر", "تاريخ الكشف"], ascending=[True, False]).reset_index(drop=True)
+    return res, pd.DataFrame(orphans)
