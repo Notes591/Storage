@@ -9084,33 +9084,62 @@ if st.session_state["nav_page"] == "tab_accts":
                             if _pf.empty:
                                 st.info("مفيش مبيعات في الفترة.")
                             else:
-                                _tl = _pf["الربح"].sum()
+                                _known = _pf[~_pf["تكلفة ناقصة"]]
+                                _tl = _known["الربح"].sum()
                                 _pc = st.columns(4)
                                 _pc[0].metric("📦 صافي الكمية", f"{int(_pf['صافي الكمية'].sum()):,}")
-                                _pc[1].metric("💰 صافي بعد الرسوم", f"{_pf['الصافي بعد الرسوم'].sum():,.0f}")
-                                _pc[2].metric("🧮 التكلفة + الإعلانات", f"{(_pf['إجمالي التكلفة'].sum() + _pf['الإعلانات'].sum()):,.0f}")
+                                _pc[1].metric("💰 صافي بعد الرسوم (بتكلفة معروفة)", f"{_known['الصافي بعد الرسوم'].sum():,.0f}")
+                                _pc[2].metric("🧮 التكلفة + الإعلانات", f"{(_known['إجمالي التكلفة'].sum() + _known['الإعلانات'].sum()):,.0f}")
                                 _pc[3].metric("✅ الربح" if _tl >= 0 else "🔻 الخسارة", f"{_tl:,.0f}")
                                 _nm = int(_pf["تكلفة ناقصة"].sum())
                                 if _nm:
-                                    st.warning(f"⚠️ {_nm} منتج تكلفته غير مسجلة (محسوبة صفر) — ربحهم أعلى من الحقيقي. فلترهم بخانة «تكلفة ناقصة».")
+                                    st.warning(f"⚠️ {_nm} منتج تكلفته غير مسجلة — مش داخلين في الربح/الخسارة فوق ولا في «الرابح/الخاسر». "
+                                               f"صافيهم بعد الرسوم {_pf[_pf['تكلفة ناقصة']]['الصافي بعد الرسوم'].sum():,.0f}. شوفهم من «⚠️ تكلفة ناقصة».")
                                 _only = st.radio("إظهار", ["الكل", "🔴 الخاسر بس", "🟢 الرابح بس", "⚠️ تكلفة ناقصة"], horizontal=True, key="acct_noon_p_f")
                                 _sh = _pf
                                 if _only.startswith("🔴"):
-                                    _sh = _pf[_pf["الربح"] < 0]
+                                    _sh = _pf[(_pf["الربح"] < 0) & ~_pf["تكلفة ناقصة"]]
                                 elif _only.startswith("🟢"):
-                                    _sh = _pf[_pf["الربح"] >= 0]
+                                    _sh = _pf[(_pf["الربح"] >= 0) & ~_pf["تكلفة ناقصة"]]
                                 elif _only.startswith("⚠️"):
                                     _sh = _pf[_pf["تكلفة ناقصة"]]
-                                _sh = _sh.assign(**{"الحالة": ["🟢" if v >= 0 else "🔴" for v in _sh["الربح"]]})
-                                _cols = ["الحالة", "المنتج", "SKU", "مبيع", "مرتجع", "صافي الكمية", "صافي المبيعات", "الرسوم", "دعم",
+
+                                _lm = get_links_map() or {}
+
+                                def _p_img(su, pu):
+                                    for _kx in (su, su.rsplit("-", 1)[0] if "-" in su else su, pu):
+                                        _iv = (inv_map.get(_kx, {}) or {}).get("img") or _lm.get(_kx)
+                                        if _iv:
+                                            return _iv
+                                    return None
+
+                                def _p_link(su, pu):
+                                    try:
+                                        return calc.build_noon_link(su) or calc.build_noon_link(pu)
+                                    except Exception:
+                                        return None
+                                _sh = _sh.assign(**{
+                                    "الحالة": ["⚠️" if m else ("🟢" if v >= 0 else "🔴") for v, m in zip(_sh["الربح"], _sh["تكلفة ناقصة"])],
+                                    "📷": [_p_img(str(a).strip().upper(), str(b).strip().upper()) for a, b in zip(_sh["SKU"], _sh["Partner SKU"])],
+                                    "🔗": [_p_link(str(a).strip(), str(b).strip()) for a, b in zip(_sh["SKU"], _sh["Partner SKU"])]})
+                                _cols = ["📷", "🔗", "الحالة", "المنتج", "SKU", "مبيع", "مرتجع", "صافي الكمية", "صافي المبيعات", "الرسوم", "دعم",
                                          "الصافي بعد الرسوم", "تكلفة الوحدة", "إجمالي التكلفة"] + (["الإعلانات"] if _use_ads else []) + ["الربح", "هامش %"]
                                 _cfg = {c: st.column_config.NumberColumn(c, format="%.0f") for c in ("صافي المبيعات", "الرسوم", "دعم", "الصافي بعد الرسوم", "إجمالي التكلفة", "الإعلانات", "الربح")}
                                 _cfg["تكلفة الوحدة"] = st.column_config.NumberColumn("تكلفة الوحدة", format="%.2f")
                                 _cfg["هامش %"] = st.column_config.NumberColumn("هامش %", format="%.1f")
-                                st.dataframe(_sh[_cols], use_container_width=True, hide_index=True, column_config=_cfg)
+                                _cfg["📷"] = st.column_config.ImageColumn("📷")
+                                _cfg["🔗"] = st.column_config.LinkColumn(" ", display_text="🔗")
+                                try:
+                                    _cfg["📷"] = st.column_config.ImageColumn("📷", width="small")
+                                    _cfg["🔗"] = st.column_config.LinkColumn(" ", display_text="🔗", width="small")
+                                    st.dataframe(_sh[_cols], use_container_width=True, hide_index=True, column_config=_cfg)
+                                except Exception:
+                                    _cfg["📷"] = st.column_config.ImageColumn("📷")
+                                    _cfg["🔗"] = st.column_config.LinkColumn(" ", display_text="🔗")
+                                    st.dataframe(_sh[_cols], use_container_width=True, hide_index=True, column_config=_cfg)
                                 st.caption("مرتبة من الأكتر كمية. الصافي بعد الرسوم = صافي المبيعات − العمولة − رسوم الشحن/FBN − رسوم أخرى + الدعم، وبعد خصم المرتجعات. "
                                            "التكلفة = تكلفة الوحدة × (مبيع − مرتجع) (على افتراض إن المرتجع رجع للمخزون). رسوم الشحن المباشر ورسوم الإعلانات في الكشف مش داخلة هنا لأنها مش على صنف.")
-                                st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_sh[_cols]), file_name=f"noon_profit_{file_timestamp()}.xlsx",
+                                st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_sh[[c for c in _cols if c not in ("📷",)]]), file_name=f"noon_profit_{file_timestamp()}.xlsx",
                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_p_dl")
                         elif _sub.startswith("🧾"):
                             _stm = _S["statements"]
