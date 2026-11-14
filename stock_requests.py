@@ -95,7 +95,7 @@ scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis
 # قبل كده كل جلسة (أي موظف/أي ريفريش) كانت بتفتح اتصال جديد بجوجل وتقرا كل التابات وتحتفظ بنسخة كاملة في ذاكرتها —
 # ده كان سبب البطء في أول فتح وسبب وقوع التطبيق («Oh no») لما الذاكرة بتخلص. دلوقتي نسخة واحدة للكل.
 import threading
-SHEET_TTL = 600     # ثواني — الشيت بيتقرا تاني من جوجل لو عدّى الوقت ده أو اتمسح كاشه بعد كتابة
+SHEET_TTL = 900     # ثواني — الشيت بيتقرا تاني من جوجل لو عدّى الوقت ده أو اتمسح كاشه بعد كتابة
 
 
 @st.cache_resource(show_spinner=False)
@@ -177,6 +177,7 @@ def _init_all_sheets():
     except Exception:
         existing = {}
     _SH["existing"] = existing
+    _SH["ex_ts"] = time.time()
     st.session_state["_ws_existing"] = existing
     wanted = [t for t in list(TABS_CONFIG.keys()) + ["links n", "links a"] if t in existing]
     vals = {}
@@ -351,12 +352,13 @@ live_sheet = sheets["LIVE"]
 if _LIVE_TAB and _LIVE_TAB != "LIVE":
     try:
         _lw = _SH.get("live_ws")        # متخزّن على مستوى السيرفر: من غير قراءة العمود كله مع كل تفاعل
-        if _lw is None:
+        if _lw is None and time.time() - _SH.get("live_miss", 0) > 300:     # لو التاب فاضي/مش موجود منسألش جوجل تاني قبل 5 دقايق
             _lw = get_or_create_worksheet(_LIVE_TAB, TABS_CONFIG["LIVE"])
             if str(_lw.acell("A2").value or "").strip():   # خلية واحدة بدل col_values (كانت بتقرا العمود كله)
                 _SH["live_ws"] = _lw
             else:
                 _lw = None
+                _SH["live_miss"] = time.time()
         if _lw is not None:
             live_sheet = _lw
         else:
@@ -404,6 +406,23 @@ def get_cached(sheet, force=False):
 
 def clear_cache(sheet):
     _SH["data"].pop(sheet.title, None)
+
+def _ws_title(title):
+    """worksheet بالاسم من قايمة التابات المحفوظة على السيرفر — بدل ss.worksheet() اللي كل نداء ليه بيعمل طلب لجوجل
+    (وده اللي كان بيجيب «Google Sheets API limit»). القايمة بتتحدّث بطلب واحد بس لو التاب مش موجود وعدّى 5 دقايق."""
+    ex = _SH["existing"]
+    w = ex.get(title)
+    if w is None and time.time() - _SH.get("ex_ts", 0) > 300:
+        with _SH["lock"]:
+            _SH["ex_ts"] = time.time()
+            try:
+                _SH["existing"] = ex = {x.title: x for x in ss.worksheets()}
+            except Exception:
+                pass
+        w = ex.get(title)
+    if w is None:
+        raise gspread.exceptions.WorksheetNotFound(title)
+    return w
 
 # ══ كاش لأي "خريطة مشتقة" من شيت معيّن (زي SKU -> كود، أو كود -> كمية) — بيتم إعادة
 #    بنائها بس أول مرة بعد ما بيانات الشيت الخام تتغيّر (بعد clear_cache)، مش في كل مرة
@@ -541,13 +560,13 @@ def _images_api_map():
         return st.session_state["_img_api_map"]
     m = {}
     try:
-        for row in safe_get_all_values(ss.worksheet("Images_API"))[1:]:
+        for row in get_cached(_ws_title("Images_API"))[1:]:
             if len(row) >= 2 and row[0].strip() and row[1].strip().startswith("http"):
                 m[row[0].strip().upper()] = row[1].strip()
     except Exception:
         pass
     try:   # تريندول: Barcode → صورة من TrendyolProducts_API (أداة Trendyol API)
-        for row in safe_get_all_values(ss.worksheet("TrendyolProducts_API"))[1:]:
+        for row in get_cached(_ws_title("TrendyolProducts_API"))[1:]:
             if len(row) >= 4 and row[1].strip() and row[3].strip().startswith("http"):
                 m[row[1].strip().upper()] = row[3].strip()
     except Exception:
@@ -561,7 +580,7 @@ def _amz_images_api_map():
         return st.session_state["_amz_img_api_map"]
     m = {}
     try:
-        for row in safe_get_all_values(ss.worksheet("Amazon_Images_API"))[1:]:
+        for row in get_cached(_ws_title("Amazon_Images_API"))[1:]:
             if len(row) >= 2 and row[0].strip() and row[1].strip().startswith("http"):
                 m[row[0].strip().upper()] = row[1].strip()
     except Exception:
@@ -8284,7 +8303,7 @@ if st.session_state["nav_page"] == "tab14":
                 com_map_t14 = get_com_map()
                 # أمازون: صفوفه بتدوّر بالـ ASIN — العمولة والتوصيل من معاملات أمازون الفعلية (Amazon_Finance_API) من غير ما تلمس مفاتيح SKU بتاعة نون
                 try:
-                    _wfa = ss.worksheet("Amazon_Finance_API")
+                    _wfa = _ws_title("Amazon_Finance_API")
                     _fin_c = _memo_from_sheet(_wfa, "acct_amz_df", calc.acct_amz_rows_to_df)
                     for _k, _v in calc.get_com_map_amz(_fin_c, include_sku=False).items():
                         com_map_t14.setdefault(_k, _v)
@@ -9018,7 +9037,7 @@ if st.session_state["nav_page"] == "tab_accts":
 
             def _acct_ws(tab):
                 try:
-                    return ss.worksheet(tab)
+                    return _ws_title(tab)
                 except Exception:
                     return None
 
