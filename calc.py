@@ -6354,13 +6354,22 @@ def acct_noon_com(fin, d_from=None, d_to=None):
     import pandas as pd
     if fin is None or fin.empty or "Transaction Date" not in fin.columns:
         return pd.DataFrame()
-    df = fin.copy()
-    df["_d"] = pd.to_datetime(df["Transaction Date"], errors="coerce").dt.date
-    if d_from:
-        df = df[df["_d"] >= d_from]
-    if d_to:
-        df = df[df["_d"] <= d_to]
-    it = df[(df["Transaction Type"] == "order") & (df["Net Proceeds"] > 0) & (df["Item Nr"].astype(str).str.strip() != "") & (df["SKUs"].astype(str).str.strip() != "")]
+    # من غير نسخة كاملة من الدفتر (الدفتر كبير): بنفلتر بالقناع الأول وبنآخد الأعمدة المطلوبة بس
+    need = ["Transaction Type", "Item Nr", "SKUs", "Partner SKUs", "Title", "Net Proceeds", "Referral Fee including VAT",
+            "Fullfilment & Logistics Fees including VAT", "Other Order Fees including VAT"]
+    if any(c not in fin.columns for c in need):
+        return pd.DataFrame()
+    mask = (fin["Transaction Type"] == "order") & (fin["Net Proceeds"] > 0) & (fin["Item Nr"].astype(str).str.strip() != "") \
+        & (fin["SKUs"].astype(str).str.strip() != "")
+    if d_from or d_to:
+        d = pd.to_datetime(fin.loc[mask, "Transaction Date"], errors="coerce").dt.date
+        keep = pd.Series(True, index=d.index)
+        if d_from:
+            keep &= d >= d_from
+        if d_to:
+            keep &= d <= d_to
+        mask.loc[d.index[~keep.values]] = False
+    it = fin.loc[mask, need]
     if it.empty:
         return pd.DataFrame()
     it = it.assign(_ref=it["Referral Fee including VAT"].abs(), _ful=it["Fullfilment & Logistics Fees including VAT"].abs(),
