@@ -8984,6 +8984,14 @@ if st.session_state["nav_page"] == "tab_accts":
             if not hasattr(calc, "acct_rows_to_df"):
                 st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات المتاجر) جنب stock_requests.py.")
                 st.stop()
+            def _acct_card(col, label, val, kind, help_=None, sub=None):
+                # كارت هادي: رقم متوسط بلون خافت (أخضر = ليك · أحمر = مخصوم) وتحته سطر صغير للتفاصيل
+                _cl = {"in": "#3d8f65", "out": "#b5605b"}.get(kind, "inherit")
+                _tp = f' title="{help_}"' if help_ else ""
+                _sb = f'<div style="font-size:0.75rem;opacity:0.55;margin-top:1px">{sub}</div>' if sub else ""
+                col.markdown(f'<div{_tp} style="padding:2px 0 12px 0"><div style="font-size:0.8rem;opacity:0.7">{label}</div>'
+                             f'<div style="font-size:1.4rem;font-weight:500;color:{_cl};line-height:1.3">{val}</div>{_sb}</div>', unsafe_allow_html=True)
+
             _a_noon, _a_ty, _a_amz = st.tabs(["🟢 نون | Noon", "🟣 تريندول | Trendyol", "🟠 أمازون | Amazon"])
             with _a_ty:
                 if not hasattr(calc, "acct_ty_rows_to_df"):
@@ -9014,25 +9022,21 @@ if st.session_state["nav_page"] == "tab_accts":
                     else:
                         _m2 = lambda v: f"{v:,.0f}"
 
-                        def _kc_ty(col, label, val, kind, help_=None):
-                            _cl = {"in": "#16a34a", "out": "#dc2626"}.get(kind, "inherit")
-                            _tp = f' title="{help_}"' if help_ else ""
-                            col.markdown(f'<div{_tp} style="padding:2px 0 10px 0"><div style="font-size:0.85rem;opacity:0.75">{label}</div>'
-                                         f'<div style="font-size:1.9rem;font-weight:600;color:{_cl};line-height:1.25">{val}</div></div>', unsafe_allow_html=True)
+                        _kc_ty = _acct_card
                         try:
                             _rc_t, _ug_t, _unp_t, _unp_n = calc.acct_ty_recon(_ft)
                         except Exception:
                             _rc_t, _ug_t, _unp_t, _unp_n = None, None, 0.0, 0
                         _g1 = st.columns(4)
-                        _kc_ty(_g1[0], "🛒 إجمالي المبيعات (سعر البيع)", f"{_tk['sales_n']:,} · {_m2(_tk['sales_gross'])}", "in")
-                        _kc_ty(_g1[1], "↩️ مرتجعات", f"{_tk['returns_n']:,} · {_m2(_tk['returns_gross'])}", "out")
+                        _kc_ty(_g1[0], "🛒 إجمالي المبيعات (سعر البيع)", _m2(_tk["sales_gross"]), "in", sub=f"{_tk['sales_n']:,} قطعة")
+                        _kc_ty(_g1[1], "↩️ مرتجعات", _m2(_tk["returns_gross"]), "out", sub=f"{_tk['returns_n']:,} قطعة")
                         _kc_ty(_g1[2], "🏷️ عمولة تريندول", _m2(_tk["commission"]), "out")
                         _kc_ty(_g1[3], "⚠️ غرامات ورسوم (فواتير خصم)", _m2(_tk["fees"]), "out")
                         _g2 = st.columns(4)
                         _kc_ty(_g2[0], "🧾 صافي مستحق (بعد العمولة والمرتجع والغرامات)", _m2(_tk["net"]), "in" if _tk["net"] >= 0 else "out")
-                        _kc_ty(_g2[1], "🏦 اتحوّل لبنكك (أوامر دفع)", f"{_tk['pays_n']} · {_m2(_tk['paid'])}", "in")
-                        _kc_ty(_g2[2], f"⏳ لسه ماتحوّلش ({_unp_n:,} صف)", _m2(_unp_t), "in",
-                               "صافي الصفوف اللي ماليهاش أمر دفع لسه — ده اللي ليك عند تريندول (بغض النظر عن فلتر التاريخ).")
+                        _kc_ty(_g2[1], "🏦 اتحوّل لبنكك (أوامر دفع)", _m2(_tk["paid"]), "in", sub=f"{_tk['pays_n']} أمر دفع")
+                        _kc_ty(_g2[2], "⏳ لسه ماتحوّلش", _m2(_unp_t), "in",
+                               sub=f"{_unp_n:,} صف", help_="صافي الصفوف اللي ماليهاش أمر دفع لسه — ده اللي ليك عند تريندول (بغض النظر عن فلتر التاريخ).")
                         _kc_ty(_g2[3], "🎟️ خصم سلة (معلومة)", _m2(_tk["discount"]), "out",
                                "خصومات السلة بتظهر في التقرير بس مش بتتخصم من الدفعة (اتأكدت بمطابقة أمر دفع للقرش).")
                         _tsub = st.radio("العرض", ["💹 ربحية المنتجات", "🧮 تسوية أوامر الدفع", "⏳ غير المدفوع", "⚠️ الغرامات والفواتير", "📅 يومي", "📄 كل الصفوف"],
@@ -9183,13 +9187,7 @@ if st.session_state["nav_page"] == "tab_accts":
                     else:
                         _m = lambda v: f"{v:,.0f}"
 
-                        def _kc(col, label, val, kind, help_=None):
-                            # أخضر = ليك · أحمر = مخصوم منك
-                            _cl = {"in": "#16a34a", "out": "#dc2626"}.get(kind, "inherit")
-                            _tt = f' title="{help_}"' if help_ else ""
-                            col.markdown(f'<div{_tt} style="padding:2px 0 10px 0"><div style="font-size:0.85rem;opacity:0.75">{label}</div>'
-                                         f'<div style="font-size:1.9rem;font-weight:600;color:{_cl};line-height:1.25">{val}</div></div>',
-                                         unsafe_allow_html=True)
+                        _kc = _acct_card
                         _r1 = st.columns(4)
                         _kc(_r1[0], "💰 صافي المبيعات (Net Proceeds)", _m(_k["net"]), "in")
                         _kc(_r1[1], "🏷️ عمولة نون", _m(_k["referral"]), "out")
@@ -9197,7 +9195,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         _kc(_r1[3], "📢 رسوم الكشف (إعلانات وغيرها)", _m(_k["ads"]), "out")
                         _r2 = st.columns(4)
                         _kc(_r2[0], "➕ دعم/خصومات نون", _m(_k["subsidy"] + _k["nonorder_sub"]), "in")
-                        _kc(_r2[1], "↩️ مرتجعات", f"{_k['returns_n']:,} · {_m(_k['returns_amt'])}", "out")
+                        _kc(_r2[1], "↩️ مرتجعات", _m(_k["returns_amt"]), "out", sub=f"{_k['returns_n']:,} قطعة")
                         _kc(_r2[2], "🧾 مستحق من الكشوف", _m(_k["earned"]), "in" if _k["earned"] >= 0 else "out")
                         _kc(_r2[3], "🏦 اتحوّل لبنكك (تحويلات بنكية)", _m(_k["paid"]), "in")
                         _r3 = st.columns(4)
