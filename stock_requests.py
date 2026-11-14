@@ -9145,7 +9145,160 @@ if st.session_state["nav_page"] == "tab_accts":
                         st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_t), file_name=f"trendyol_accounts_{file_timestamp()}.xlsx",
                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_ty_dl")
             with _a_amz:
-                st.info("قريباً — هنبدأ بنون الأول.")
+                if not hasattr(calc, "acct_amz_rows_to_df"):
+                    st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات أمازون).")
+                    st.stop()
+                if st.button("🔄 تحديث البيانات من الشيت", key="acct_amz_refresh"):
+                    for _tb in ("Amazon_Finance_API", "Amazon_Payouts_API"):
+                        _w = _acct_ws(_tb)
+                        if _w is not None:
+                            clear_cache(_w)
+                    st.rerun()
+                _ws_az = _acct_ws("Amazon_Finance_API")
+                _fin_az = _memo_from_sheet(_ws_az, "acct_amz_df", calc.acct_amz_rows_to_df) if _ws_az is not None else None
+                _ws_azg = _acct_ws("Amazon_Payouts_API")
+                _grp_az = _memo_from_sheet(_ws_azg, "acct_amz_groups_df", calc.acct_amz_groups_to_df) if _ws_azg is not None else None
+                if _fin_az is None or _fin_az.empty:
+                    st.warning("مفيش بيانات في تاب Amazon_Finance_API لسه. شغّل بوت Amazon_Accounts.py (سحب كامل) مع تفعيل خانة Google Sheet.")
+                else:
+                    _azs = sorted({x for x in _fin_az.get("Store", pd.Series(dtype=str)).astype(str) if x}) or [""]
+                    _a1, _a2, _a3 = st.columns([2, 1, 1])
+                    _asel = _a1.multiselect("المتجر | Store", _azs, default=_azs, key="acct_amz_stores")
+                    _adates = _fin_az["_d"].dropna()
+                    _amin, _amax = _adates.min(), _adates.max()
+                    _af = _a2.date_input("من (تاريخ الشحن/المعاملة)", value=_amin, min_value=_amin, max_value=_amax, key="acct_amz_from")
+                    _at = _a3.date_input("إلى", value=_amax, min_value=_amin, max_value=_amax, key="acct_amz_to")
+                    _fa = _fin_az[_fin_az["Store"].isin(_asel)] if "Store" in _fin_az.columns and _asel else _fin_az
+                    _ga = _grp_az[_grp_az["Store"].isin(_asel)] if (_grp_az is not None and not _grp_az.empty and "Store" in _grp_az.columns and _asel) else _grp_az
+                    _AS = calc.acct_amz_summary(_fa, _af, _at)
+                    _ak = _AS["kpi"]
+                    if not _ak:
+                        st.info("مفيش معاملات في الفترة دي.")
+                    else:
+                        _m2a = lambda v: f"{v:,.0f}"
+                        try:
+                            _rc_a, _hg_a, _kp_a = calc.acct_amz_recon(_fa, _ga)
+                        except Exception:
+                            _rc_a, _hg_a, _kp_a = None, None, {"paid": 0.0, "open": 0.0, "held": 0.0, "held_n": 0, "open_n": 0, "paid_n": 0}
+                        _g1 = st.columns(4)
+                        _acct_card(_g1[0], "🛒 إجمالي المبيعات (سعر البيع)", _m2a(_ak["sales_gross"]), "in", sub=f"{_ak['sales_n']:,} قطعة")
+                        _acct_card(_g1[1], "↩️ مرتجعات", _m2a(_ak["returns_gross"]), "out", sub=f"{_ak['returns_n']:,} طلب")
+                        _acct_card(_g1[2], "🏷️ عمولة أمازون", _m2a(_ak["commission"]), "out")
+                        _acct_card(_g1[3], "📦 رسوم FBA (تجهيز وشحن)", _m2a(_ak["fba_fee"]), "out", sub=f"+ رسوم تانية {_m2a(_ak['other_fees'])}")
+                        _g2 = st.columns(4)
+                        _acct_card(_g2[0], "📣 إعلانات (شامل الضريبة)", _m2a(_ak["ads"]), "out")
+                        _acct_card(_g2[1], "🏬 تخزين وخدمات أمازون", _m2a(_ak["service_fees"]), "out")
+                        _acct_card(_g2[2], "🚚 شحن محصّل بعد خصم الشحن", _m2a(_ak["shipping"] - _ak["promo"]), "in" if _ak["shipping"] >= _ak["promo"] else "out",
+                                   sub=f"محصّل {_m2a(_ak['shipping'])} − خصم {_m2a(_ak['promo'])}")
+                        _acct_card(_g2[3], "🧾 صافي (بعد كل الرسوم والإعلانات)", _m2a(_ak["net"]), "in" if _ak["net"] >= 0 else "out")
+                        _g3 = st.columns(4)
+                        _acct_card(_g3[0], "🏦 اتحوّل لبنكك", _m2a(_kp_a["paid"]), "in", sub=f"{_kp_a['paid_n']:,} صف · كل الفترة",
+                                   help_="مجموع الدفعات المقفولة والمحوّلة (كل الفترة، بغض النظر عن فلتر التاريخ).")
+                        _acct_card(_g3[1], "⏭️ هيتحوّل في الدفعة الجاية", _m2a(_kp_a["open"]), "in", sub=f"{_kp_a['open_n']:,} صف",
+                                   help_="اللي أمازون أفرجت عنه وفي مجموعة التسوية المفتوحة — بيتحوّل لما تتقفل (كل أسبوعين).")
+                        _acct_card(_g3[2], "🔒 محجوز عند أمازون", _m2a(_kp_a["held"]), "in", sub=f"{_kp_a['held_n']:,} صف",
+                                   help_="أوردرات اتشحنت ولسه أمازون ماأفرجتش عنها (بعد التسليم بحوالي أسبوع) — ده ليك بس لسه ماوصلش.")
+                        _acct_card(_g3[3], "💳 إجمالي مستحق ليك", _m2a(_kp_a["open"] + _kp_a["held"]), "in", sub="الجاية + المحجوز",
+                                   help_="اللي لسه ماتحوّلش لبنكك.")
+                        _asub = st.radio("العرض", ["💹 ربحية المنتجات", "🧮 تسوية الدفعات", "🔒 المحجوز", "📣 إعلانات ورسوم", "📅 يومي", "📄 كل الصفوف"],
+                                         horizontal=True, key="acct_amz_view", label_visibility="collapsed")
+                        if _asub.startswith("💹"):
+                            def _a_cost(su, au):
+                                for _sk, _ak2 in ((su, au), (su, None)):
+                                    try:
+                                        _cv = resolve_unit_cost(_sk, _ak2)
+                                    except Exception:
+                                        _cv = None
+                                    if _cv is not None:
+                                        return _cv
+                                return None
+                            _apf = calc.acct_amz_profit(_fa, _af, _at, _a_cost)
+                            if _apf.empty:
+                                st.info("مفيش مبيعات في الفترة.")
+                            else:
+                                _akn = _apf[~_apf["تكلفة ناقصة"]]
+                                _al2 = _akn["الربح"].sum()
+                                _ac = st.columns(4)
+                                _ac[0].metric("📦 صافي الكمية", f"{int(_apf['صافي الكمية'].sum()):,}")
+                                _ac[1].metric("💰 صافي بعد الرسوم (بتكلفة معروفة)", f"{_akn['الصافي بعد الرسوم'].sum():,.0f}")
+                                _ac[2].metric("🧮 التكلفة", f"{_akn['إجمالي التكلفة'].sum():,.0f}")
+                                _ac[3].metric("✅ الربح" if _al2 >= 0 else "🔻 الخسارة", f"{_al2:,.0f}")
+                                _anm = int(_apf["تكلفة ناقصة"].sum())
+                                if _anm:
+                                    st.warning(f"⚠️ {_anm} منتج تكلفته غير مسجلة (في TacweedAmazon/Tacweed) — مش داخلين في الربح/الخسارة فوق. "
+                                               f"صافيهم بعد الرسوم {_apf[_apf['تكلفة ناقصة']]['الصافي بعد الرسوم'].sum():,.0f}.")
+                                _aonly = st.radio("إظهار", ["الكل", "🔴 الخاسر بس", "🟢 الرابح بس", "⚠️ تكلفة ناقصة"], horizontal=True, key="acct_amz_p_f")
+                                _ash = _apf
+                                if _aonly.startswith("🔴"):
+                                    _ash = _apf[(_apf["الربح"] < 0) & ~_apf["تكلفة ناقصة"]]
+                                elif _aonly.startswith("🟢"):
+                                    _ash = _apf[(_apf["الربح"] >= 0) & ~_apf["تكلفة ناقصة"]]
+                                elif _aonly.startswith("⚠️"):
+                                    _ash = _apf[_apf["تكلفة ناقصة"]]
+                                _ash = _ash.assign(**{
+                                    "الحالة": ["⚠️" if m else ("🟢" if v >= 0 else "🔴") for v, m in zip(_ash["الربح"], _ash["تكلفة ناقصة"])],
+                                    "🔗": [f"https://www.amazon.sa/dp/{str(a).strip()}" if str(a).strip() else None for a in _ash["ASIN"]]})
+                                _acols = ["🔗", "الحالة", "المنتج", "ASIN", "SKU", "مبيع", "مرتجع", "صافي الكمية", "إجمالي المبيعات", "قيمة المرتجع", "العمولة",
+                                          "رسوم FBA", "باقي الرسوم", "الصافي بعد الرسوم", "تكلفة الوحدة", "إجمالي التكلفة", "الربح", "هامش %"]
+                                _acfg = {c: st.column_config.NumberColumn(c, format="%.0f") for c in ("إجمالي المبيعات", "قيمة المرتجع", "العمولة", "رسوم FBA", "باقي الرسوم",
+                                                                                                    "الصافي بعد الرسوم", "إجمالي التكلفة", "الربح")}
+                                _acfg["تكلفة الوحدة"] = st.column_config.NumberColumn("تكلفة الوحدة", format="%.2f")
+                                _acfg["هامش %"] = st.column_config.NumberColumn("هامش %", format="%.1f")
+                                try:
+                                    _acfg["🔗"] = st.column_config.LinkColumn(" ", display_text="🔗", width="small")
+                                    st.dataframe(_ash[_acols], use_container_width=True, hide_index=True, column_config=_acfg)
+                                except Exception:
+                                    _acfg["🔗"] = st.column_config.LinkColumn(" ", display_text="🔗")
+                                    st.dataframe(_ash[_acols], use_container_width=True, hide_index=True, column_config=_acfg)
+                                st.caption("مرتبة من الأكتر كمية. الصافي بعد الرسوم = إجمالي المعاملات (سعر + شحن − خصم شحن − عمولة − رسوم FBA − رسوم تانية) من غير الإعلانات ورسوم التخزين "
+                                           "(دول مش على منتج). التكلفة = تكلفة الوحدة × (مبيع − مرتجع) على افتراض إن المرتجع رجع للمخزون.")
+                                st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_ash[[c for c in _acols if c != "🔗"]]), file_name=f"amazon_profit_{file_timestamp()}.xlsx",
+                                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_amz_p_dl")
+                        elif _asub.startswith("🧮"):
+                            if _rc_a is None or _rc_a.empty:
+                                st.info("مفيش مجموعات تسوية (تاب Amazon_Payouts_API فاضي).")
+                            else:
+                                st.caption("كل دفعة (بتتحوّل كل أسبوعين) مقابل مجموع صفوف RELEASED في مجموعتها — لازم يتطابقوا للقرش. "
+                                           "أول دفعة ممكن تبدأ قبل بداية السحب فبتظهر بفرق.")
+
+                                def _rc_col_a(r):
+                                    _c = "#16a34a" if str(r["الحالة"]).startswith("✅") else "#d97706"
+                                    return [f"color: {_c}; font-weight: 600" if c == "الحالة" else "" for c in r.index]
+                                try:
+                                    st.dataframe(_rc_a.style.apply(_rc_col_a, axis=1).format({c: "{:,.2f}" for c in ("المبلغ المحوّل / المتوقع", "مجموع الصفوف (RELEASED)", "الفرق")}, na_rep="—"),
+                                                 use_container_width=True, hide_index=True)
+                                except Exception:
+                                    st.dataframe(_rc_a, use_container_width=True, hide_index=True)
+                        elif _asub.startswith("🔒"):
+                            if _hg_a is None or _hg_a.empty:
+                                st.success("مفيش فلوس محجوزة ✅")
+                            else:
+                                st.caption(f"{_kp_a['held_n']:,} صف ({_kp_a['held']:,.0f} ريال) اتشحنت ولسه أمازون ماأفرجتش عنها، مقسمة على أسبوع الشحن. "
+                                           "الإفراج بيحصل بعد التسليم بحوالي أسبوع (من الداتا: متوسط ~٨ أيام بعد الشحن).")
+                                st.dataframe(_hg_a, use_container_width=True, hide_index=True, column_config=_acct_fmt(_hg_a))
+                        elif _asub.startswith("📣"):
+                            _ad, _sv = calc.acct_amz_fees(_fa, _af, _at)
+                            st.markdown("**الإعلانات (دفعات ProductAdsPayment — شامل الضريبة)**")
+                            if _ad.empty:
+                                st.info("مفيش إعلانات في الفترة.")
+                            else:
+                                st.dataframe(_ad, use_container_width=True, hide_index=True, column_config=_acct_fmt(_ad))
+                            st.markdown("**رسوم تخزين وخدمات أمازون**")
+                            if _sv.empty:
+                                st.success("مفيش رسوم في الفترة ✅")
+                            else:
+                                st.dataframe(_sv, use_container_width=True, hide_index=True, column_config=_acct_fmt(_sv))
+                        elif _asub.startswith("📅"):
+                            _dl3 = _AS.get("daily")
+                            if _dl3 is not None and not _dl3.empty:
+                                st.bar_chart(_dl3.set_index("التاريخ")[["صافي"]])
+                                st.dataframe(_dl3, use_container_width=True, hide_index=True, column_config=_acct_fmt(_dl3))
+                        else:
+                            _raw_a = _AS["df"].drop(columns=[c for c in _AS["df"].columns if c.startswith("_")])
+                            st.dataframe(_raw_a, use_container_width=True, hide_index=True)
+                        _xl_a = _AS["df"].drop(columns=[c for c in _AS["df"].columns if c.startswith("_")])
+                        st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_a), file_name=f"amazon_accounts_{file_timestamp()}.xlsx",
+                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_amz_dl")
             with _a_noon:
                 if st.button("🔄 تحديث البيانات من الشيت", key="acct_noon_refresh"):
                     for _t in ("Noon_Finance_API", "Noon_Orders_API"):

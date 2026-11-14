@@ -6031,3 +6031,183 @@ def acct_ty_fees(fin, d_from=None, d_to=None):
     c = df[t == "CommissionInvoice"]
     cc = pd.DataFrame({"التاريخ": c["_d"], "الفاتورة": c["id"], "الوصف": c["description"].astype(str).str[:80], "المبلغ": c["debt"]}) if not c.empty else pd.DataFrame()
     return ff, cc
+
+
+# ══════════════════════════════════════════════
+# حسابات أمازون (SP-API) — تاب Amazon_Finance_API + Amazon_Payouts_API
+# ══════════════════════════════════════════════
+ACCT_AMZ_NUM = ("qty", "product_charges", "shipping", "promo", "commission", "fba_fee", "other_fees", "total", "counted")
+
+
+def acct_amz_rows_to_df(raw):
+    """قيم تاب Amazon_Finance_API → DataFrame. counted=1 يعني الصف بيتحسب في المبيعات (الإفراج المكرر counted=0)."""
+    import pandas as pd
+    if not raw or len(raw) < 2:
+        return pd.DataFrame()
+    hdr = [str(h).strip() for h in raw[0]]
+    rows = [list(r) + [""] * (len(hdr) - len(r)) for r in raw[1:] if any(str(c).strip() for c in r)]
+    df = pd.DataFrame([r[:len(hdr)] for r in rows], columns=hdr)
+    for c in ACCT_AMZ_NUM:
+        if c in df.columns:
+            df[c] = df[c].map(_acct_num)
+    for c in ("Store", "type", "status", "order_id", "group_id", "sku", "asin", "pay_group", "title"):
+        if c in df.columns:
+            df[c] = df[c].astype(str).replace("nan", "").str.strip()
+    df["_posted"] = pd.to_datetime(df["posted"], errors="coerce")
+    df["_d"] = df["_posted"].dt.date
+    df["_pay"] = pd.to_datetime(df["pay_date"], errors="coerce") if "pay_date" in df.columns else pd.NaT
+    return df.reset_index(drop=True)
+
+
+def acct_amz_groups_to_df(raw):
+    import pandas as pd
+    if not raw or len(raw) < 2:
+        return pd.DataFrame()
+    hdr = [str(h).strip() for h in raw[0]]
+    rows = [list(r) + [""] * (len(hdr) - len(r)) for r in raw[1:] if any(str(c).strip() for c in r)]
+    df = pd.DataFrame([r[:len(hdr)] for r in rows], columns=hdr)
+    for c in ("total", "begin_balance"):
+        if c in df.columns:
+            df[c] = df[c].map(lambda v: _acct_num(v) if str(v).strip() != "" else None)
+    return df.reset_index(drop=True)
+
+
+def _amz_counted(fin, d_from=None, d_to=None):
+    df = fin[(fin["counted"] == 1) & (fin["type"] != "Transfer")]
+    if d_from:
+        df = df[df["_d"] >= d_from]
+    if d_to:
+        df = df[df["_d"] <= d_to]
+    return df
+
+
+def acct_amz_summary(fin, d_from=None, d_to=None):
+    """ملخص أمازون للفترة: مبيعات/مرتجعات/عمولة/رسوم FBA/إعلانات/رسوم خدمات/صافي. الصافي = مجموع totalAmount للصفوف المحسوبة (counted)."""
+    import pandas as pd
+    if fin is None or fin.empty or "counted" not in fin.columns:
+        return {"kpi": {}, "df": pd.DataFrame()}
+    df = _amz_counted(fin, d_from, d_to)
+    if df.empty:
+        return {"kpi": {}, "df": df}
+    sh, rf = df[df["type"] == "Shipment"], df[df["type"] == "Refund"]
+    ad, sv, aj = df[df["type"] == "ProductAdsPayment"], df[df["type"] == "ServiceFee"], df[df["type"] == "Adjustment"]
+    pr = pd.concat([sh, rf])
+    units = float(sh["qty"].where(sh["qty"] > 0, 1.0).sum())
+    k = {
+        "sales_n": int(units), "sales_gross": float(sh["product_charges"].sum()),
+        "shipping": float(sh["shipping"].sum() + rf["shipping"].sum()),
+        "promo": float(-(sh["promo"].sum() + rf["promo"].sum())),
+        "returns_n": int(len(rf)), "returns_gross": float(-rf["product_charges"].sum()),
+        "commission": float(-pr["commission"].sum()), "fba_fee": float(-pr["fba_fee"].sum()),
+        "other_fees": float(-pr["other_fees"].sum()),
+        "ads": float(-ad["total"].sum()), "service_fees": float(-sv["total"].sum()), "adjust": float(aj["total"].sum()),
+        "net": float(df["total"].sum()),
+    }
+    daily = df.groupby("_d").agg(**{"صافي": ("total", "sum"), "عمولة": ("commission", "sum")}).reset_index().rename(columns={"_d": "التاريخ"})
+    daily["عمولة"] = -daily["عمولة"]
+    return {"kpi": k, "df": df, "daily": daily}
+
+
+def acct_amz_recon(fin, groups):
+    """تسوية الدفعات: مجموع صفوف RELEASED في كل مجموعة تسوية مقابل المبلغ المحوّل (financialEventGroups).
+    يرجع (جدول الدفعات, جدول المحجوز حسب أسبوع الشحن, ملخص: paid/open/held بالمبالغ والعدد). المحجوز = صفوف لسه ماتفرجش عنها."""
+    import pandas as pd
+    empty = (pd.DataFrame(), pd.DataFrame(), {"paid": 0.0, "open": 0.0, "held": 0.0, "held_n": 0, "open_n": 0, "paid_n": 0})
+    if fin is None or fin.empty or "counted" not in fin.columns:
+        return empty
+    rel = fin[(fin["status"] == "RELEASED") & (fin["type"] != "Transfer")]
+    sums = rel.groupby(["Store", "group_id"]).agg(_s=("total", "sum"), _n=("total", "size")).reset_index() if not rel.empty else pd.DataFrame(columns=["Store", "group_id", "_s", "_n"])
+    gmap = {}
+    if groups is not None and not groups.empty:
+        for _, g in groups.iterrows():
+            gmap[(str(g.get("Store", "")), str(g["group_id"]))] = g
+    first_d = fin["_d"].dropna().min()
+    out, paid, opn, paid_n, open_n = [], 0.0, 0.0, 0, 0
+    for _, r in sums.iterrows():
+        g = gmap.get((r["Store"], r["group_id"]))
+        done = g is not None and str(g.get("transfer_status", "")).lower() == "succeeded"
+        if done:
+            paid += float(r["_s"]); paid_n += int(r["_n"])
+        else:
+            opn += float(r["_s"]); open_n += int(r["_n"])
+    seen = set()
+    for _, g in (groups.iterrows() if groups is not None and not groups.empty else []):
+        key = (str(g.get("Store", "")), str(g["group_id"]))
+        sm = sums[(sums["Store"] == key[0]) & (sums["group_id"] == key[1])]
+        s_, n_ = (float(sm["_s"].iloc[0]), int(sm["_n"].iloc[0])) if not sm.empty else (0.0, 0)
+        done = str(g.get("transfer_status", "")).lower() == "succeeded"
+        tot = g.get("total")
+        if not done:
+            stt, amt_, diff = "⏳ مفتوحة — هتتحوّل لما تتقفل", s_, None
+        else:
+            amt_ = float(tot) if tot is not None else 0.0
+            diff = amt_ - s_
+            try:
+                gs = pd.to_datetime(g["start"]).date()
+            except Exception:
+                gs = None
+            if gs is not None and first_d is not None and gs < first_d:
+                stt = "ℹ️ بدأت قبل بداية السحب"
+            elif abs(diff) <= max(1.0, abs(amt_) * 0.001):
+                stt = "✅ مطابقة"
+            else:
+                stt = "⚠️ فرق"
+        out.append({"المتجر": key[0], "الدفعة": key[1][:8], "من": g.get("start", ""), "إلى": g.get("end", "") or "—", "تاريخ التحويل": g.get("transfer_date", "") or "—",
+                    "المبلغ المحوّل / المتوقع": amt_, "مجموع الصفوف (RELEASED)": s_, "عدد الصفوف": n_, "الفرق": diff, "الحالة": stt})
+    rc = pd.DataFrame(out)
+    held = fin[(fin["counted"] == 1) & (fin["type"] != "Transfer") & (fin["pay_group"] == "")]
+    hg = pd.DataFrame()
+    if not held.empty:
+        h = held.copy()
+        h["_wk"] = pd.to_datetime(h["_d"], errors="coerce").dt.to_period("W-SUN").dt.start_time.dt.date
+        hg = h.groupby("_wk").agg(**{"عدد الصفوف": ("total", "size"), "صافي محجوز": ("total", "sum"), "أقدم شحنة": ("_d", "min")}).reset_index().rename(columns={"_wk": "أسبوع الشحن"})
+        hg = hg.sort_values("أسبوع الشحن")
+    kp = {"paid": paid, "open": opn, "held": float(held["total"].sum()) if not held.empty else 0.0, "held_n": int(len(held)), "open_n": open_n, "paid_n": paid_n}
+    return rc, hg, kp
+
+
+def acct_amz_profit(fin, d_from=None, d_to=None, cost_fn=None):
+    """ربحية كل منتج (ASIN): الصافي بعد الرسوم (إجمالي المعاملة) − (تكلفة الوحدة × صافي الكمية).
+    cost_fn(sku_up, asin_up) -> تكلفة الوحدة أو None. الإعلانات ورسوم التخزين مش على منتج فمش داخلة."""
+    import pandas as pd
+    if fin is None or fin.empty or "counted" not in fin.columns:
+        return pd.DataFrame()
+    df = _amz_counted(fin, d_from, d_to)
+    it = df[df["type"].isin(["Shipment", "Refund"]) & (df["asin"] != "")]
+    if it.empty:
+        return pd.DataFrame()
+    it = it.assign(_sold=it["qty"].where((it["type"] == "Shipment") & (it["qty"] > 0), 1.0).where(it["type"] == "Shipment", 0.0),
+                   _ret=(it["type"] == "Refund").astype(int),
+                   _sales=it["product_charges"].where(it["type"] == "Shipment", 0.0),
+                   _retamt=(-it["product_charges"]).where(it["type"] == "Refund", 0.0),
+                   _fees=-(it["commission"] + it["fba_fee"] + it["other_fees"]))
+    g = it.groupby("asin").agg(**{"المنتج": ("title", "first"), "SKU": ("sku", "first"), "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum"),
+                                  "إجمالي المبيعات": ("_sales", "sum"), "قيمة المرتجع": ("_retamt", "sum"), "العمولة": ("commission", lambda s: -s.sum()),
+                                  "رسوم FBA": ("fba_fee", lambda s: -s.sum()), "باقي الرسوم": ("other_fees", lambda s: -s.sum()),
+                                  "الصافي بعد الرسوم": ("total", "sum")}).reset_index().rename(columns={"asin": "ASIN"})
+    g["صافي الكمية"] = g["مبيع"] - g["مرتجع"]
+    costs, missing = [], []
+    for _, r in g.iterrows():
+        c = cost_fn(str(r["SKU"]).strip().upper(), str(r["ASIN"]).strip().upper()) if cost_fn else None
+        missing.append(c is None)
+        costs.append(float(c) if c is not None else 0.0)
+    g["تكلفة الوحدة"] = costs
+    g["إجمالي التكلفة"] = g["تكلفة الوحدة"] * g["صافي الكمية"]
+    g["الربح"] = g["الصافي بعد الرسوم"] - g["إجمالي التكلفة"]
+    base = g["إجمالي المبيعات"] - g["قيمة المرتجع"]
+    g["هامش %"] = (g["الربح"] / base.where(base != 0)).fillna(0) * 100
+    g["تكلفة ناقصة"] = missing
+    return g.sort_values(["صافي الكمية", "الربح"], ascending=False).reset_index(drop=True)
+
+
+def acct_amz_fees(fin, d_from=None, d_to=None):
+    """الإعلانات (ProductAdsPayment) ورسوم الخدمات (تخزين/اشتراك…) كمعلومة — مش على منتج."""
+    import pandas as pd
+    if fin is None or fin.empty or "counted" not in fin.columns:
+        return pd.DataFrame(), pd.DataFrame()
+    df = _amz_counted(fin, d_from, d_to)
+    a = df[df["type"] == "ProductAdsPayment"]
+    s = df[df["type"] == "ServiceFee"]
+    ad = pd.DataFrame({"التاريخ": a["_d"], "المتجر": a["Store"], "المبلغ": -a["total"]}) if not a.empty else pd.DataFrame()
+    sv = pd.DataFrame({"التاريخ": s["_d"], "المتجر": s["Store"], "الوصف": s["title"].str[:80], "المبلغ": -s["total"]}) if not s.empty else pd.DataFrame()
+    return ad, sv
