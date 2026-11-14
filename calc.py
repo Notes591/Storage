@@ -5848,3 +5848,186 @@ def acct_noon_recon(fin):
     res["التفاصيل"] = details
     res = res.sort_values(["المتجر", "تاريخ الكشف"], ascending=[True, False]).reset_index(drop=True)
     return res, pd.DataFrame(orphans)
+
+
+# ═══════════════ 🏦 حسابات تريندول (من تاب Trendyol_Finance_API) ═══════════════
+ACCT_TY_NUM = ("debt", "credit", "commissionAmount", "sellerRevenue", "commissionRate")
+_TY_FEE_TYPES = ("DeductionInvoices", "CreditNote")
+_TY_INFO_TYPES = ("Discount", "DiscountCancel", "Coupon", "CouponCancel", "TyDiscount", "TyDiscountCancel", "TyCoupon", "TyCouponCancel")
+
+
+def acct_ty_rows_to_df(raw):
+    """قيم الشيت → DataFrame لتريندول. الأعمدة الرقمية بتتحوّل لأرقام، وlen id مكرر بيتشال (فاتورة العمولة بتظهر مرتين)."""
+    import pandas as pd
+    if not raw or len(raw) < 2:
+        return pd.DataFrame()
+    hdr = [str(h).strip() for h in raw[0]]
+    rows = [list(r) + [""] * (len(hdr) - len(r)) for r in raw[1:] if any(str(c).strip() for c in r)]
+    df = pd.DataFrame([r[:len(hdr)] for r in rows], columns=hdr)
+    for c in ACCT_TY_NUM:
+        if c in df.columns:
+            df[c] = df[c].map(_acct_num)
+    if "id" in df.columns and "_ttype" in df.columns:
+        df["_p"] = (df["_ttype"] != "CommissionInvoice").astype(int)
+        df = df.sort_values("_p", kind="stable").drop_duplicates(["Store", "id"] if "Store" in df.columns else ["id"], keep="first").drop(columns="_p")
+    for c in ("transactionDate", "orderDate", "paymentDate"):
+        if c in df.columns:
+            df["_" + c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ("paymentOrderId",):
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+    return df.reset_index(drop=True)
+
+
+def _ty_prep(fin, d_from=None, d_to=None):
+    """يضيف _d (تاريخ المعاملة) و _net (الأثر الصافي على مستحقاتك بالإشارة) و _comm (العمولة بالإشارة) و _gross، ويفلتر بالتاريخ."""
+    import numpy as np
+    df = fin.copy()
+    df["_d"] = df["_transactionDate"].dt.date if "_transactionDate" in df.columns else None
+    if d_from:
+        df = df[df["_d"] >= d_from]
+    if d_to:
+        df = df[df["_d"] <= d_to]
+    t = df["_ttype"].astype(str)
+    cr, db = df["credit"], df["debt"]
+    sign = np.where(db > 0, -1.0, np.where(cr > 0, 1.0, 0.0))
+    is_set = df["transactionType"].astype(str).isin(
+        ["Sale", "Return", "Discount", "DiscountCancel", "Coupon", "CouponCancel", "ProvisionPositive", "ProvisionNegative",
+         "ManualRefund", "ManualRefundCancel", "TyDiscount", "TyDiscountCancel", "TyCoupon", "TyCouponCancel"]) | t.isin(
+        ["Sale", "Return", "Discount", "DiscountCancel", "Coupon", "CouponCancel", "ProvisionPositive", "ProvisionNegative",
+         "ManualRefund", "ManualRefundCancel", "TyDiscount", "TyDiscountCancel", "TyCoupon", "TyCouponCancel"])
+    mag = np.where(df["sellerRevenue"] != 0, df["sellerRevenue"], (cr - db).abs())
+    net = np.where(is_set, sign * mag, 0.0)
+    fee = t.isin(_TY_FEE_TYPES)
+    net = np.where(fee, cr - db, net)           # رسوم/غرامات (debt) بتنقص، وإشعارات دائنة (credit) بتزيد
+    # خصومات/كوبونات السلة معلومة بس: اتأكدت إن الدفعة (أمر الدفع) = صافي المبيعات − صافي المرتجعات من غير بنودها
+    info = t.isin(_TY_INFO_TYPES)
+    net = np.where(info, 0.0, net)
+    df["_net"] = net
+    df["_comm"] = np.where(is_set & ~info, sign * df["commissionAmount"], 0.0)
+    df["_gross"] = np.where(is_set, sign * (cr + db), 0.0)
+    return df
+
+
+def acct_ty_summary(fin, d_from=None, d_to=None):
+    """ملخص تريندول: إجماليات + جداول. الصافي = مجموع (صافي البائع) بعد المرتجعات والخصومات والرسوم."""
+    import pandas as pd
+    if fin is None or fin.empty or "_ttype" not in fin.columns:
+        return {"kpi": {}, "df": pd.DataFrame()}
+    df = _ty_prep(fin, d_from, d_to)
+    if df.empty:
+        return {"kpi": {}, "df": df}
+    t = df["_ttype"].astype(str)
+    sale, ret = df[t == "Sale"], df[t == "Return"]
+    disc = df[t.isin(["Discount", "TyDiscount", "Coupon", "TyCoupon"])]
+    disc_c = df[t.isin(["DiscountCancel", "TyDiscountCancel", "CouponCancel", "TyCouponCancel"])]
+    fees = df[t == "DeductionInvoices"]
+    pays = df[t == "PaymentOrder"]
+    k = {
+        "sales_n": int(len(sale)), "sales_gross": float(sale["credit"].sum()),
+        "returns_n": int(len(ret)), "returns_gross": float(ret["debt"].sum()),
+        "discount": float(disc["debt"].sum() - disc_c["credit"].sum()),
+        "commission": float(df["_comm"].sum()),
+        "fees": float(fees["debt"].sum() - fees["credit"].sum()),
+        "credit_notes": float(df[t == "CreditNote"]["_net"].sum()),
+        "net": float(df["_net"].sum()),
+        "paid": float(-pays["debt"].sum()),
+        "pays_n": int(len(pays)),
+    }
+    k["balance"] = k["net"] - k["paid"]
+    daily = df[df["_net"] != 0].groupby("_d").agg(**{"صافي": ("_net", "sum"), "عمولة": ("_comm", "sum")}).reset_index().rename(columns={"_d": "التاريخ"})
+    return {"kpi": k, "df": df, "daily": daily}
+
+
+def acct_ty_recon(fin):
+    """تسوية: كل أمر دفع (PaymentOrder) مقابل مجموع الصفوف المربوطة بيه (paymentOrderId). الصفوف اللي ماليهاش أمر دفع = لسه ماتدفعتش.
+    يرجع (جدول الدفعات، جدول غير المدفوع حسب أسبوع الدفع المتوقع، إجمالي غير المدفوع، عدده)."""
+    import pandas as pd
+    if fin is None or fin.empty or "_ttype" not in fin.columns:
+        return pd.DataFrame(), pd.DataFrame(), 0.0, 0
+    df = _ty_prep(fin)
+    t = df["_ttype"].astype(str)
+    pays = df[t == "PaymentOrder"].copy()
+    body = df[(t != "PaymentOrder") & (t != "CommissionInvoice")]
+    linked = body[body["paymentOrderId"].astype(str).str.strip().isin(["", "nan", "None", "0"]) == False]
+    g = linked.groupby("paymentOrderId")
+    s_net = g["_net"].sum()
+    s_n = g.size()
+    out = []
+    for _, p in pays.sort_values("_transactionDate").iterrows():
+        pid = str(p["paymentOrderId"]).strip() or str(p["id"]).strip()
+        amt = float(-p["debt"])
+        ln = float(s_net.get(pid, 0.0))
+        n = int(s_n.get(pid, 0))
+        diff = amt - ln
+        tol = max(2.0, abs(amt) * 0.005)
+        if n == 0:
+            stt = "ℹ️ صفوفها قبل بداية السحب"
+        elif abs(diff) <= tol:
+            stt = "✅ مطابقة"
+        else:
+            stt = "⚠️ فرق (غالباً صفوف قبل بداية السحب)"
+        out.append({"المتجر": p.get("Store", ""), "أمر الدفع": pid, "تاريخ التحويل": str(p["_transactionDate"])[:10], "المبلغ المحوّل": amt,
+                    "مجموع الصفوف المربوطة": ln, "عدد الصفوف": n, "الفرق": diff, "الحالة": stt})
+    rc = pd.DataFrame(out)
+    un = body[body["paymentOrderId"].astype(str).str.strip().isin(["", "nan", "None", "0"]) & (body["_net"] != 0)]
+    unpaid_total, unpaid_n = float(un["_net"].sum()), int(len(un))
+    if un.empty:
+        return rc, pd.DataFrame(), 0.0, 0
+    u = un.copy()
+    pd_ = u["_paymentDate"].dt.date if "_paymentDate" in u.columns else u["_d"]
+    u["_wk"] = pd.to_datetime(pd_, errors="coerce").dt.to_period("W-WED").dt.end_time.dt.date
+    ug = u.groupby("_wk").agg(**{"عدد الصفوف": ("_net", "size"), "صافي مستحق": ("_net", "sum")}).reset_index().rename(columns={"_wk": "أقرب أربعاء متوقع للدفع"})
+    return rc, ug, unpaid_total, unpaid_n
+
+
+def acct_ty_profit(fin, d_from=None, d_to=None, cost_fn=None, name_fn=None):
+    """ربحية كل منتج (Barcode). الصافي بعد الرسوم = مجموع صافي البائع (مبيعات − مرتجعات) بعد العمولة.
+    cost_fn(barcode_up) -> تكلفة الوحدة أو None. الربح = الصافي − (التكلفة × الكمية الصافية). الرسوم/الغرامات على الفواتير مش على منتج فمش داخلة."""
+    import pandas as pd
+    if fin is None or fin.empty or "_ttype" not in fin.columns:
+        return pd.DataFrame()
+    df = _ty_prep(fin, d_from, d_to)
+    it = df[df["barcode"].astype(str).str.strip().ne("") & df["_ttype"].isin(
+        ["Sale", "Return", "Discount", "DiscountCancel", "Coupon", "CouponCancel", "TyDiscount", "TyDiscountCancel", "TyCoupon", "TyCouponCancel"])]
+    if it.empty:
+        return pd.DataFrame()
+    it = it.assign(_sold=(it["_ttype"] == "Sale").astype(int), _ret=(it["_ttype"] == "Return").astype(int),
+                   _sales=it["credit"].where(it["_ttype"] == "Sale", 0.0), _retamt=it["debt"].where(it["_ttype"] == "Return", 0.0),
+                   _dsc=(it["debt"] - it["credit"]).where(~it["_ttype"].isin(["Sale", "Return"]), 0.0))
+    g = it.groupby("barcode").agg(**{"المنتج": ("description", "first"), "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum"),
+                                     "إجمالي المبيعات": ("_sales", "sum"), "قيمة المرتجع": ("_retamt", "sum"),
+                                     "العمولة": ("_comm", "sum"), "الصافي بعد الرسوم": ("_net", "sum")}).reset_index().rename(columns={"barcode": "Barcode"})
+    g["صافي الكمية"] = g["مبيع"] - g["مرتجع"]
+    costs, missing, names = [], [], []
+    for _, r in g.iterrows():
+        bu = str(r["Barcode"]).strip().upper()
+        c = cost_fn(bu) if cost_fn else None
+        missing.append(c is None)
+        costs.append(float(c) if c is not None else 0.0)
+        nm = name_fn(bu) if name_fn else None
+        names.append(nm or r["المنتج"])
+    g["المنتج"] = names
+    g["تكلفة الوحدة"] = costs
+    g["إجمالي التكلفة"] = g["تكلفة الوحدة"] * g["صافي الكمية"]
+    g["الربح"] = g["الصافي بعد الرسوم"] - g["إجمالي التكلفة"]
+    base = g["إجمالي المبيعات"] - g["قيمة المرتجع"]
+    g["هامش %"] = (g["الربح"] / base.where(base != 0)).fillna(0) * 100
+    g["تكلفة ناقصة"] = missing
+    return g.sort_values(["صافي الكمية", "الربح"], ascending=False).reset_index(drop=True)
+
+
+def acct_ty_fees(fin, d_from=None, d_to=None):
+    """فواتير الخصم (غرامات/رسوم) وفواتير العمولة الشهرية — كمعلومة."""
+    import pandas as pd
+    if fin is None or fin.empty or "_ttype" not in fin.columns:
+        return pd.DataFrame(), pd.DataFrame()
+    df = _ty_prep(fin, d_from, d_to)
+    t = df["_ttype"].astype(str)
+    f = df[t.isin(["DeductionInvoices", "CreditNote"])]
+    ff = pd.DataFrame({"التاريخ": f["_d"], "الفاتورة": f["id"], "النوع": f["transactionType"].astype(str).str.replace(r"\s+", " ", regex=True).str[:70],
+                       "الوصف": f["description"].astype(str).str[:80], "المبلغ": f["debt"] - f["credit"],
+                       "أمر الدفع": f["paymentOrderId"]}) if not f.empty else pd.DataFrame()
+    c = df[t == "CommissionInvoice"]
+    cc = pd.DataFrame({"التاريخ": c["_d"], "الفاتورة": c["id"], "الوصف": c["description"].astype(str).str[:80], "المبلغ": c["debt"]}) if not c.empty else pd.DataFrame()
+    return ff, cc

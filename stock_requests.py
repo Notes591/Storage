@@ -8986,7 +8986,160 @@ if st.session_state["nav_page"] == "tab_accts":
                 st.stop()
             _a_noon, _a_ty, _a_amz = st.tabs(["🟢 نون | Noon", "🟣 تريندول | Trendyol", "🟠 أمازون | Amazon"])
             with _a_ty:
-                st.info("قريباً — هنبدأ بنون الأول.")
+                if not hasattr(calc, "acct_ty_rows_to_df"):
+                    st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات تريندول).")
+                    st.stop()
+                if st.button("🔄 تحديث البيانات من الشيت", key="acct_ty_refresh"):
+                    _w = _acct_ws("Trendyol_Finance_API")
+                    if _w is not None:
+                        clear_cache(_w)
+                    st.rerun()
+                _ws_ty = _acct_ws("Trendyol_Finance_API")
+                _fin_ty = _memo_from_sheet(_ws_ty, "acct_ty_df", calc.acct_ty_rows_to_df) if _ws_ty is not None else None
+                if _fin_ty is None or _fin_ty.empty:
+                    st.warning("مفيش بيانات في تاب Trendyol_Finance_API لسه. شغّل بوت Trendyol_Accounts.py (سحب كامل) مع تفعيل خانة Google Sheet.")
+                else:
+                    _tys = sorted({x for x in _fin_ty.get("Store", pd.Series(dtype=str)).astype(str) if x}) or [""]
+                    _t1, _t2, _t3 = st.columns([2, 1, 1])
+                    _tsel = _t1.multiselect("المتجر | Store", _tys, default=_tys, key="acct_ty_stores")
+                    _tdates = _fin_ty["_transactionDate"].dropna().dt.date
+                    _tmin, _tmax = _tdates.min(), _tdates.max()
+                    _tf = _t2.date_input("من (تاريخ المعاملة)", value=_tmin, min_value=_tmin, max_value=_tmax, key="acct_ty_from")
+                    _tt = _t3.date_input("إلى", value=_tmax, min_value=_tmin, max_value=_tmax, key="acct_ty_to")
+                    _ft = _fin_ty[_fin_ty["Store"].isin(_tsel)] if "Store" in _fin_ty.columns and _tsel else _fin_ty
+                    _TS = calc.acct_ty_summary(_ft, _tf, _tt)
+                    _tk = _TS["kpi"]
+                    if not _tk:
+                        st.info("مفيش معاملات في الفترة دي.")
+                    else:
+                        _m2 = lambda v: f"{v:,.0f}"
+
+                        def _kc_ty(col, label, val, kind, help_=None):
+                            _cl = {"in": "#16a34a", "out": "#dc2626"}.get(kind, "inherit")
+                            _tp = f' title="{help_}"' if help_ else ""
+                            col.markdown(f'<div{_tp} style="padding:2px 0 10px 0"><div style="font-size:0.85rem;opacity:0.75">{label}</div>'
+                                         f'<div style="font-size:1.9rem;font-weight:600;color:{_cl};line-height:1.25">{val}</div></div>', unsafe_allow_html=True)
+                        try:
+                            _rc_t, _ug_t, _unp_t, _unp_n = calc.acct_ty_recon(_ft)
+                        except Exception:
+                            _rc_t, _ug_t, _unp_t, _unp_n = None, None, 0.0, 0
+                        _g1 = st.columns(4)
+                        _kc_ty(_g1[0], "🛒 إجمالي المبيعات (سعر البيع)", f"{_tk['sales_n']:,} · {_m2(_tk['sales_gross'])}", "in")
+                        _kc_ty(_g1[1], "↩️ مرتجعات", f"{_tk['returns_n']:,} · {_m2(_tk['returns_gross'])}", "out")
+                        _kc_ty(_g1[2], "🏷️ عمولة تريندول", _m2(_tk["commission"]), "out")
+                        _kc_ty(_g1[3], "⚠️ غرامات ورسوم (فواتير خصم)", _m2(_tk["fees"]), "out")
+                        _g2 = st.columns(4)
+                        _kc_ty(_g2[0], "🧾 صافي مستحق (بعد العمولة والمرتجع والغرامات)", _m2(_tk["net"]), "in" if _tk["net"] >= 0 else "out")
+                        _kc_ty(_g2[1], "🏦 اتحوّل لبنكك (أوامر دفع)", f"{_tk['pays_n']} · {_m2(_tk['paid'])}", "in")
+                        _kc_ty(_g2[2], f"⏳ لسه ماتحوّلش ({_unp_n:,} صف)", _m2(_unp_t), "in",
+                               "صافي الصفوف اللي ماليهاش أمر دفع لسه — ده اللي ليك عند تريندول (بغض النظر عن فلتر التاريخ).")
+                        _kc_ty(_g2[3], "🎟️ خصم سلة (معلومة)", _m2(_tk["discount"]), "out",
+                               "خصومات السلة بتظهر في التقرير بس مش بتتخصم من الدفعة (اتأكدت بمطابقة أمر دفع للقرش).")
+                        _tsub = st.radio("العرض", ["💹 ربحية المنتجات", "🧮 تسوية أوامر الدفع", "⏳ غير المدفوع", "⚠️ الغرامات والفواتير", "📅 يومي", "📄 كل الصفوف"],
+                                         horizontal=True, key="acct_ty_view", label_visibility="collapsed")
+                        if _tsub.startswith("💹"):
+                            _tpm = {}
+                            try:
+                                _tpm = get_ty_products()
+                            except Exception:
+                                _tpm = {}
+
+                            def _t_cost(bu):
+                                for _kx in (bu, bu.rsplit("-", 1)[0] if "-" in bu else bu):
+                                    try:
+                                        _cv = resolve_unit_cost(_kx, None)
+                                    except Exception:
+                                        _cv = None
+                                    if _cv is not None:
+                                        return _cv
+                                return None
+                            _tpf = calc.acct_ty_profit(_ft, _tf, _tt, _t_cost, lambda bu: (_tpm.get("name") or {}).get(bu))
+                            if _tpf.empty:
+                                st.info("مفيش مبيعات في الفترة.")
+                            else:
+                                _tkn = _tpf[~_tpf["تكلفة ناقصة"]]
+                                _tl2 = _tkn["الربح"].sum()
+                                _tc = st.columns(4)
+                                _tc[0].metric("📦 صافي الكمية", f"{int(_tpf['صافي الكمية'].sum()):,}")
+                                _tc[1].metric("💰 صافي بعد الرسوم (بتكلفة معروفة)", f"{_tkn['الصافي بعد الرسوم'].sum():,.0f}")
+                                _tc[2].metric("🧮 التكلفة", f"{_tkn['إجمالي التكلفة'].sum():,.0f}")
+                                _tc[3].metric("✅ الربح" if _tl2 >= 0 else "🔻 الخسارة", f"{_tl2:,.0f}")
+                                _tnm = int(_tpf["تكلفة ناقصة"].sum())
+                                if _tnm:
+                                    st.warning(f"⚠️ {_tnm} منتج تكلفته غير مسجلة — مش داخلين في الربح/الخسارة فوق ولا في «الرابح/الخاسر». "
+                                               f"صافيهم بعد الرسوم {_tpf[_tpf['تكلفة ناقصة']]['الصافي بعد الرسوم'].sum():,.0f}.")
+                                _tonly = st.radio("إظهار", ["الكل", "🔴 الخاسر بس", "🟢 الرابح بس", "⚠️ تكلفة ناقصة"], horizontal=True, key="acct_ty_p_f")
+                                _tsh = _tpf
+                                if _tonly.startswith("🔴"):
+                                    _tsh = _tpf[(_tpf["الربح"] < 0) & ~_tpf["تكلفة ناقصة"]]
+                                elif _tonly.startswith("🟢"):
+                                    _tsh = _tpf[(_tpf["الربح"] >= 0) & ~_tpf["تكلفة ناقصة"]]
+                                elif _tonly.startswith("⚠️"):
+                                    _tsh = _tpf[_tpf["تكلفة ناقصة"]]
+                                _timg, _turl = (_tpm.get("img") or {}), (_tpm.get("url") or {})
+                                _tsh = _tsh.assign(**{
+                                    "الحالة": ["⚠️" if m else ("🟢" if v >= 0 else "🔴") for v, m in zip(_tsh["الربح"], _tsh["تكلفة ناقصة"])],
+                                    "📷": [_timg.get(str(b).strip().upper()) or None for b in _tsh["Barcode"]],
+                                    "🔗": [_turl.get(str(b).strip().upper()) or None for b in _tsh["Barcode"]]})
+                                _tcols = ["📷", "🔗", "الحالة", "المنتج", "Barcode", "مبيع", "مرتجع", "صافي الكمية", "إجمالي المبيعات", "قيمة المرتجع", "العمولة",
+                                          "الصافي بعد الرسوم", "تكلفة الوحدة", "إجمالي التكلفة", "الربح", "هامش %"]
+                                _tcfg = {c: st.column_config.NumberColumn(c, format="%.0f") for c in ("إجمالي المبيعات", "قيمة المرتجع", "العمولة", "الصافي بعد الرسوم", "إجمالي التكلفة", "الربح")}
+                                _tcfg["تكلفة الوحدة"] = st.column_config.NumberColumn("تكلفة الوحدة", format="%.2f")
+                                _tcfg["هامش %"] = st.column_config.NumberColumn("هامش %", format="%.1f")
+                                try:
+                                    _tcfg["📷"] = st.column_config.ImageColumn("📷", width="small")
+                                    _tcfg["🔗"] = st.column_config.LinkColumn(" ", display_text="🔗", width="small")
+                                    st.dataframe(_tsh[_tcols], use_container_width=True, hide_index=True, column_config=_tcfg)
+                                except Exception:
+                                    _tcfg["📷"] = st.column_config.ImageColumn("📷")
+                                    _tcfg["🔗"] = st.column_config.LinkColumn(" ", display_text="🔗")
+                                    st.dataframe(_tsh[_tcols], use_container_width=True, hide_index=True, column_config=_tcfg)
+                                st.caption("مرتبة من الأكتر كمية. الصافي بعد الرسوم = صافي البائع (مبيعات − مرتجعات) بعد عمولة تريندول. التكلفة = تكلفة الوحدة × (مبيع − مرتجع) "
+                                           "(على افتراض إن المرتجع رجع للمخزون). الغرامات والفواتير والإعلانات مش على منتج فمش داخلة هنا.")
+                                st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_tsh[[c for c in _tcols if c != "📷"]]), file_name=f"trendyol_profit_{file_timestamp()}.xlsx",
+                                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_ty_p_dl")
+                        elif _tsub.startswith("🧮"):
+                            if _rc_t is None or _rc_t.empty:
+                                st.info("مفيش أوامر دفع.")
+                            else:
+                                st.caption("كل أمر دفع (بيتحوّل كل أسبوع) مقابل مجموع الصفوف المربوطة بيه (paymentOrderId): مبيعات − مرتجعات − غرامات. "
+                                           "أول أوامر الدفع غالباً فيها صفوف من قبل بداية السحب فبتظهر بفرق — اسحب من تاريخ أقدم لو عايز تطابقها.")
+
+                                def _rc_col_t(r):
+                                    _c = "#16a34a" if str(r["الحالة"]).startswith("✅") else "#d97706"
+                                    return [f"color: {_c}; font-weight: 600" if c == "الحالة" else "" for c in r.index]
+                                try:
+                                    st.dataframe(_rc_t.style.apply(_rc_col_t, axis=1).format({c: "{:,.2f}" for c in ("المبلغ المحوّل", "مجموع الصفوف المربوطة", "الفرق")}),
+                                                 use_container_width=True, hide_index=True)
+                                except Exception:
+                                    st.dataframe(_rc_t, use_container_width=True, hide_index=True)
+                        elif _tsub.startswith("⏳"):
+                            if _ug_t is None or _ug_t.empty:
+                                st.success("كل الصفوف اتدفعت ✅")
+                            else:
+                                st.caption(f"{_unp_n:,} صف ({_unp_t:,.0f} ريال صافي) لسه ماليهم أمر دفع، مقسمين على أقرب أربعاء متوقع للدفع (تاريخ الدفع المتوقع + أسبوع تحويل).")
+                                st.dataframe(_ug_t, use_container_width=True, hide_index=True, column_config=_acct_fmt(_ug_t))
+                        elif _tsub.startswith("⚠️"):
+                            _ff, _cc = calc.acct_ty_fees(_ft, _tf, _tt)
+                            st.markdown("**غرامات ورسوم (فواتير خصم)**")
+                            if _ff.empty:
+                                st.success("مفيش غرامات في الفترة ✅")
+                            else:
+                                st.dataframe(_ff, use_container_width=True, hide_index=True, column_config=_acct_fmt(_ff))
+                            st.markdown("**فواتير العمولة الشهرية** (معلومة — العمولة أصلاً متخصومة من صافي كل صف)")
+                            if not _cc.empty:
+                                st.dataframe(_cc, use_container_width=True, hide_index=True, column_config=_acct_fmt(_cc))
+                        elif _tsub.startswith("📅"):
+                            _dl2 = _TS.get("daily")
+                            if _dl2 is not None and not _dl2.empty:
+                                st.bar_chart(_dl2.set_index("التاريخ")[["صافي"]])
+                                st.dataframe(_dl2, use_container_width=True, hide_index=True, column_config=_acct_fmt(_dl2))
+                        else:
+                            _raw_t = _TS["df"].drop(columns=[c for c in _TS["df"].columns if c.startswith("_")])
+                            st.dataframe(_raw_t, use_container_width=True, hide_index=True)
+                        _xl_t = _TS["df"].drop(columns=[c for c in _TS["df"].columns if c.startswith("_")])
+                        st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_t), file_name=f"trendyol_accounts_{file_timestamp()}.xlsx",
+                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_ty_dl")
             with _a_amz:
                 st.info("قريباً — هنبدأ بنون الأول.")
             with _a_noon:
