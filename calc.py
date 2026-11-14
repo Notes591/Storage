@@ -4077,6 +4077,35 @@ def to_excel(df):
         df.to_excel(w, index=False)
     return buf.getvalue()
 
+def to_excel_com(df):
+    """Excel لجداول العمولة/التوصيل: أعمدة الـ % بتتحفظ كنسبة حقيقية بتنسيق 0.00% (من غير ما تبقى 1610%)،
+    والأرقام التانية متقرّبة لرقمين عشريين، والهيدر متجمّد والأعمدة بعرض مناسب."""
+    out = df.copy()
+    pct = [c for c in out.columns if "%" in str(c)]
+    for c in pct:
+        out[c] = pd.to_numeric(out[c], errors="coerce") / 100
+    for c in out.columns:
+        if c not in pct and str(out[c].dtype).startswith("float"):
+            out[c] = out[c].round(2)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        out.to_excel(w, index=False, sheet_name="Sheet1")
+        ws = w.sheets["Sheet1"]
+        ws.freeze_panes = "A2"
+        for i, c in enumerate(out.columns, start=1):
+            col = ws.cell(row=1, column=i).column_letter
+            ws.column_dimensions[col].width = min(max(len(str(c)) + 4, 12), 60) if c not in ("المنتج", "Title") else 50
+            if c in pct:
+                fmt = "0.00%"
+            elif str(out[c].dtype).startswith("float"):
+                fmt = "#,##0" if (out[c].dropna() % 1 == 0).all() else "#,##0.00"
+            else:
+                fmt = None
+            if fmt:
+                for r in range(2, len(out) + 2):
+                    ws.cell(row=r, column=i).number_format = fmt
+    return buf.getvalue()
+
 def make_empty_template(columns):
     return to_excel(pd.DataFrame(columns=columns))
 

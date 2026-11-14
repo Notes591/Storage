@@ -9092,7 +9092,7 @@ if st.session_state["nav_page"] == "tab_accts":
                     pass
                 st.dataframe(_cdf[_cols], use_container_width=True, hide_index=True, column_config=_cfg)
                 st.caption(_note)
-                st.download_button("⬇️ تحميل العمولة والتوصيل (Excel)", data=to_excel(_cdf[[c for c in _cols if c != "📷"]]),
+                st.download_button("⬇️ تحميل العمولة والتوصيل (Excel)", data=calc.to_excel_com(_cdf[[c for c in _cols if c != "📷"]]),
                                    file_name=f"{_key}_{file_timestamp()}.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=_key + "_dl")
 
@@ -9435,7 +9435,7 @@ if st.session_state["nav_page"] == "tab_accts":
                                 st.dataframe(_acm[_ccols], use_container_width=True, hide_index=True, column_config=_ccfg)
                                 st.caption("محسوبة من معاملات أمازون الفعلية (شحنات بس، من غير المرتجعات): عمولة % = العمولة ÷ سعر المنتج، التوصيل = رسوم FBA للتجهيز والشحن ÷ القطع. "
                                            "الأرقام دي بتتحدث لوحدها مع كل تحديث للبوت — مفيش تاب COM لازم تملاه.")
-                                st.download_button("⬇️ تحميل العمولة والتوصيل (Excel)", data=to_excel(_acm[[c for c in _ccols if c not in ("🔗", "📷")]]),
+                                st.download_button("⬇️ تحميل العمولة والتوصيل (Excel)", data=calc.to_excel_com(_acm[[c for c in _ccols if c not in ("🔗", "📷")]]),
                                                    file_name=f"amazon_commission_{file_timestamp()}.xlsx",
                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_amz_com_dl")
                         elif _asub.startswith("🧮"):
