@@ -109,6 +109,42 @@ _SH.setdefault("rd", threading.RLock())      # قراءة واحدة في الم
 _SH.setdefault("hdr_ok", set())
 
 
+def _compact_rows(rows):
+    """بيخلّي كل النصوص المتكررة (SAR، order، نفس الـ SKU، التواريخ...) كائن واحد في الذاكرة بدل نسخة لكل خلية —
+    نفس الصفوف بالظبط بس بتاخد حوالي ثلث الذاكرة في بيانات المالية/الأوردرات."""
+    try:
+        memo = {}
+        sd = memo.setdefault
+        return [[sd(c, c) for c in r] for r in rows]
+    except Exception:
+        return rows
+
+
+def _mem_mb():
+    """الذاكرة المستخدمة فعلًا في عملية التطبيق (ميجا) — من نظام لينكس؛ لو مش متاح بيرجع 0."""
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1e6
+    except Exception:
+        return 0.0
+
+
+MEM_SOFT_LIMIT_MB = 1700   # لو الذاكرة عدّت الرقم ده نفضّي الكاش بدل ما التطبيق يقع («Oh no»). حد Streamlit Cloud حوالي 2.7 جيجا.
+
+
+def _mem_guard():
+    mb = _mem_mb()
+    if mb and mb > MEM_SOFT_LIMIT_MB:
+        with _SH["lock"]:
+            _SH["memo"].clear()
+            _SH["data"].clear()
+        import gc
+        gc.collect()
+        print(f"MEM GUARD: {mb:.0f} MB > {MEM_SOFT_LIMIT_MB} — cache cleared")
+        return True
+    return False
+
+
 def _gs_throttle(gap=1.0):
     with _SH["thr"]:
         wait = _SH.get("last", 0) + gap - time.time()
@@ -196,15 +232,15 @@ def _init_all_sheets():
     wanted = [t for t in list(TABS_CONFIG.keys()) + ["links n", "links a"] if t in existing]
     vals = {}
     # دفعات صغيرة (6 تابات في الطلب) بدل طلب واحد ضخم: بيقلل ذروة الذاكرة وبيمنع انتهاء المهلة لو الشيتات كبيرة
-    for i in range(0, len(wanted), 6):
-        part = wanted[i:i + 6]
+    for i in range(0, len(wanted), 3):      # 3 تابات في الطلب (كانت 6) عشان ذروة الذاكرة أقل
+        part = wanted[i:i + 3]
         try:
             _gs_throttle(1.5)
             res = ss.values_batch_get(["'" + t.replace("'", "''") + "'" for t in part])
             for t, vr in zip(part, res.get("valueRanges", [])):
                 rows = vr.get("values", []) or []
                 w = max((len(r) for r in rows), default=0)
-                vals[t] = [list(r) + [""] * (w - len(r)) for r in rows]
+                vals[t] = _compact_rows([list(r) + [""] * (w - len(r)) for r in rows])
             del res
         except Exception:
             pass     # التابات اللي فشلت هتتقرا لوحدها عند أول استخدام (get_cached)
@@ -240,6 +276,7 @@ def _boot_sheets():
 
 
 sheets = _boot_sheets()
+_mem_guard()
 st.session_state["sheets_initialized"] = sheets
 st.session_state["_ws_existing"] = _SH.get("existing", {})
 
@@ -410,6 +447,48 @@ def safe_get_all_values(sheet, retries=6, delay=1):
     st.error(f"❌ تعذر تحميل '{sheet.title}' من Google Sheets — حاول تاني بعد شوية | Could not load this sheet right now, please retry shortly.")
     st.stop()
 
+# ══ قراءة تابات حسابات المتاجر (_API) من PostgreSQL بدل Google Sheets (اختياري ومقفول افتراضيًا) ══
+# التشغيل: حط في Secrets (أو متغيرات بيئة)  PG_READ = "1"  وبيانات الاتصال  PG_HOST / PG_PORT / PG_USER / PG_PASS / PG_DB (الافتراضي trial).
+# أي تاب مش موجود في القاعدة (جدول _meta) أو لو حصل أي خطأ → بيرجع يقرا من Google Sheets زي ما كان. القاعدة بتتملى بـ PG_Copy_All.py.
+def _pg_cfg(k, default=""):
+    v = os.environ.get(k)
+    if v:
+        return str(v)
+    try:
+        return str(st.secrets.get(k, default) or default)
+    except Exception:
+        return default
+
+
+def _pg_enabled():
+    return _pg_cfg("PG_READ", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _pg_rows(title):
+    """نفس شكل get_all_values (قايمة صفوف، الأولى هيدر بأسمائه الأصلية) من جدول التاب في sheet_copy، أو None لو التاب مش موجود/في خطأ."""
+    if not _pg_enabled():
+        return None
+    try:
+        import psycopg2
+        conn = psycopg2.connect(host=_pg_cfg("PG_HOST", "localhost"), port=int(_pg_cfg("PG_PORT", "5432") or 5432),
+                                user=_pg_cfg("PG_USER", "postgres"), password=_pg_cfg("PG_PASS", ""),
+                                dbname=_pg_cfg("PG_DB", "trial"), connect_timeout=5)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT table_name, headers, col_names FROM sheet_copy._meta WHERE tab_title = %s", (title,))
+            m = cur.fetchone()
+            if not m:
+                return None
+            table, headers, cols = m
+            cur.execute('SELECT ' + ", ".join('"%s"' % c for c in cols) + ' FROM sheet_copy."%s" ORDER BY _row' % table)
+            return [list(headers)] + [["" if v is None else v for v in r] for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as e:
+        print("PG read failed for", title, "->", e)
+        return None
+
+
 def get_cached(sheet, force=False):
     """بيانات الشيت الخام — نسخة واحدة مشتركة بين كل الجلسات، بتتجدد كل SHEET_TTL ثانية أو بعد clear_cache/force."""
     t = sheet.title
@@ -421,7 +500,10 @@ def get_cached(sheet, force=False):
                 return e2[1]
             if force and e2 is not None and time.time() - e2[0] < 3:
                 return e2[1]
-            rows = safe_get_all_values(sheet)
+            rows = _pg_rows(t)
+            if rows is None:
+                rows = safe_get_all_values(sheet)
+            rows = _compact_rows(rows)
             _SH["data"][t] = (time.time(), rows)
             return rows
     return e[1]
@@ -462,7 +544,6 @@ def _memo_from_sheet(sheet, cache_key, builder):
         return m[1]
     result = builder(raw)
     _SH["memo"][cache_key] = (raw, result)
-    st.session_state[cache_key] = result
     return result
 
 # ══ إعدادات ══
@@ -4689,6 +4770,9 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
+    _mm = _mem_mb()
+    if _mm:
+        st.caption(f"🧠 ذاكرة التطبيق: {_mm:,.0f} MB")
     if _sb_open:
         bcol1, bcol2 = st.columns([1, 5])
         with bcol1:
