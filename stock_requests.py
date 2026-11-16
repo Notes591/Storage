@@ -822,6 +822,8 @@ def render_price_profit_block_t14(r, com_map_t14, live_map_t14, sales_dates, ads
     price data is missing for this SKU — missing values default to zero with a visible
     warning, instead of silently hiding the whole block like before."""
     com_info_t14 = com_map_t14.get(r["sku_up"])
+    if com_info_t14 is None and r.get("asin"):        # أمازون: خريطة العمولة مفتاحها ASIN، وsku_up هنا هو الـ SKU التجاري (MSKU)
+        com_info_t14 = com_map_t14.get(str(r["asin"]).strip().upper())
     com_missing_t14 = com_info_t14 is None
     if com_missing_t14:
         com_info_t14 = {"delivery": 0.0, "commission_pct": 0.0}
@@ -8506,6 +8508,8 @@ if st.session_state["nav_page"] == "tab14":
                     except Exception:
                         _pr = None
                     _ci = cm.get(r_["sku_up"])
+                    if _ci is None and r_.get("asin"):             # أمازون: المفتاح ASIN مش الـ MSKU
+                        _ci = cm.get(str(r_["asin"]).strip().upper())
                     _mx = r_.get("_mix") or {}
                     if _mx and _ci:
                         _best = None
