@@ -6383,7 +6383,7 @@ def _noon_items(fin, orders=None):
       • لو الصنف مالوش رسوم على صفه (الغالب في FBB): بنقسم رسوم الأوردر (الصفوف اللي من غير SKU) على عدد أصناف الأوردر.
       • مكتمل = فيه عمولة (Referral Fee) وتوصيل. المرتجعات (Net سالب) مش بتتحسب بيع.
       • نوع التنفيذ من تاب الأوردرات: is_fulfilled_by_noon = true → FBN، false → FBB (بالـ Item Nr، وإلا بالأوردر لو كل أصنافه نفس النوع).
-    بيرجع DataFrame: SKU, Partner SKU, المنتج, net, ref, dlv (تكلفة موجبة), date, tdate, model, complete."""
+    بيرجع DataFrame: SKU, Partner SKU, المنتج, net, ref, dlv (تكلفة موجبة), own (التوصيل على صف الصنف نفسه؟), date, tdate, model, complete."""
     import pandas as pd
     need = ["Transaction Type", "Order Nr", "Item Nr", "SKUs", "Partner SKUs", "Title", "Net Proceeds", "Referral Fee including VAT",
             "Fullfilment & Logistics Fees including VAT", "Other Order Fees including VAT"]
@@ -6411,7 +6411,7 @@ def _noon_items(fin, orders=None):
     ism = (sku != "") & (net > 0) & (ref < 0)
     it = pd.DataFrame({
         "SKU": sku[ism], "Partner SKU": t.loc[ism, "Partner SKUs"].astype(str), "المنتج": t.loc[ism, "Title"].astype(str),
-        "net": net[ism], "ref": -ref[ism], "_fee": fee[ism], "_key": skey[ism], "_item": t.loc[ism, "Item Nr"].astype(str).str.strip(),
+        "net": net[ism], "ref": -ref[ism], "_fee": fee[ism], "own": fee[ism] < 0, "_key": skey[ism], "_item": t.loc[ism, "Item Nr"].astype(str).str.strip(),
         "tdate": t.loc[ism, "Transaction Date"].astype(str).str[:10] if "Transaction Date" in t.columns else "",
         "date": (t.loc[ism, "Order Date"].astype(str).str[:10] if "Order Date" in t.columns else
                  (t.loc[ism, "Transaction Date"].astype(str).str[:10] if "Transaction Date" in t.columns else "")),
