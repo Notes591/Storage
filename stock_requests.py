@@ -8537,14 +8537,14 @@ if st.session_state["nav_page"] == "tab14":
                     _df = pd.DataFrame([{
                         "📷": (x.get("img") or None), "المعرّف": x["id"], "🔗": (x.get("link") or None), "أمس": x["y"], f"{sales_display_days} أيام": x["tot"], "شهري": x["mon"],
                         "مخزون": x["stock"], "سعر البيع": x["price"],
-                        "عمولة": ("—" if not x["ci"] else f'{x["ci"].get("commission_pct", 0):g}%'),
-                        "توصيل": ("—" if not x["ci"] else f'{x["ci"].get("delivery", 0):g}'),
+                        "عمولة": ("—" if not x["ci"] else f'{round(float(x["ci"].get("commission_pct", 0)), 2):g}%'),
+                        "توصيل": ("—" if not x["ci"] else f'{round(float(x["ci"].get("delivery", 0)), 2):g}'),
                         "صافي": x["net"]} for x in rows])
                     _vis = ["🔗", "📷", "المعرّف"] + [c for c in (st.session_state.get("t14_cols_sel") or _T14_COLS) if c in _T14_COLS]
                     _df = _df[_vis]
                     # عرض ثابت ومضغوط: المعرّف مقفول على عرض صغير (الاسم الكامل جوه التفاصيل) وباقي الأعمدة ضيقة
                     _wpx = {"📷": 36, "🔗": 34, "المعرّف": 64, "أمس": 42, f"{sales_display_days} أيام": 52, "شهري": 48, "مخزون": 60,
-                            "سعر البيع": 54, "عمولة": 48, "توصيل": 46, "صافي": 52}
+                            "سعر البيع": 54, "عمولة": 58, "توصيل": 46, "صافي": 52}
                     def _cfg(px):
                         _c = {"المعرّف": st.column_config.TextColumn(width=px["المعرّف"])}
                         if "📷" in px:
