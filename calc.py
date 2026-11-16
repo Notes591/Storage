@@ -5584,7 +5584,7 @@ ADS_GLOSSARY_HTML = (
 
 # ═══════════════════════ حسابات المتاجر (نون) | Store accounts — Noon ═══════════════════════
 ACCT_FIN_NUM = ("Net Proceeds", "Referral Fee including VAT", "Fullfilment & Logistics Fees including VAT",
-                "Other Order Fees including VAT", "Order Subsidies including VAT", "Non-Order Fees including VAT",
+                "Shipping Credits including VAT", "Other Order Fees including VAT", "Order Subsidies including VAT", "Non-Order Fees including VAT",
                 "Non-Order Subsidies including VAT", "Others including VAT", "Total")
 
 
@@ -6377,50 +6377,118 @@ def _com_finish(g):
     return g.sort_values("قطع", ascending=False).reset_index(drop=True)
 
 
-def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all"):
-    """عمولة وتوصيل كل SKU في نون من دفتر المالية الفعلي (صفوف البيع بس، من غير المرتجعات).
-    عمولة % = Referral Fee ÷ Net Proceeds · توصيل = Fullfilment & Logistics Fees ÷ القطع (الأرقام شاملة الضريبة زي ما نون بتعرضها)."""
+def _noon_items(fin, orders=None):
+    """كل صنف مبيع في دفتر نون بنفس منطق تاب COM_API (build_com في بوت نون) بالظبط:
+      • التوصيل = Fulfilment & Logistics + Shipping Credits + Other Order Fees + Order Subsidies (شاملة الضريبة) على صف الصنف لو سالب.
+      • لو الصنف مالوش رسوم على صفه (الغالب في FBB): بنقسم رسوم الأوردر (الصفوف اللي من غير SKU) على عدد أصناف الأوردر.
+      • مكتمل = فيه عمولة (Referral Fee) وتوصيل. المرتجعات (Net سالب) مش بتتحسب بيع.
+      • نوع التنفيذ من تاب الأوردرات: is_fulfilled_by_noon = true → FBN، false → FBB (بالـ Item Nr، وإلا بالأوردر لو كل أصنافه نفس النوع).
+    بيرجع DataFrame: SKU, Partner SKU, المنتج, net, ref, dlv (تكلفة موجبة), date, tdate, model, complete."""
     import pandas as pd
-    if fin is None or fin.empty or "Transaction Date" not in fin.columns:
-        return pd.DataFrame()
-    # من غير نسخة كاملة من الدفتر (الدفتر كبير): بنفلتر بالقناع الأول وبنآخد الأعمدة المطلوبة بس
-    need = ["Transaction Type", "Item Nr", "SKUs", "Partner SKUs", "Title", "Net Proceeds", "Referral Fee including VAT",
+    need = ["Transaction Type", "Order Nr", "Item Nr", "SKUs", "Partner SKUs", "Title", "Net Proceeds", "Referral Fee including VAT",
             "Fullfilment & Logistics Fees including VAT", "Other Order Fees including VAT"]
-    if any(c not in fin.columns for c in need):
+    if fin is None or fin.empty or any(c not in fin.columns for c in need):
         return pd.DataFrame()
-    mask = (fin["Transaction Type"] == "order") & (fin["Net Proceeds"] > 0) & (fin["Item Nr"].astype(str).str.strip() != "") \
-        & (fin["SKUs"].astype(str).str.strip() != "")
+    opt = [c for c in ("Shipping Credits including VAT", "Order Subsidies including VAT", "Order Date", "Transaction Date", "Store") if c in fin.columns]
+    cols = list(dict.fromkeys(need + opt))
+    t = fin.loc[fin["Transaction Type"].astype(str).str.strip().str.lower().isin(["order", "order_update"]), cols]
+    if t.empty:
+        return pd.DataFrame()
+
+    def num(c):
+        return pd.to_numeric(t[c], errors="coerce").fillna(0.0) if c in t.columns else 0.0
+    fee = (num("Fullfilment & Logistics Fees including VAT") + num("Shipping Credits including VAT")
+           + num("Other Order Fees including VAT") + num("Order Subsidies including VAT"))
+    sku = t["SKUs"].astype(str).str.split(",").str[0].str.strip().str.upper()
+    on = t["Order Nr"].astype(str).str.strip()
+    has_store = "Store" in t.columns
+    skey = (t["Store"].astype(str).str.strip() + "|" + on) if has_store else on
+    net = num("Net Proceeds")
+    ref = num("Referral Fee including VAT")
+    # رسوم على مستوى الأوردر (صفوف من غير SKU)
+    og = (sku == "") & (fee < 0) & (on != "")
+    order_fee = fee[og].groupby(skey[og]).sum()
+    ism = (sku != "") & (net > 0) & (ref < 0)
+    it = pd.DataFrame({
+        "SKU": sku[ism], "Partner SKU": t.loc[ism, "Partner SKUs"].astype(str), "المنتج": t.loc[ism, "Title"].astype(str),
+        "net": net[ism], "ref": -ref[ism], "_fee": fee[ism], "_key": skey[ism], "_item": t.loc[ism, "Item Nr"].astype(str).str.strip(),
+        "tdate": t.loc[ism, "Transaction Date"].astype(str).str[:10] if "Transaction Date" in t.columns else "",
+        "date": (t.loc[ism, "Order Date"].astype(str).str[:10] if "Order Date" in t.columns else
+                 (t.loc[ism, "Transaction Date"].astype(str).str[:10] if "Transaction Date" in t.columns else "")),
+    })
+    if it.empty:
+        return pd.DataFrame()
+    n_fin = it.groupby("_key")["SKU"].transform("size")
+    cnt = n_fin
+    om = im = None
+    if orders is not None and not orders.empty and "item_nr" in orders.columns and "order_nr" in orders.columns:
+        o_ = orders.loc[:, ~orders.columns.duplicated()]
+        ocols = [c for c in ("Store", "order_nr", "item_nr", "sku", "is_fulfilled_by_noon") if c in o_.columns]
+        o_ = o_[ocols].copy()
+        o_["order_nr"] = o_["order_nr"].astype(str).str.strip()
+        o_["item_nr"] = o_["item_nr"].astype(str).str.strip()
+        ok = (o_["Store"].astype(str).str.strip() + "|" + o_["order_nr"]) if (has_store and "Store" in o_.columns) else o_["order_nr"]
+        if "sku" in o_.columns:
+            with_sku = o_["sku"].astype(str).str.strip() != ""
+            cnt_o = with_sku.groupby(ok).sum()
+            cnt = it["_key"].map(cnt_o).where(lambda x: x > 0).fillna(n_fin)
+        if "is_fulfilled_by_noon" in o_.columns:
+            fb = o_["is_fulfilled_by_noon"].astype(str).str.strip().str.lower().eq("true")
+            im = fb.groupby(o_["item_nr"]).first()
+            nun = fb.groupby(ok).nunique()
+            first = fb.groupby(ok).first()
+            om = first[nun == 1]
+    ofee = it["_key"].map(order_fee)
+    dlv = it["_fee"].where(it["_fee"] < 0, ofee / cnt.clip(lower=1))
+    dlv = dlv.where((it["_fee"] < 0) | (ofee.fillna(0) != 0))       # مفيش رسوم لا على الصنف ولا على الأوردر → ناقص
+    it["dlv"] = -dlv
+    it["complete"] = dlv.notna()
+    model = pd.Series([None] * len(it), index=it.index, dtype=object)
+    if im is not None:
+        m1 = it["_item"].map(im)
+        m2 = it["_key"].map(om) if om is not None else pd.Series([None] * len(it), index=it.index)
+        fbv = m1.where(m1.notna(), m2)
+        model = fbv.map(lambda v: None if v is None or v != v else ("FBN" if bool(v) else "FBB"))
+    it["model"] = model
+    return it.drop(columns=["_fee", "_key", "_item"])
+
+
+def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all"):
+    """عمولة وتوصيل كل SKU في نون من دفتر المالية الفعلي — بنفس منطق تاب COM_API / تاب المبيعات (شوف _noon_items).
+    المتوسط على الفترة المختارة: عمولة % = مجموع العمولة ÷ مجموع Net Proceeds، توصيل/وحدة = مجموع التوصيل ÷ القطع المكتملة.
+    channel: all / FBN (تخزين نون) / أي حاجة تانية = عادي FBB. الأصناف الناقصة (من غير توصيل) مش بتدخل الحساب (attrs['incomplete'])."""
+    import pandas as pd
+    it = _noon_items(fin, orders)
+    if it.empty:
+        return pd.DataFrame()
     if d_from or d_to:
-        d = pd.to_datetime(fin.loc[mask, "Transaction Date"], errors="coerce").dt.date
-        keep = pd.Series(True, index=d.index)
+        d = pd.to_datetime(it["tdate"], errors="coerce").dt.date
+        keep = pd.Series(True, index=it.index)
         if d_from:
             keep &= d >= d_from
         if d_to:
             keep &= d <= d_to
-        mask.loc[d.index[~keep.values]] = False
-    it = fin.loc[mask, need]
+        it = it[keep]
+    incomplete = int((~it["complete"]).sum())
+    it = it[it["complete"]]
     unknown = 0
     if channel != "all":
-        # نوع التنفيذ من تاب أوردرات نون (is_fulfilled_by_noon: true = تخزين نون FBN، false = عادي FBP/FBB) بالربط على Item Nr
         if orders is None or orders.empty or "is_fulfilled_by_noon" not in orders.columns or "item_nr" not in orders.columns:
             return pd.DataFrame()
-        o_ = orders.loc[:, ~orders.columns.duplicated()][["item_nr", "is_fulfilled_by_noon"]].copy()
-        o_["item_nr"] = o_["item_nr"].astype(str).str.strip()
-        fm = o_.drop_duplicates("item_nr").set_index("item_nr")["is_fulfilled_by_noon"].astype(str).str.strip().str.lower()
-        kind = it["Item Nr"].astype(str).str.strip().map(fm)
-        unknown = int(kind.isna().sum())
-        it = it[(kind == "true")] if channel == "FBN" else it[(kind == "false")]
+        unknown = int(it["model"].isna().sum())
+        it = it[it["model"] == ("FBN" if channel == "FBN" else "FBB")]
     if it.empty:
         out = pd.DataFrame()
         out.attrs["unknown"] = unknown
+        out.attrs["incomplete"] = incomplete
         return out
-    it = it.assign(_ref=it["Referral Fee including VAT"].abs(), _ful=it["Fullfilment & Logistics Fees including VAT"].abs(),
-                   _oth=it["Other Order Fees including VAT"].abs(), _one=1.0)
-    g = it.groupby("SKUs").agg(**{"Partner SKU": ("Partner SKUs", "first"), "المنتج": ("Title", "first"), "قطع": ("_one", "sum"),
-                                  "مبيعات": ("Net Proceeds", "sum"), "عمولة": ("_ref", "sum"), "توصيل": ("_ful", "sum"),
-                                  "تانية": ("_oth", "sum")}).reset_index().rename(columns={"SKUs": "SKU"})
+    it = it.assign(_one=1.0, _x=0.0)
+    g = it.groupby("SKU").agg(**{"Partner SKU": ("Partner SKU", "first"), "المنتج": ("المنتج", "first"), "قطع": ("_one", "sum"),
+                                 "مبيعات": ("net", "sum"), "عمولة": ("ref", "sum"), "توصيل": ("dlv", "sum"),
+                                 "تانية": ("_x", "sum")}).reset_index()
     g = _com_finish(g)
     g.attrs["unknown"] = unknown
+    g.attrs["incomplete"] = incomplete
     return g
 
 

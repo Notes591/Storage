@@ -9790,9 +9790,12 @@ if st.session_state["nav_page"] == "tab_accts":
                                 st.warning("تاب Noon_Orders_API فاضي — مفيش طريقة نفصل بيها نوع التنفيذ. شغّل بوت نون وحدّث الأوردرات.")
                             elif _nkey != "all" and _ncom.attrs.get("unknown"):
                                 st.caption(f"⚠️ {_ncom.attrs['unknown']} صف بيع مالوش أوردر في Noon_Orders_API (قديم أو لسه ماتسحبش) — مش داخل في الفصل ده.")
+                            if _ncom.attrs.get("incomplete"):
+                                st.caption(f"ℹ️ {_ncom.attrs['incomplete']} صف بيع من غير رسوم توصيل في الدفتر (لسه ماتسجلتش) — مش داخل في الحساب.")
                             _acct_com_view(_ncom, "SKU", "acct_noon_com",
-                                           "محسوبة من دفتر نون الفعلي (طلبات البيع بس، من غير المرتجعات): عمولة % = Referral Fee ÷ Net Proceeds، والتوصيل = رسوم Fulfilment & Logistics ÷ القطع "
-                                           "(كلها شاملة الضريبة زي ما نون بتعرضها). مستقلة عن تاب COM_API.", ["Partner SKU"])
+                                           "بنفس طريقة تاب المبيعات (COM_API): عمولة % = Referral Fee ÷ Net Proceeds، والتوصيل = رسوم الصنف (Fulfilment + Shipping + Other + Subsidies) "
+                                           "ولو الصنف مالوش رسوم على صفه (الغالب في FBB) بنقسم رسوم الأوردر على عدد أصناف الأوردر. FBN/FBB بيتحدد من is_fulfilled_by_noon في الأوردرات. "
+                                           "كله شامل الضريبة، والمتوسط على الفترة المختارة.", ["Partner SKU"])
                         elif _sub.startswith("🧮"):
                             if _rc is None or _rc.empty:
                                 st.info("مفيش كشوف.")
