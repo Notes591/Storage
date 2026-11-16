@@ -847,13 +847,16 @@ def render_price_profit_block_t14(r, com_map_t14, live_map_t14, sales_dates, ads
                                 delivery=com_info_t14.get("delivery", 0.0) if _d is None else _d,
                                 commission_pct=com_info_t14.get("commission_pct", 0.0) if _c is None else _c)
 
+    if reco_noon:        # نون: العمولة والتوصيل بدون ضريبة 15% (دفتر نون بيعرضهم شاملينها) — شوف calc.noon_ex_vat
+        com_info_t14 = calc.noon_ex_vat(com_info_t14)
+
     offer_price_t14 = get_latest_sku_price(r, sales_dates)
     latest_price_t14, price_from_live_t14 = get_base_price(r["sku_up"], live_map_t14, offer_price_t14)
     price_missing_t14 = latest_price_t14 is None
     if price_missing_t14:
         latest_price_t14 = 0.0
 
-    net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14)
+    net_fees_t14, net_tax_t14 = compute_net_price_after_fees(latest_price_t14, com_info_t14, ex_vat=bool(reco_noon))
 
     # ── تكلفة الوحدة من تاب التكويد (لو مسجلة) وصافي الربح الفعلي بعدها | Unit
     #    cost from the Tacweed sheet (if recorded) and the actual net profit
@@ -958,7 +961,9 @@ def render_price_profit_block_t14(r, com_map_t14, live_map_t14, sales_dates, ads
       with st.expander("💳 الحساب"):
         st.markdown(
             f"💳 **الصافي بعد خصم العمولة والتوصيل:** {net_fees_t14:,.2f} ريال  \n"
-            f"🧾 **الصافي بعد خصم 15% ضريبة:** {net_tax_t14:,.2f} ريال  \n"
+            + (f"🧾 **الصافي بعد الضريبة (السعر ÷ 1.15 − العمولة − التوصيل، الاتنين بدون ضريبة):** {net_tax_t14:,.2f} ريال  \n" if reco_noon
+               else f"🧾 **الصافي بعد خصم 15% ضريبة:** {net_tax_t14:,.2f} ريال  \n")
+            +
             f"📦 **التكلفة | Cost:** {cost_t14:,.2f} ريال"
             + (f"  \n🏷️ **سعر العرض (معلومة فقط):** {offer_price_t14:,.2f} ريال" if offer_price_t14 is not None else ""))
     if ad_detail_t14 and part in ("all", "verdict"):
@@ -6400,7 +6405,7 @@ def _ads_reco_compute_inner():
         ci = com_m.get(sku_up) if sku_up else None
         unit_profit, cost_missing = None, False
         if price is not None and ci:
-            _, net_tax = compute_net_price_after_fees(price, ci)
+            _, net_tax = compute_net_price_after_fees(price, calc.noon_ex_vat(ci), ex_vat=True)
             cost = resolve_unit_cost(sku_up, (asin_map.get(sku_up, "") or "").upper() or None)
             if cost is None:
                 cost_missing, cost = True, 0.0
@@ -6605,7 +6610,7 @@ def _render_ads_performance_tab():
         latest_price_ad = _ads_latest_price_for_sku(sku_up_ad)
         if latest_price_ad is None:
             continue
-        _, net_tax_ad = compute_net_price_after_fees(latest_price_ad, com_info_ad)
+        _, net_tax_ad = compute_net_price_after_fees(latest_price_ad, calc.noon_ex_vat(com_info_ad), ex_vat=True)
         # ── تكلفة الوحدة من تاب التكويد (نون أو أمازون حسب المنتج) وصافي
         #    الربح الفعلي بعدها، زي بالظبط منطق تاب المبيعات — لو التكلفة مش
         #    مسجلة بتتحط صفر مع تنبيه، بدل ما تختفي بصمت من الحساب | Unit cost
@@ -8500,7 +8505,7 @@ if st.session_state["nav_page"] == "tab14":
                             r_["day_prices"][d] = r_["day_prices"].get(d, []) + list(chs["FBA"]["day_prices"].get(d, []))
                     return r_
 
-                def _price_info(r_, cm, lm):
+                def _price_info(r_, cm, lm, noon=False):
                     """(سعر البيع, بيانات العمولة/التوصيل, الصافي بعدهم) — نفس مصدر الأرقام في بلوك السعر والربح."""
                     try:
                         _off = get_latest_sku_price(r_, sales_dates)
@@ -8525,9 +8530,11 @@ if st.session_state["nav_page"] == "tab14":
                             _ci = dict(_ci, delivery=_ci.get("delivery", 0.0) if _dd is None else _dd,
                                        commission_pct=_ci.get("commission_pct", 0.0) if _cc is None else _cc)
                     _net = None
+                    if noon and _ci:                      # نون: عمولة/توصيل بدون ضريبة 15%
+                        _ci = calc.noon_ex_vat(_ci)
                     if _pr is not None and _ci:
                         try:
-                            _net = compute_net_price_after_fees(_pr, _ci)[0]
+                            _net = compute_net_price_after_fees(_pr, _ci, ex_vat=noon)[0]
                         except Exception:
                             _net = None
                     return _pr, _ci, _net
@@ -8744,7 +8751,7 @@ if st.session_state["nav_page"] == "tab14":
                                     _rows = []
                                     for _s, _c in noon_tbl:
                                         _r = _mk_r_noon(_c)
-                                        _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14)
+                                        _pr, _ci, _net = _price_info(_r, com_map_t14, live_map_t14, noon=True)
                                         _stk = "·".join(f"{_c[k]['stock']}" for k in ("FBN", "FBB") if k in _c)
                                         try:
                                             _lk_s, _lk_m = fbn_stock_and_month(_c)
@@ -9725,7 +9732,9 @@ if st.session_state["nav_page"] == "tab_accts":
                                     if _kx in _ads_m:
                                         return sum(a["spends"] for a in _ads_m[_kx])
                                 return None
-                            _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None)
+                            _vat_p = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (العمولة والتوصيل والصافي ÷ 1.15)", value=True, key="acct_noon_p_vat",
+                                                                  help="دفتر نون بيعرض كل الأرقام شاملة الضريبة. التفعيل بيقسمها على 1.15 عشان الربح يتحسب بدون الضريبة.") else 1.0
+                            _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None, vat=_vat_p)
                             if _pf.empty:
                                 st.info("مفيش مبيعات في الفترة.")
                             else:
@@ -9789,7 +9798,9 @@ if st.session_state["nav_page"] == "tab_accts":
                         elif _sub.startswith("🏷️"):
                             _nch = st.radio("نوع التنفيذ", ["الكل", "📦 تخزين نون (FBN)", "🏠 عادي (FBP / FBB)"], horizontal=True, key="acct_noon_com_ch")
                             _nkey = "FBN" if "FBN" in _nch else ("FBP" if "FBP" in _nch else "all")
-                            _ncom = calc.acct_noon_com(_f, _df_from, _df_to, _ord_all, _nkey)
+                            _vat_c = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (زي تاب المبيعات)", value=True, key="acct_noon_com_vat",
+                                                                  help="نون بتعرض العمولة والتوصيل شاملين الضريبة (مثلاً 17.25% = 15% + ضريبة عليها). التفعيل بيعرضهم بدون الضريبة.") else 1.0
+                            _ncom = calc.acct_noon_com(_f, _df_from, _df_to, _ord_all, _nkey, vat=_vat_c)
                             if _nkey != "all" and (_ord_all is None or _ord_all.empty):
                                 st.warning("تاب Noon_Orders_API فاضي — مفيش طريقة نفصل بيها نوع التنفيذ. شغّل بوت نون وحدّث الأوردرات.")
                             elif _nkey != "all" and _ncom.attrs.get("unknown"):
@@ -9798,8 +9809,10 @@ if st.session_state["nav_page"] == "tab_accts":
                                 st.caption(f"ℹ️ {_ncom.attrs['incomplete']} صف بيع من غير رسوم توصيل في الدفتر (لسه ماتسجلتش) — مش داخل في الحساب.")
                             _acct_com_view(_ncom, "SKU", "acct_noon_com",
                                            "بنفس طريقة تاب المبيعات (COM_API): عمولة % = Referral Fee ÷ Net Proceeds، والتوصيل = رسوم الصنف (Fulfilment + Shipping + Other + Subsidies) "
+                                           + ("— بدون ضريبة 15% (مقسومة على 1.15) " if _vat_c > 1 else "— شاملة الضريبة زي الدفتر ")
+                                           +
                                            "ولو الصنف مالوش رسوم على صفه (الغالب في FBB) بنقسم رسوم الأوردر على عدد أصناف الأوردر. FBN/FBB بيتحدد من is_fulfilled_by_noon في الأوردرات. "
-                                           "كله شامل الضريبة، والمتوسط على الفترة المختارة.", ["Partner SKU"])
+                                           "والمتوسط على الفترة المختارة. «متوسط سعر البيع» شامل الضريبة (سعر العميل).", ["Partner SKU"])
                         elif _sub.startswith("🧮"):
                             if _rc is None or _rc.empty:
                                 st.info("مفيش كشوف.")

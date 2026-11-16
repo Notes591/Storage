@@ -123,11 +123,28 @@ def get_base_price(sku_up, live_map, fallback_price=None):
         return live_info["price"], True
     return fallback_price, False
 
-def compute_net_price_after_fees(price, com_info):
+NOON_VAT = 1.15      # ضريبة القيمة المضافة 15% — دفتر نون بيعرض العمولة والتوصيل شاملينها
+
+
+def noon_ex_vat(ci, vat=NOON_VAT):
+    """نسخة من بيانات عمولة/توصيل نون (COM_API) **بدون الضريبة**: نسبة العمولة والتوصيل ÷ 1.15
+    (مثال: 17.25% ← 15%، و43.7 ← 38). القيم الفاضية (None) بتفضل زي ما هي."""
+    if not ci:
+        return ci
+    out = dict(ci)
+    for k in ("delivery", "commission_pct", "delivery_fbn", "commission_pct_fbn", "delivery_fbb", "commission_pct_fbb"):
+        v = out.get(k)
+        if v is not None:
+            out[k] = v / vat
+    return out
+
+
+def compute_net_price_after_fees(price, com_info, ex_vat=False):
     """يحسب صافي سعر البيع بعد خصم العمولة ومصاريف التوصيل، وبعدها بعد خصم 15% ضريبة.
     | Computes the net selling price after commission + delivery fees, then after 15% VAT.
     مصاريف التوصيل متوقع تكون رقم سالب في الشيت (زي -30) فبنضيفها مباشرة.
     Delivery is expected to be a negative number in the sheet (e.g. -30), so we add it directly.
+    ex_vat=True (نون): العمولة والتوصيل في com_info بدون ضريبة، فالصافي بعد الضريبة = السعر ÷ 1.15 − العمولة − التوصيل.
     بيرجع (الصافي بعد العمولة والتوصيل, الصافي بعد خصم الضريبة كمان) | Returns
     (net after commission+delivery, net after also removing 15% VAT)."""
     if price is None or not com_info:
@@ -136,6 +153,8 @@ def compute_net_price_after_fees(price, com_info):
     delivery = com_info.get("delivery", 0.0)
     commission_amount = price * commission_pct / 100.0
     net_after_fees = price - commission_amount + delivery
+    if ex_vat:
+        return net_after_fees, price / NOON_VAT - commission_amount + delivery
     net_after_tax = net_after_fees * 0.85  # خصم 15% ضريبة القيمة المضافة | remove 15% VAT
     return net_after_fees, net_after_tax
 
@@ -5759,7 +5778,7 @@ def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):
     return L, total
 
 
-def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None):
+def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat=1.0):
     """ربحية كل منتج (SKU) في الفترة، من الأكتر كمية للأقل.
     cost_fn(sku_up, psku_up) -> تكلفة الوحدة أو None · ads_fn(sku_up, psku_up) -> إنفاق إعلانات أو None.
     الصافي بعد الرسوم = عمود Total (صافي المبيعات + العمولة + الشحن + رسوم أخرى + الدعم، بعد خصم المرتجع).
@@ -5785,6 +5804,9 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None):
                                   "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum"),
                                   "صافي المبيعات": ("Net Proceeds", "sum"), "الرسوم": ("_fee", "sum"),
                                   "دعم": ("_sub", "sum"), "الصافي بعد الرسوم": ("Total", "sum")}).reset_index().rename(columns={"SKUs": "SKU"})
+    if vat and vat > 1:                      # بدون الضريبة: كل أرقام الدفتر (شاملة 15%) ÷ 1.15
+        for _c in ("صافي المبيعات", "الرسوم", "دعم", "الصافي بعد الرسوم"):
+            g[_c] = g[_c] / vat
     g["صافي الكمية"] = g["مبيع"] - g["مرتجع"]
     costs, ads, missing = [], [], []
     for _, r in g.iterrows():
@@ -6411,7 +6433,7 @@ def _noon_items(fin, orders=None):
     ism = (sku != "") & (net > 0) & (ref < 0)
     it = pd.DataFrame({
         "SKU": sku[ism], "Partner SKU": t.loc[ism, "Partner SKUs"].astype(str), "المنتج": t.loc[ism, "Title"].astype(str),
-        "net": net[ism], "ref": -ref[ism], "_fee": fee[ism], "own": fee[ism] < 0, "_key": skey[ism], "_item": t.loc[ism, "Item Nr"].astype(str).str.strip(),
+        "net": net[ism], "ref": -ref[ism], "_fee": fee[ism], "own": fee[ism] < 0, "order": on[ism], "_key": skey[ism], "_item": t.loc[ism, "Item Nr"].astype(str).str.strip(),
         "tdate": t.loc[ism, "Transaction Date"].astype(str).str[:10] if "Transaction Date" in t.columns else "",
         "date": (t.loc[ism, "Order Date"].astype(str).str[:10] if "Order Date" in t.columns else
                  (t.loc[ism, "Transaction Date"].astype(str).str[:10] if "Transaction Date" in t.columns else "")),
@@ -6453,7 +6475,7 @@ def _noon_items(fin, orders=None):
     return it.drop(columns=["_fee", "_key", "_item"])
 
 
-def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all"):
+def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all", vat=1.0):
     """عمولة وتوصيل كل SKU في نون من دفتر المالية الفعلي — بنفس منطق تاب COM_API / تاب المبيعات (شوف _noon_items).
     المتوسط على الفترة المختارة: عمولة % = مجموع العمولة ÷ مجموع Net Proceeds، توصيل/وحدة = مجموع التوصيل ÷ القطع المكتملة.
     channel: all / FBN (تخزين نون) / أي حاجة تانية = عادي FBB. الأصناف الناقصة (من غير توصيل) مش بتدخل الحساب (attrs['incomplete'])."""
@@ -6486,7 +6508,12 @@ def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all"):
     g = it.groupby("SKU").agg(**{"Partner SKU": ("Partner SKU", "first"), "المنتج": ("المنتج", "first"), "قطع": ("_one", "sum"),
                                  "مبيعات": ("net", "sum"), "عمولة": ("ref", "sum"), "توصيل": ("dlv", "sum"),
                                  "تانية": ("_x", "sum")}).reset_index()
+    if vat and vat > 1:                      # بدون الضريبة: العمولة والتوصيل ÷ 1.15 (نسبة العمولة بتبقى من سعر البيع الشامل)
+        g["عمولة"] = g["عمولة"] / vat
+        g["توصيل"] = g["توصيل"] / vat
     g = _com_finish(g)
+    if vat and vat > 1:                      # الصافي/وحدة = السعر ÷ 1.15 − الرسوم (بدون ضريبة)
+        g["صافي/وحدة بعد الرسوم"] = g["متوسط سعر البيع"].fillna(0) / vat - g["إجمالي الرسوم/وحدة"]
     g.attrs["unknown"] = unknown
     g.attrs["incomplete"] = incomplete
     return g
