@@ -5760,10 +5760,16 @@ def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):
     oth = body["Other Order Fees including VAT"]
     sf = body[bt == "statement_fee"]
     it_rows = body[bt != "statement_fee"]
+    _so = body["Order Subsidies including VAT"]
+    _fl = body["Fullfilment & Logistics Fees including VAT"]
+    _is_dlv = noitem | (((_so - (-_fl) * 0.2).abs() < 0.02) & (_fl < 0) & (_so > 0))   # إعانة التوصيل: على سطر الأوردر (من غير SKU) أو = 20% من رسم الشحن على نفس السطر
+    _sub_dlv = float(_so[_is_dlv].sum())
+    _sub_ref = float(_so[~_is_dlv].sum())
     L = [
         ("صافي العائدات", S(body, "Net Proceeds"), "in"),
         ("رسوم الإعلان (تخفيض)", S(body, "Non-Order Subsidies including VAT"), "in"),
-        ("رسوم التصدير الخارجي", S(body, "Order Subsidies including VAT"), "in"),
+        ("إعانة رسوم الإحالة (≈5% من السعر — FBN)", _sub_ref, "in"),
+        ("رسوم التصدير الخارجي (إعانة التوصيل 20% — FBB)", _sub_dlv, "in"),
         ("رسوم عودة التالفة / إدارية للإرجاع (مجمّعة — نون بتفصلهم)", float(oth.sum()), "in"),
         ("رسوم الإعلان", S(sf, "Non-Order Fees including VAT"), "out"),
         ("رسوم الإحالة", S(body, "Referral Fee including VAT"), "out"),
