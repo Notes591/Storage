@@ -5698,7 +5698,8 @@ def acct_noon_summary(fin, d_from=None, d_to=None):
     # حسب الصنف (SKU) — الصفوف اللي ليها SKU بس (رسوم الشحن بدون صنف بتتحسب لوحدها)
     it = earn[(earn["Item Nr"].astype(str).str.strip() != "") & (earn["SKUs"].astype(str).str.strip() != "")]
     if not it.empty:
-        it = it.assign(_sold=((it["Transaction Type"] == "order") & (it["Net Proceeds"] > 0)).astype(int),
+        it = it.assign(_sold=(it["Net Proceeds"] > 0).astype(int),      # أي صف بنتيجة موجبة = قطعة اتباعت (فيه أوردرات بتنزل order_update موجب من غير صف order — زي إكسيل المحاسب)
+                   
                        _ret=((it["Transaction Type"] == "order_update") & (it["Net Proceeds"] < 0)).astype(int))
         sk = it.groupby("SKUs").agg(**{"Partner SKU": ("Partner SKUs", "first"), "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum")},
                                     **{c: (c, "sum") for c in ("Net Proceeds", "Referral Fee including VAT", "Fullfilment & Logistics Fees including VAT",
@@ -5760,10 +5761,16 @@ def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):
     oth = body["Other Order Fees including VAT"]
     sf = body[bt == "statement_fee"]
     it_rows = body[bt != "statement_fee"]
+    _so = body["Order Subsidies including VAT"]
+    _fl = body["Fullfilment & Logistics Fees including VAT"]
+    _is_dlv = noitem | (((_so - (-_fl) * 0.2).abs() < 0.02) & (_fl < 0) & (_so > 0))   # إعانة التوصيل: على سطر الأوردر (من غير SKU) أو = 20% من رسم الشحن على نفس السطر
+    _sub_dlv = float(_so[_is_dlv].sum())
+    _sub_ref = float(_so[~_is_dlv].sum())
     L = [
         ("صافي العائدات", S(body, "Net Proceeds"), "in"),
         ("رسوم الإعلان (تخفيض)", S(body, "Non-Order Subsidies including VAT"), "in"),
-        ("رسوم التصدير الخارجي", S(body, "Order Subsidies including VAT"), "in"),
+        ("إعانة رسوم الإحالة (≈5% من السعر — FBN)", _sub_ref, "in"),
+        ("رسوم التصدير الخارجي (إعانة التوصيل 20% — FBB)", _sub_dlv, "in"),
         ("رسوم عودة التالفة / إدارية للإرجاع (مجمّعة — نون بتفصلهم)", float(oth.sum()), "in"),
         ("رسوم الإعلان", S(sf, "Non-Order Fees including VAT"), "out"),
         ("رسوم الإحالة", S(body, "Referral Fee including VAT"), "out"),
@@ -5778,7 +5785,7 @@ def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):
     return L, total
 
 
-def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat=1.0):
+def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat=1.0, alloc_order=False):
     """ربحية كل منتج (SKU) في الفترة، من الأكتر كمية للأقل.
     cost_fn(sku_up, psku_up) -> تكلفة الوحدة أو None · ads_fn(sku_up, psku_up) -> إنفاق إعلانات أو None.
     الصافي بعد الرسوم = عمود Total (صافي المبيعات + العمولة + الشحن + رسوم أخرى + الدعم، بعد خصم المرتجع).
@@ -5796,7 +5803,8 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat
     it = df[tt.isin(["order", "order_update"]) & (df["Item Nr"].astype(str).str.strip() != "") & (df["SKUs"].astype(str).str.strip() != "")]
     if it.empty:
         return pd.DataFrame()
-    it = it.assign(_sold=((it["Transaction Type"] == "order") & (it["Net Proceeds"] > 0)).astype(int),
+    it = it.assign(_sold=(it["Net Proceeds"] > 0).astype(int),      # أي صف بنتيجة موجبة = قطعة اتباعت (فيه أوردرات بتنزل order_update موجب من غير صف order — زي إكسيل المحاسب)
+                   
                    _ret=((it["Transaction Type"] == "order_update") & (it["Net Proceeds"] < 0)).astype(int),
                    _fee=it["Referral Fee including VAT"] + it["Fullfilment & Logistics Fees including VAT"] + it["Other Order Fees including VAT"] + it["Non-Order Fees including VAT"],
                    _sub=it["Order Subsidies including VAT"] + it["Non-Order Subsidies including VAT"])
@@ -5804,6 +5812,21 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat
                                   "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum"),
                                   "صافي المبيعات": ("Net Proceeds", "sum"), "الرسوم": ("_fee", "sum"),
                                   "دعم": ("_sub", "sum"), "الصافي بعد الرسوم": ("Total", "sum")}).reset_index().rename(columns={"SKUs": "SKU"})
+    if alloc_order:                          # رسوم FBB (وإعانتها 20%) بتتسجل على مستوى الأوردر من غير SKU → نوزعها على أصناف الأوردر بالتساوي
+        ol = df[tt.isin(["order", "order_update"]) & (df["SKUs"].astype(str).str.strip() == "") & (df["Order Nr"].astype(str).str.strip() != "")]
+        if not ol.empty:
+            ol = ol.assign(_on=ol["Order Nr"].astype(str).str.strip())
+            o_tot = ol.groupby("_on")["Total"].sum()
+            o_sub = ol.groupby("_on")["Order Subsidies including VAT"].sum()
+            im = it.assign(_on=it["Order Nr"].astype(str).str.strip()).drop_duplicates(["_on", "Item Nr"])[["_on", "SKUs"]]
+            im = im[im["_on"].isin(o_tot.index)]
+            if not im.empty:
+                n = im.groupby("_on")["SKUs"].transform("size")
+                im = im.assign(_t=im["_on"].map(o_tot) / n, _s=im["_on"].map(o_sub) / n)
+                a = im.groupby("SKUs")[["_t", "_s"]].sum()
+                g["الصافي بعد الرسوم"] = g["الصافي بعد الرسوم"] + g["SKU"].map(a["_t"]).fillna(0.0)
+                g["دعم"] = g["دعم"] + g["SKU"].map(a["_s"]).fillna(0.0)
+                g["الرسوم"] = g["الرسوم"] + (g["SKU"].map(a["_t"]).fillna(0.0) - g["SKU"].map(a["_s"]).fillna(0.0))
     if vat and vat > 1:                      # بدون الضريبة: كل أرقام الدفتر (شاملة 15%) ÷ 1.15
         for _c in ("صافي المبيعات", "الرسوم", "دعم", "الصافي بعد الرسوم"):
             g[_c] = g[_c] / vat
@@ -6511,12 +6534,109 @@ def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all", vat=1
     if vat and vat > 1:                      # بدون الضريبة: العمولة والتوصيل ÷ 1.15 (نسبة العمولة بتبقى من سعر البيع الشامل)
         g["عمولة"] = g["عمولة"] / vat
         g["توصيل"] = g["توصيل"] / vat
+    # إعانة العمولة (Order Subsidies على صف الصنف، موجبة أو سالبة) — مش دايماً بتنزل، فبنعرض حالتها لكل صنف
+    _t = fin[fin["Transaction Type"].astype(str).str.strip().str.lower().isin(["order", "order_update"])]
+    _t = _t.assign(_sku=_t["SKUs"].astype(str).str.split(",").str[0].str.strip().str.upper(), _on=_t["Order Nr"].astype(str).str.strip(),
+                   _sb=pd.to_numeric(_t["Order Subsidies including VAT"], errors="coerce").fillna(0.0))
+    _isub = _t[_t["_sku"] != ""].groupby(["_on", "_sku"])["_sb"].sum()
+    _nsk = it.groupby(["order", "SKU"])["SKU"].transform("size")
+    it = it.assign(_sub=pd.Series([float(_isub.get((o, str(k).upper()), 0.0)) for o, k in zip(it["order"], it["SKU"])], index=it.index) / _nsk)
+    it["_hs"] = (it["_sub"] != 0).astype(float)
+    _gs = it.groupby("SKU").agg(_s=("_sub", "sum"), _h=("_hs", "sum")).reset_index()
+    g = g.merge(_gs, on="SKU", how="left")
+    g["_s"] = g["_s"].fillna(0.0)
+    g["_h"] = g["_h"].fillna(0.0)
     g = _com_finish(g)
+    _q = g["قطع"].where(g["قطع"] != 0)
+    _v = vat if (vat and vat > 1) else 1.0
+    g["إعانة عمولة/وحدة"] = (g["_s"] / _v / _q).fillna(0.0)
+    g["عمولة بعد الإعانة/وحدة"] = g["عمولة/وحدة"] - g["إعانة عمولة/وحدة"]
+    g["عمولة % بعد الإعانة"] = (g["عمولة بعد الإعانة/وحدة"] * g["قطع"] / g["مبيعات"].where(g["مبيعات"] != 0)).fillna(0) * 100
+    g["طلبات فيها إعانة %"] = (g["_h"] / g["قطع"].where(g["قطع"] != 0) * 100).fillna(0).round(0)
+    g["حالة الإعانة"] = ["مفيش إعانة على الصنف ده" if h == 0 else ("إعانة على كل الطلبات" if p >= 95 else "إعانة على بعض الطلبات بس")
+                         for h, p in zip(g["_h"], g["طلبات فيها إعانة %"])]
+    g = g.drop(columns=["_s", "_h"])
+    g["إجمالي الرسوم بعد الإعانة/وحدة"] = g["إجمالي الرسوم/وحدة"] - g["إعانة عمولة/وحدة"]
     if vat and vat > 1:                      # الصافي/وحدة = السعر ÷ 1.15 − الرسوم (بدون ضريبة)
         g["صافي/وحدة بعد الرسوم"] = g["متوسط سعر البيع"].fillna(0) / vat - g["إجمالي الرسوم/وحدة"]
+    g["صافي/وحدة بعد الرسوم والإعانة"] = g["صافي/وحدة بعد الرسوم"] + g["إعانة عمولة/وحدة"]
     g.attrs["unknown"] = unknown
     g.attrs["incomplete"] = incomplete
     return g
+
+
+def acct_noon_last(fin, d_from=None, d_to=None, orders=None, channel="all", vat=1.0):
+    """آخر أوردر لكل منتج في نون: سعر البيع الفعلي + العمولة + التوصيل + الإعانات اللي نزلت عليه (مش متوسط).
+    بيستخدم _noon_items (نفس منطق COM_API). الإعانة = Order Subsidies على صف الصنف (إعانة رسوم الإحالة غالباً)
+    + إعانة التوصيل على مستوى الأوردر (صف موجب من غير SKU) لو نزلت. لو لسه ماوصلتش بنكتب ⏳.
+    الأرقام (عمولة/توصيل/إعانات/صافي) ÷ vat؛ سعر البيع بيفضل سعر العميل الشامل."""
+    import pandas as pd
+    it = _noon_items(fin, orders)
+    if it.empty:
+        return pd.DataFrame()
+    if d_from or d_to:
+        d = pd.to_datetime(it["tdate"], errors="coerce").dt.date
+        keep = pd.Series(True, index=it.index)
+        if d_from:
+            keep &= d >= d_from
+        if d_to:
+            keep &= d <= d_to
+        it = it[keep]
+    it = it.assign(_cp=it["complete"].astype(bool))
+    if channel != "all":
+        if orders is None or orders.empty or "is_fulfilled_by_noon" not in orders.columns or "item_nr" not in orders.columns:
+            return pd.DataFrame()
+        it = it[it["model"] == ("FBN" if channel == "FBN" else "FBB")]
+    if it.empty:
+        return pd.DataFrame()
+    t = fin[fin["Transaction Type"].astype(str).str.strip().str.lower().isin(["order", "order_update"])].copy()
+    t["_sku"] = t["SKUs"].astype(str).str.split(",").str[0].str.strip().str.upper()
+    t["_on"] = t["Order Nr"].astype(str).str.strip()
+
+    def _n(c):
+        return pd.to_numeric(t[c], errors="coerce").fillna(0.0) if c in t.columns else 0.0
+    t["_sub"] = _n("Order Subsidies including VAT")
+    item_sub = t[(t["_sku"] != "") & (t["_sub"] != 0)].groupby(["_on", "_sku"])["_sub"].sum()
+    t["_fl"] = (_n("Fullfilment & Logistics Fees including VAT") + _n("Shipping Credits including VAT") + _n("Other Order Fees including VAT"))
+    item_fl = t[(t["_sku"] != "") & (t["Item Nr"].astype(str).str.strip() != "")].groupby(["_on", "_sku"])["_fl"].sum()
+    fee = (_n("Fullfilment & Logistics Fees including VAT") + _n("Shipping Credits including VAT")
+           + _n("Other Order Fees including VAT") + _n("Order Subsidies including VAT"))
+    og = t[(t["_sku"] == "") & (t["_on"] != "")]
+    order_credit = t.loc[og.index, "_sub"].groupby(og["_on"]).sum()          # إعانة التوصيل على مستوى الأوردر (على نفس سطر الرسم أو منفصلة)
+    og_fl = t.loc[og.index, "_fl"].groupby(og["_on"]).sum()                  # رسم التوصيل الإجمالي على مستوى الأوردر (قبل الإعانة)
+    n_sku = it.groupby(["order", "SKU"])["SKU"].transform("size")
+    n_ord = it[~it["own"]].groupby("order")["SKU"].size()
+    it = it.assign(
+        _isub=[float(item_sub.get((o, k), 0.0)) for o, k in zip(it["order"], it["SKU"])],
+        _ocr=[float(order_credit.get(o, 0.0)) for o in it["order"]])
+    it["_isub"] = it["_isub"] / n_sku
+    # التوصيل الإجمالي للصنف اللي رسمه على صفه: بدون أي إعانة (الإعانة بتنزل أحياناً على نفس السطر وأحياناً منفصلة)
+    gross = [(-float(item_fl.get((o, k), 0.0)) / float(n)) for o, k, n in zip(it["order"], it["SKU"], n_sku)]
+    it["dlv"] = [g if (own and g > 0) else d for g, own, d in zip(gross, it["own"], it["dlv"])]
+    it["_ocr"] = [(c / float(n_ord.get(o, 1))) if (not own and c != 0) else 0.0 for c, o, own in zip(it["_ocr"], it["order"], it["own"])]
+    it["dlv"] = [(-float(og_fl.get(o, 0.0)) / float(n_ord.get(o, 1))) if (not own and float(og_fl.get(o, 0.0)) < 0) else d
+                 for o, own, d in zip(it["order"], it["own"], it["dlv"])]
+    it = it.sort_values(["date", "order"])
+    it = it.sort_values(["_cp", "date", "order"])          # آخر أوردر مكتمل لو موجود، وإلا آخر أوردر ولو التوصيل لسه ماظهرش
+    last = it.groupby("SKU", as_index=False).tail(1)
+    last = last.assign(dlv=pd.to_numeric(last["dlv"], errors="coerce").fillna(0.0))
+    today = pd.to_datetime(fin["Transaction Date"], errors="coerce").max()
+    v = vat if (vat and vat > 1) else 1.0
+    out = []
+    for _, r in last.iterrows():
+        price, ref, dlv, sr, sd = float(r["net"]), float(r["ref"]), float(r["dlv"]), float(r["_isub"]), float(r["_ocr"])
+        age = (today - pd.to_datetime(r["date"], errors="coerce")).days if pd.notna(today) and pd.notna(pd.to_datetime(r["date"], errors="coerce")) else None
+        note = "⏳ التوصيل لسه ما نزلش في الدفتر" if not r["_cp"] else ""
+        if sr == 0 and sd == 0 and age is not None and age < 14 and not note:
+            note = "⏳ إعانة العمولة لسه ما نزلتش (بتنزل بعد ~10 أيام)"
+        out.append({"SKU": r["SKU"], "Partner SKU": r["Partner SKU"], "المنتج": r["المنتج"], "آخر أوردر": r["order"], "تاريخ الأوردر": r["date"],
+                    "النوع": r["model"] if isinstance(r["model"], str) else "",
+                    "سعر البيع": price, "نسبة العمولة %": (ref / v / price * 100) if price else 0.0,
+                    "عمولة": ref / v, "إعانة العمولة": sr / v, "عمولة بعد الإعانة": (ref - sr) / v,
+                    "العمولة % بعد الإعانة": ((ref - sr) / v / price * 100) if price else 0.0,
+                    "توصيل": dlv / v, "إعانة التوصيل": sd / v, "توصيل بعد الإعانة": (dlv - sd) / v,
+                    "صافي بعد الرسوم": (price - ref - dlv + sr + sd) / v, "ملاحظة": note})
+    return pd.DataFrame(out).sort_values("تاريخ الأوردر", ascending=False).reset_index(drop=True)
 
 
 def acct_ty_com(fin, d_from=None, d_to=None, delivery_per_unit=0.0):
@@ -6535,3 +6655,108 @@ def acct_ty_com(fin, d_from=None, d_to=None, delivery_per_unit=0.0):
     g["توصيل"] = g["قطع"] * abs(float(delivery_per_unit or 0.0))
     g["تانية"] = 0.0
     return _com_finish(g)
+
+
+def acct_noon_split(fin, orders=None, d_from=None, d_to=None):
+    """نون مقسومة FBN / FBB لكل SKU، وكل رقم مطابق للدفتر (مجموع «الصافي بعد الرسوم» = مجموع Total لصفوف order/order_update).
+    كل الأرقام شاملة الضريبة (زي الدفتر). كل صف في الدفتر بيتنسب لنوع التنفيذ:
+      • صف الصنف: النوع من is_fulfilled_by_noon في تاب الأوردرات (بالـ Item Nr أو بالأوردر)، وإلا: لو الأوردر عليه رسم من غير SKU → FBB، وإلا لو على الصف رسم توصيل → FBN.
+      • رسوم الأوردر (من غير SKU: «رسوم الشحن المباشر» + إعانتها 20%): بتتوزع بالتساوي على أصناف الأوردر (FBB أولاً لو فيه).
+      • Order Subsidies على صف الصنف = إعانة رسوم الإحالة (موجبة أو سالبة)، إلا لو = 20% من رسم التوصيل على نفس الصف فهي إعانة توصيل.
+    بيرجع: Store, SKU, Partner SKU, المنتج, النوع, مبيع, مرتجع, مبيعات (صافي), عمولة, إعانة عمولة, توصيل, إعانة توصيل, رسوم تانية, الصافي بعد الرسوم."""
+    import pandas as pd
+    if fin is None or fin.empty or "Total" not in fin.columns:
+        return pd.DataFrame()
+    t = fin[fin["Transaction Type"].astype(str).str.strip().str.lower().isin(["order", "order_update"])].copy()
+    if t.empty:
+        return pd.DataFrame()
+
+    def num(c):
+        return pd.to_numeric(t[c], errors="coerce").fillna(0.0) if c in t.columns else pd.Series(0.0, index=t.index)
+    t["_store"] = t["Store"].astype(str).str.strip() if "Store" in t.columns else ""
+    t["_on"] = t["Order Nr"].astype(str).str.strip()
+    t["_item"] = t["Item Nr"].astype(str).str.strip()
+    t["_sku"] = t["SKUs"].astype(str).str.split(",").str[0].str.strip().str.upper()
+    t["_net"], t["_ref"] = num("Net Proceeds"), num("Referral Fee including VAT")
+    t["_fl"] = num("Fullfilment & Logistics Fees including VAT") + num("Shipping Credits including VAT")
+    t["_sub"], t["_tot"] = num("Order Subsidies including VAT"), num("Total")
+    t["_oth"] = t["_tot"] - t["_net"] - t["_ref"] - t["_fl"] - t["_sub"]
+    t["_key"] = t["_store"] + "|" + t["_on"]
+    t["_date"] = pd.to_datetime(t["Transaction Date"], errors="coerce").dt.date if "Transaction Date" in t.columns else None
+    isitem = (t["_sku"] != "") & (t["_item"] != "")
+    islvl = (t["_sku"] == "") & (t["_on"] != "")
+    # نوع التنفيذ من تاب الأوردرات
+    im = om = None
+    if orders is not None and not orders.empty and "item_nr" in orders.columns and "order_nr" in orders.columns and "is_fulfilled_by_noon" in orders.columns:
+        o_ = orders.loc[:, ~orders.columns.duplicated()].copy()
+        o_["_on"] = o_["order_nr"].astype(str).str.strip()
+        o_["_item"] = o_["item_nr"].astype(str).str.strip()
+        ok = (o_["Store"].astype(str).str.strip() + "|" + o_["_on"]) if "Store" in o_.columns else o_["_on"]
+        fb = o_["is_fulfilled_by_noon"].astype(str).str.strip().str.lower().eq("true")
+        im = fb.groupby(o_["_item"]).first()
+        nun = fb.groupby(ok).nunique()
+        om = fb.groupby(ok).first()[nun == 1]
+    lvl_orders = set(t.loc[islvl & ((t["_fl"] != 0) | (t["_sub"] != 0)), "_key"])
+    ch = pd.Series("غير معروف", index=t.index, dtype=object)
+    if im is not None:
+        m1 = t["_item"].map(im)
+        m2 = t["_key"].map(om) if om is not None else pd.Series([None] * len(t), index=t.index)
+        fbv = m1.where(m1.notna(), m2)
+        known = fbv.notna()
+        ch[known] = fbv[known].map(lambda v: "FBN" if bool(v) else "FBB")
+    unk = isitem & (ch == "غير معروف")
+    ch[unk & t["_key"].isin(lvl_orders)] = "FBB"
+    ch[unk & (ch == "غير معروف") & (t["_fl"] < 0)] = "FBN"
+    t["_ch"] = ch
+    # إعانة الصنف: توصيل (20% من الرسم على نفس الصف) ولا إحالة
+    dsub = isitem & (t["_fl"] < 0) & (t["_sub"] > 0) & ((t["_sub"] - (-t["_fl"]) * 0.2).abs() < 0.02)
+    t["_dsub"] = t["_sub"].where(dsub, 0.0)
+    t["_csub"] = t["_sub"].where(~dsub, 0.0)
+    # صفوف الصنف داخل الفترة
+    inp = pd.Series(True, index=t.index)
+    if d_from:
+        inp &= t["_date"] >= d_from
+    if d_to:
+        inp &= t["_date"] <= d_to
+    it = t[isitem & inp].copy()
+    it["_sold"] = (it["_net"] > 0).astype(int)      # زي إكسيل المحاسب: أي صف موجب = قطعة اتباعت (حتى لو order_update من غير order)
+    it["_ret"] = ((it["Transaction Type"].astype(str).str.lower() == "order_update") & (it["_net"] < 0)).astype(int)
+    it["_dlv"] = -it["_fl"]
+    it["_cm"] = -it["_ref"]
+    it["_ds"] = it["_dsub"]
+    it["_cs"] = it["_csub"]
+    it["_ot"] = it["_oth"]
+    # رسوم الأوردر من غير SKU → توزيع على أصناف الأوردر (العضوية من الدفتر كله مش الفترة بس)
+    lv = t[islvl & inp & ((t["_fl"] != 0) | (t["_sub"] != 0) | (t["_oth"] != 0))]
+    parts = []
+    if not lv.empty:
+        members = t[isitem].drop_duplicates(["_key", "_item"])[["_key", "_item", "_sku", "Partner SKUs", "Title", "_ch"]]
+        agg = lv.groupby("_key").agg(_dlv=("_fl", lambda s: -s.sum()), _ds=("_sub", "sum"), _ot=("_oth", "sum"))
+        members = members[members["_key"].isin(agg.index)]
+        has_fbb = members.groupby("_key")["_ch"].transform(lambda s: (s == "FBB").any())
+        members = members[(~has_fbb) | (members["_ch"] == "FBB")]
+        n = members.groupby("_key")["_item"].transform("size")
+        for c in ("_dlv", "_ds", "_ot"):
+            members[c] = members["_key"].map(agg[c]) / n
+        members["_store"] = members["_key"].str.split("|").str[0]
+        parts = [members]
+    num_cols = ["مبيع", "مرتجع", "مبيعات (صافي)", "عمولة", "إعانة عمولة", "توصيل", "إعانة توصيل", "رسوم تانية"]
+    base = it.rename(columns={"Partner SKUs": "Partner SKU", "Title": "المنتج", "_sold": "مبيع", "_ret": "مرتجع", "_net": "مبيعات (صافي)",
+                              "_cm": "عمولة", "_cs": "إعانة عمولة", "_dlv": "توصيل", "_ds": "إعانة توصيل", "_ot": "رسوم تانية"})
+    frames = [base[["_store", "_sku", "_ch", "Partner SKU", "المنتج"] + num_cols]]
+    if parts:
+        m = parts[0].rename(columns={"Partners SKUs": "Partner SKU", "Partner SKUs": "Partner SKU", "Title": "المنتج", "_dlv": "توصيل", "_ds": "إعانة توصيل", "_ot": "رسوم تانية"})
+        for c in ("مبيع", "مرتجع", "مبيعات (صافي)", "عمولة", "إعانة عمولة"):
+            m[c] = 0.0
+        frames.append(m[["_store", "_sku", "_ch", "Partner SKU", "المنتج"] + num_cols])
+    allf = pd.concat(frames, ignore_index=True)
+    gk = ["_store", "_sku", "_ch"]
+    a = allf.groupby(gk).agg(**{"Partner SKU": ("Partner SKU", "first"), "المنتج": ("المنتج", "first"), **{c: (c, "sum") for c in num_cols}})
+    a = a.reset_index().rename(columns={"_store": "Store", "_sku": "SKU", "_ch": "النوع"})
+    unal = 0.0                                # رسوم أوردرات مالهاش أي صنف في الدفتر (مش ممكن تتنسب لمنتج)
+    if not lv.empty:
+        unal = float(lv.loc[~lv["_key"].isin(set(t.loc[isitem, "_key"])), "_tot"].sum())
+    a["الصافي بعد الرسوم"] = a["مبيعات (صافي)"] - a["عمولة"] - a["توصيل"] + a["إعانة عمولة"] + a["إعانة توصيل"] + a["رسوم تانية"]
+    a = a.sort_values("مبيع", ascending=False).reset_index(drop=True)
+    a.attrs["unallocated"] = unal
+    return a
