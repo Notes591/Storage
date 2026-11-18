@@ -9191,11 +9191,12 @@ if st.session_state["nav_page"] == "tab_accts":
                 if _qs.strip():
                     _qq = _qs.strip().lower()
                     _cdf = _cdf[_cdf.apply(lambda r: _qq in f"{r[_idc]} {r.get('SKU', '')} {r['المنتج']}".lower(), axis=1)]
-                _cols = ["📷", "المنتج", _idc] + ([c for c in (_extra or []) if c in _cdf.columns]) + ["قطع", "متوسط سعر البيع", "عمولة %", "عمولة/وحدة", "توصيل/وحدة",
-                         "رسوم تانية/وحدة", "إجمالي الرسوم/وحدة", "إجمالي الرسوم %", "صافي/وحدة بعد الرسوم"]
-                _cfg = {c: st.column_config.NumberColumn(c, format="%.2f") for c in _cols if c in ("متوسط سعر البيع", "عمولة/وحدة", "توصيل/وحدة", "رسوم تانية/وحدة", "إجمالي الرسوم/وحدة", "صافي/وحدة بعد الرسوم")}
+                _cols = ["📷", "المنتج", _idc] + ([c for c in (_extra or []) if c in _cdf.columns]) + ["قطع", "متوسط سعر البيع", "عمولة %", "عمولة/وحدة"] + [c for c in ("إعانة عمولة/وحدة", "عمولة بعد الإعانة/وحدة", "عمولة % بعد الإعانة", "حالة الإعانة") if c in _cdf.columns] + ["توصيل/وحدة",
+                         "رسوم تانية/وحدة", "إجمالي الرسوم/وحدة", "إجمالي الرسوم %", "صافي/وحدة بعد الرسوم"] + [c for c in ("صافي/وحدة بعد الرسوم والإعانة",) if c in _cdf.columns]
+                _cfg = {c: st.column_config.NumberColumn(c, format="%.2f") for c in _cols if c in ("متوسط سعر البيع", "عمولة/وحدة", "توصيل/وحدة", "رسوم تانية/وحدة", "إجمالي الرسوم/وحدة", "صافي/وحدة بعد الرسوم", "إعانة عمولة/وحدة", "عمولة بعد الإعانة/وحدة", "صافي/وحدة بعد الرسوم والإعانة")}
                 _cfg["قطع"] = st.column_config.NumberColumn("قطع", format="%.0f")
                 _cfg["عمولة %"] = st.column_config.NumberColumn("عمولة %", format="%.1f")
+                _cfg["عمولة % بعد الإعانة"] = st.column_config.NumberColumn("عمولة % بعد الإعانة", format="%.1f")
                 _cfg["إجمالي الرسوم %"] = st.column_config.NumberColumn("إجمالي الرسوم %", format="%.1f")
                 try:
                     _cfg["📷"] = st.column_config.ImageColumn(" ", width="small")
@@ -9689,7 +9690,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         st.caption((f"الرصيد = المستحق (شامل الضريبة {_k['earned']:,.0f}) − المدفوع = {_bal:,.0f} " if _vk > 1 else f"الرصيد = المستحق − المدفوع = {_bal:,.0f} ") +
                                    f"({'مدفوع أكتر من المستحق في الفترة دي — غالباً رصيد من قبل 1/10' if _bal < 0 else 'لسه مستحق لك'}). "
                                    f"ملحوظة: بيان الفترة من تاريخ أول كشف تم سحبه فقط.")
-                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "💹 ربحية المنتجات", "🏷️ العمولة والتوصيل", "🧾 الكشوف والدفعات", "🧮 تسوية الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
+                        _sub = st.radio("العرض", ["📊 ملخص زي نون", "💹 ربحية المنتجات", "🆕 آخر أوردر", "🏷️ العمولة والتوصيل", "🧾 الكشوف والدفعات", "🧮 تسوية الكشوف والدفعات", "📦 حسب الصنف (SKU)", "📅 يومي", "⏳ اتسلّمت ولسه ماظهرتش", "📄 كل الصفوف"],
                                         horizontal=True, key="acct_noon_view", label_visibility="collapsed")
                         if _sub.startswith("📊"):
                             _stm_all = _S["statements"]
@@ -9739,7 +9740,7 @@ if st.session_state["nav_page"] == "tab_accts":
                                 return None
                             _vat_p = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (العمولة والتوصيل والصافي ÷ 1.15)", value=True, key="acct_noon_p_vat",
                                                                   help="دفتر نون بيعرض كل الأرقام شاملة الضريبة. التفعيل بيقسمها على 1.15 عشان الربح يتحسب بدون الضريبة.") else 1.0
-                            _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None, vat=_vat_p)
+                            _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None, vat=_vat_p, alloc_order=True)
                             if _pf.empty:
                                 st.info("مفيش مبيعات في الفترة.")
                             else:
@@ -9800,6 +9801,31 @@ if st.session_state["nav_page"] == "tab_accts":
                                            "التكلفة = تكلفة الوحدة × (مبيع − مرتجع) (على افتراض إن المرتجع رجع للمخزون). رسوم الشحن المباشر ورسوم الإعلانات في الكشف مش داخلة هنا لأنها مش على صنف.")
                                 st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_sh[[c for c in _cols if c not in ("📷",)]]), file_name=f"noon_profit_{file_timestamp()}.xlsx",
                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_p_dl")
+                        elif _sub.startswith("🆕"):
+                            _lch = st.radio("نوع التنفيذ", ["الكل", "📦 تخزين نون (FBN)", "🏠 عادي (FBP / FBB)"], horizontal=True, key="acct_noon_last_ch")
+                            _lkey = "FBN" if "FBN" in _lch else ("FBP" if "FBP" in _lch else "all")
+                            _vat_l = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (العمولة والتوصيل والإعانات والصافي)", value=True, key="acct_noon_last_vat",
+                                                                  help="سعر البيع بيفضل سعر العميل الشامل. الباقي ÷ 1.15.") else 1.0
+                            _nl = calc.acct_noon_last(_f, _df_from, _df_to, _ord_all, _lkey, vat=_vat_l)
+                            if _lkey != "all" and (_ord_all is None or _ord_all.empty):
+                                st.warning("تاب Noon_Orders_API فاضي — مفيش طريقة نفصل بيها نوع التنفيذ.")
+                            elif _nl is None or _nl.empty:
+                                st.info("مفيش أوردرات في الفترة دي.")
+                            else:
+                                _lq = st.text_input("🔍 بحث (SKU / اسم / رقم أوردر)", key="acct_noon_last_q")
+                                if _lq.strip():
+                                    _nl = _nl[_nl.astype(str).apply(lambda r: _lq.strip().lower() in " ".join(r).lower(), axis=1)]
+                                _lc = ["المنتج", "Partner SKU", "آخر أوردر", "تاريخ الأوردر", "النوع", "سعر البيع", "نسبة العمولة %", "العمولة % بعد الإعانة", "عمولة",
+                                       "إعانة العمولة", "عمولة بعد الإعانة", "توصيل", "إعانة التوصيل", "توصيل بعد الإعانة", "صافي بعد الرسوم", "ملاحظة"]
+                                _lcfg = {c: st.column_config.NumberColumn(c, format="%.2f") for c in ("سعر البيع", "نسبة العمولة %", "العمولة % بعد الإعانة", "عمولة", "إعانة العمولة",
+                                                                                                   "عمولة بعد الإعانة", "توصيل", "إعانة التوصيل", "توصيل بعد الإعانة", "صافي بعد الرسوم")}
+                                st.dataframe(_nl[_lc], use_container_width=True, hide_index=True, column_config=_lcfg)
+                                st.caption("كل صف = آخر أوردر للمنتج في الفترة، بأرقامه الفعلية (مش متوسط): سعر البيع الفعلي، العمولة، التوصيل، والإعانات اللي نزلت عليه. "
+                                           "إعانة العمولة (5% من السعر) بتنزل بعد حوالي 10 أيام، فالأوردرات الجديدة بتظهر ⏳ ولسه بدونها. "
+                                           + ("الأرقام بدون ضريبة 15% (سعر البيع شامل الضريبة)." if _vat_l > 1 else "الأرقام شاملة الضريبة زي الدفتر.")
+                                           + " الصافي بعد الرسوم = سعر البيع − العمولة − التوصيل + الإعانات (قبل التكلفة والإعلانات).")
+                                st.download_button("⬇️ تحميل (Excel)", data=to_excel(_nl[_lc]), file_name=f"noon_last_order_{file_timestamp()}.xlsx",
+                                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_last_dl")
                         elif _sub.startswith("🏷️"):
                             _nch = st.radio("نوع التنفيذ", ["الكل", "📦 تخزين نون (FBN)", "🏠 عادي (FBP / FBB)"], horizontal=True, key="acct_noon_com_ch")
                             _nkey = "FBN" if "FBN" in _nch else ("FBP" if "FBP" in _nch else "all")
@@ -9817,7 +9843,9 @@ if st.session_state["nav_page"] == "tab_accts":
                                            + ("— بدون ضريبة 15% (مقسومة على 1.15) " if _vat_c > 1 else "— شاملة الضريبة زي الدفتر ")
                                            +
                                            "ولو الصنف مالوش رسوم على صفه (الغالب في FBB) بنقسم رسوم الأوردر على عدد أصناف الأوردر. FBN/FBB بيتحدد من is_fulfilled_by_noon في الأوردرات. "
-                                           "والمتوسط على الفترة المختارة. «متوسط سعر البيع» شامل الضريبة (سعر العميل).", ["Partner SKU"])
+                                           "والمتوسط على الفترة المختارة. «متوسط سعر البيع» شامل الضريبة (سعر العميل). "
+                                           "إعانة العمولة (إعانة رسوم الإحالة ≈ 5% من السعر) مش بتنزل على كل الصنف وكل الطلبات — عمود «حالة الإعانة» بيوضح: على كل الطلبات / على بعضها / مفيش، "
+                                           "والأرقام «بعد الإعانة» محسوبة على اللي نزل فعلاً بس (الإعانة بتتأخر حوالي 10 أيام).", ["Partner SKU"])
                         elif _sub.startswith("🧮"):
                             if _rc is None or _rc.empty:
                                 st.info("مفيش كشوف.")
