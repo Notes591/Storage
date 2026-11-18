@@ -9208,6 +9208,14 @@ if st.session_state["nav_page"] == "tab_accts":
                                    file_name=f"{_key}_{file_timestamp()}.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=_key + "_dl")
 
+            # حفظ الفلاتر (بحث / اختيارات / تشيك بوكس) لما تنقل بين التابات — ستريمليت بيمسح قيمة أي ويدجت مش ظاهر، فبنعيد تثبيتها كل مرة
+            for _k in list(st.session_state.keys()):
+                if isinstance(_k, str) and _k.startswith("acct_") and not _k.endswith("_dl"):
+                    try:
+                        st.session_state[_k] = st.session_state[_k]
+                    except Exception:
+                        pass
+
             def _acct_load(tab):
                 ws = _acct_ws(tab)
                 if ws is None:
