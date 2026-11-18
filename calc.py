@@ -6777,3 +6777,18 @@ def acct_noon_outside(fin, d_from=None, d_to=None, pf=None, vat=1.0):
     t = df[df["Transaction Type"].astype(str).str.strip().str.lower().isin(["order", "order_update", "statement_fee"])]
     tot = pd.to_numeric(t["Total"], errors="coerce").fillna(0.0).sum() / (vat if vat and vat > 1 else 1.0)
     return float(tot - (pf["الصافي بعد الرسوم"].sum() if not pf.empty else 0.0))
+
+
+def acct_noon_statement_ads(fin, d_from=None, d_to=None, vat=1.0):
+    """إعلانات نون اللي بتتخصم من كشف الحساب (صفوف statement_fee) في الفترة، بدون الضريبة لو vat>1. بترجع رقم (سالب غالباً)."""
+    import pandas as pd
+    if fin is None or fin.empty:
+        return 0.0
+    df = fin.copy()
+    df["_d"] = pd.to_datetime(df["Transaction Date"], errors="coerce").dt.date
+    if d_from:
+        df = df[df["_d"] >= d_from]
+    if d_to:
+        df = df[df["_d"] <= d_to]
+    t = df[df["Transaction Type"].astype(str).str.strip().str.lower() == "statement_fee"]
+    return float(pd.to_numeric(t["Total"], errors="coerce").fillna(0.0).sum() / (vat if vat and vat > 1 else 1.0))
