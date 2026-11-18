@@ -6760,3 +6760,20 @@ def acct_noon_split(fin, orders=None, d_from=None, d_to=None):
     a = a.sort_values("مبيع", ascending=False).reset_index(drop=True)
     a.attrs["unallocated"] = unal
     return a
+
+
+def acct_noon_outside(fin, d_from=None, d_to=None, pf=None, vat=1.0):
+    """رسوم وإعلانات نون اللي برا ربحية المنتجات: صفوف statement_fee (إعلانات/اشتراكات) + رسوم أوردرات مش مربوطة بصنف.
+    = (إجمالي Total لصفوف order/order_update/statement_fee في الفترة) ÷ vat − صافي كل المنتجات في pf. بترجع رقم (سالب غالباً)."""
+    import pandas as pd
+    if fin is None or fin.empty or pf is None:
+        return 0.0
+    df = fin.copy()
+    df["_d"] = pd.to_datetime(df["Transaction Date"], errors="coerce").dt.date
+    if d_from:
+        df = df[df["_d"] >= d_from]
+    if d_to:
+        df = df[df["_d"] <= d_to]
+    t = df[df["Transaction Type"].astype(str).str.strip().str.lower().isin(["order", "order_update", "statement_fee"])]
+    tot = pd.to_numeric(t["Total"], errors="coerce").fillna(0.0).sum() / (vat if vat and vat > 1 else 1.0)
+    return float(tot - (pf["الصافي بعد الرسوم"].sum() if not pf.empty else 0.0))
