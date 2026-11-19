@@ -3,3 +3,6 @@ gspread
 oauth2client
 pandas
 openpyxl
+reportlab
+arabic-reshaper
+python-bidi
