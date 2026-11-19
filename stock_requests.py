@@ -593,6 +593,7 @@ TAB_LOCK_OPTIONS = [
     ("tab15",     "🗓️ تحليل الجدولة | Schedule Analysis"),
     ("tab16",     "📦 مخزون بدون بيع | No Sales"),
     ("tab_accts", "🏦 حسابات المتاجر | Store Accounts"),
+    ("tab_fin", "📒 المالية | Finance"),
     ("tab_upload", "📤 رفع ملف | Upload Files"),
 ]
 TAB_LOCK_LABELS = dict(TAB_LOCK_OPTIONS)
@@ -4701,6 +4702,7 @@ NAV_ITEMS = [
     ("tab16",    "🗂️", "مخزون بدون بيع | No Sales"),
     ("tab_ads",  "📢", "الإعلانات | Ads"),
     ("tab_accts", "🏦", "حسابات المتاجر | Store Accounts"),
+    ("tab_fin", "📒", "المالية | Finance"),
     ("tab_upload", "📤", "رفع ملف | Upload Files"),
 ]
 NAV_KEY_LABELS = {k: lbl for k, _i, lbl in NAV_ITEMS}
@@ -4864,6 +4866,7 @@ tab_contracts = st.container(key="navpanel_tab_contracts")
 tab16    = st.container(key="navpanel_tab16")
 tab_ads  = st.container(key="navpanel_tab_ads")
 tab_accts = st.container(key="navpanel_tab_accts")
+tab_fin = st.container(key="navpanel_tab_fin")
 tab_upload = st.container(key="navpanel_tab_upload")
 
 for _key, _i, _l in NAV_ITEMS:
@@ -9159,6 +9162,19 @@ if st.session_state["nav_page"] == "tab_ads":
                 _render_ads_performance_tab_amazon()
             with _ty_ads_subtab:
                 _render_ads_performance_tab_trendyol()
+
+
+# ═══════════════ 📒 المالية | Finance ═══════════════
+# ميزان المراجعة + جرد المخزون من ملف المالية — بيتخزّن في ملف جوجل شيت منفصل «Finance» (finance_tb.py).
+if st.session_state["nav_page"] == "tab_fin":
+    with tab_fin:
+        if _tab_gate("tab_fin", "📒 المالية | Finance"):
+            try:
+                import finance_tb
+            except Exception as _fe:
+                st.error(f"ملف finance_tb.py مش موجود جنب stock_requests.py: {str(_fe)[:150]}")
+            else:
+                finance_tb.render(st, client, pd)
 
 
 # ═══════════════ 🏦 حسابات المتاجر | Store Accounts ═══════════════
