@@ -9747,7 +9747,7 @@ if st.session_state["nav_page"] == "tab_accts":
                                 return None
                             _vat_p = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (العمولة والتوصيل والصافي ÷ 1.15)", value=True, key="acct_noon_p_vat",
                                                                   help="دفتر نون بيعرض كل الأرقام شاملة الضريبة. التفعيل بيقسمها على 1.15 عشان الربح يتحسب بدون الضريبة.") else 1.0
-                            _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None, vat=_vat_p, alloc_order=True)
+                            _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None, vat=_vat_p, alloc_order=True, order_items=_ord_all)
                             if _pf.empty:
                                 st.info("مفيش مبيعات في الفترة.")
                             else:
@@ -9769,7 +9769,7 @@ if st.session_state["nav_page"] == "tab_accts":
                                 _oth = _out - _ads_st
                                 _pc2 = st.columns(3)
                                 _pc2[0].metric("📣 إعلانات نون (من كشف الحساب)", f"{_ads_st:,.0f}", help="صفوف statement_fee — نون بتخصمها من الكشف مباشرة ومش مربوطة بمنتج. دي الإعلانات الحقيقية ومحسوبة مرة واحدة.")
-                                _pc2[1].metric("🧾 رسوم أوردرات مش متوزعة", f"{_oth:,.0f}", help="رسوم على مستوى الأوردر أوردرها مش موجود في Noon_Orders_API فمقدرناش نوزعها على منتج")
+                                _pc2[1].metric("🧾 رسوم أوردرات مش متوزعة", f"{_oth:,.0f}", help="رسوم على مستوى الأوردر، وأوردرها مالوش أي صنف لا في الدفتر ولا في Noon_Orders_API فمقدرناش نوزعها على منتج")
                                 _pc2[2].metric("✅ الربح بعد كل الرسوم" if _tl + _out >= 0 else "🔻 الخسارة بعد كل الرسوم", f"{_tl + _out:,.0f}", help="ربح المنتجات + مجموع برا المنتجات — ده اللي بيقارن بإكسيل المحاسب")
                                 _nm = int(_pf["تكلفة ناقصة"].sum())
                                 if _nm:

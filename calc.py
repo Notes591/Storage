@@ -5785,7 +5785,7 @@ def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):
     return L, total
 
 
-def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat=1.0, alloc_order=False):
+def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat=1.0, alloc_order=False, order_items=None):
     """ربحية كل منتج (SKU) في الفترة، من الأكتر كمية للأقل.
     cost_fn(sku_up, psku_up) -> تكلفة الوحدة أو None · ads_fn(sku_up, psku_up) -> إنفاق إعلانات أو None.
     الصافي بعد الرسوم = عمود Total (صافي المبيعات + العمولة + الشحن + رسوم أخرى + الدعم، بعد خصم المرتجع).
@@ -5820,10 +5820,24 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat
             o_sub = ol.groupby("_on")["Order Subsidies including VAT"].sum()
             im = it.assign(_on=it["Order Nr"].astype(str).str.strip()).drop_duplicates(["_on", "Item Nr"])[["_on", "SKUs"]]
             im = im[im["_on"].isin(o_tot.index)]
+            if order_items is not None and not order_items.empty and {"order_nr", "sku"} <= set(order_items.columns):
+                # أوردرات رسومها وصلت من غير أي صف صنف في الدفتر (الأوردر اتباع قبل الفترة مثلاً) → نجيب أصنافها من Noon_Orders_API
+                _miss = set(o_tot.index) - set(im["_on"])
+                if _miss:
+                    _oi = order_items.assign(_on=order_items["order_nr"].astype(str).str.strip(), SKUs=order_items["sku"].astype(str).str.strip())
+                    _oi = _oi[_oi["_on"].isin(_miss) & (_oi["SKUs"] != "")]
+                    if "item_nr" in _oi.columns:
+                        _oi = _oi.drop_duplicates(["_on", "item_nr"])
+                    if not _oi.empty:
+                        im = pd.concat([im, _oi[["_on", "SKUs"]]], ignore_index=True)
             if not im.empty:
                 n = im.groupby("_on")["SKUs"].transform("size")
                 im = im.assign(_t=im["_on"].map(o_tot) / n, _s=im["_on"].map(o_sub) / n)
                 a = im.groupby("SKUs")[["_t", "_s"]].sum()
+                _newsku = [s for s in a.index if s not in set(g["SKU"])]
+                if _newsku:                  # صنف ماتباعش في الفترة بس عليه رسوم أوردر → نضيفه بصف رسوم بس
+                    g = pd.concat([g, pd.DataFrame({"SKU": _newsku, "المنتج": "", "Partner SKU": "", "مبيع": 0, "مرتجع": 0,
+                                                    "صافي المبيعات": 0.0, "الرسوم": 0.0, "دعم": 0.0, "الصافي بعد الرسوم": 0.0})], ignore_index=True)
                 g["الصافي بعد الرسوم"] = g["الصافي بعد الرسوم"] + g["SKU"].map(a["_t"]).fillna(0.0)
                 g["دعم"] = g["دعم"] + g["SKU"].map(a["_s"]).fillna(0.0)
                 g["الرسوم"] = g["الرسوم"] + (g["SKU"].map(a["_t"]).fillna(0.0) - g["SKU"].map(a["_s"]).fillna(0.0))
@@ -5835,7 +5849,7 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat
     for _, r in g.iterrows():
         su, pu = str(r["SKU"]).strip().upper(), str(r["Partner SKU"]).strip().upper()
         c = cost_fn(su, pu) if cost_fn else None
-        missing.append(c is None)
+        missing.append(c is None and r["صافي الكمية"] != 0)   # صنف كميته الصافية صفر (رسوم بس) مش محتاج تكلفة
         costs.append(float(c) if c is not None else 0.0)
         a = ads_fn(su, pu) if ads_fn else None
         ads.append(float(a) if a else 0.0)
