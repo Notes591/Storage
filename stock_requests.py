@@ -421,18 +421,15 @@ else:
     _LIVE_TAB = ""
 
 # ══ كاش ══
-def _read_big_sheet(sheet, chunk=15000):
-    """قراءة التابات الكبيرة (مئات الألوف من الصفوف) على دفعات، وكل دفعة بتتضغط فورًا —
-    بدل ما get_all_values تنزّل كل الشيت مرة واحدة وتكسر الذاكرة (ده اللي كان بيوقّع التطبيق)."""
+def _iter_sheet_chunks(sheet, chunk=15000):
+    """بيقرا الشيت على دفعات (كل دفعة قايمة صفوف مضغوطة). أول دفعة فيها صف العناوين."""
     from gspread.utils import rowcol_to_a1
     import gc
     ncol = max(1, getattr(sheet, "col_count", 1))
     last = rowcol_to_a1(1, ncol).rstrip("0123456789")
     memo = {}
     sd = memo.setdefault
-    out = []
-    start = 1
-    total = sheet.row_count
+    start, total = 1, sheet.row_count
     while start <= total:
         end = min(start + chunk - 1, total)
         _gs_throttle(0.6)
@@ -441,13 +438,42 @@ def _read_big_sheet(sheet, chunk=15000):
             if start > 1:
                 break
             part = []
-        out.extend([[sd(c, c) for c in r] for r in part])
+        rows = [[sd(c, c) for c in r] for r in part]
         del part
         gc.collect()
+        yield rows
         start = end + 1
+
+
+def _read_big_sheet(sheet, chunk=15000):
+    """قراءة التابات الكبيرة على دفعات بدل get_all_values (اللي كانت بتكسر الذاكرة)."""
+    out = []
+    for rows in _iter_sheet_chunks(sheet, chunk):
+        out.extend(rows)
     while out and not any(str(c).strip() for c in out[-1]):
         out.pop()
     return out
+
+
+def _big_df(sheet, builder_cols=None):
+    """DataFrame مباشرة من الشيت الكبير: كل دفعة بتتحوّل لجدول وتتمسح، فمفيش نسخة خام كاملة في الذاكرة."""
+    import gc
+    hdr, parts = None, []
+    for rows in _iter_sheet_chunks(sheet):
+        if hdr is None:
+            if not rows:
+                return pd.DataFrame()
+            hdr, rows = rows[0], rows[1:]
+        if rows:
+            parts.append(calc.acct_rows_to_df([hdr] + rows))
+        del rows
+        gc.collect()
+    if not parts:
+        return pd.DataFrame()
+    df = pd.concat(parts, ignore_index=True)
+    del parts
+    gc.collect()
+    return df
 
 
 def safe_get_all_values(sheet, retries=6, delay=1):
@@ -541,6 +567,7 @@ def get_cached(sheet, force=False):
 
 def clear_cache(sheet):
     _SH["data"].pop(sheet.title, None)
+    _SH["memo"].pop("acct_df_" + sheet.title, None)
 
 def _ws_title(title):
     """worksheet بالاسم من قايمة التابات المحفوظة على السيرفر — بدل ss.worksheet() اللي كل نداء ليه بيعمل طلب لجوجل
@@ -9270,6 +9297,23 @@ if st.session_state["nav_page"] == "tab_accts":
                 ws = _acct_ws(tab)
                 if ws is None:
                     return None
+                if getattr(ws, "row_count", 0) > 40000:
+                    # تاب كبير: بنبني الجدول على دفعات ونحتفظ بالجدول بس (من غير النسخة الخام) — ده اللي كان بيوقّع التطبيق
+                    key = "acct_df_" + tab
+                    m = _SH["memo"].get(key)
+                    if m is not None and time.time() - m[0] <= SHEET_TTL:
+                        return m[1]
+                    with _SH["rd"]:
+                        m = _SH["memo"].get(key)
+                        if m is not None and time.time() - m[0] <= SHEET_TTL:
+                            return m[1]
+                        try:
+                            df = _big_df(ws)
+                        except Exception:
+                            df = calc.acct_rows_to_df(get_cached(ws))
+                        _SH["data"].pop(tab, None)
+                        _SH["memo"][key] = (time.time(), df)
+                        return df
                 return _memo_from_sheet(ws, "acct_df_" + tab, calc.acct_rows_to_df)
 
             def _acct_fmt(df, cols=None):
@@ -9688,14 +9732,12 @@ if st.session_state["nav_page"] == "tab_accts":
                 _ord_all = _acct_load("Noon_Orders_API")
                 if _fin_all is not None and not _fin_all.empty and st.checkbox("🔧 تشخيص البيانات المقروءة من الشيت", value=False, key="acct_noon_diag"):
                     if True:
-                        _rw = get_cached(_acct_ws("Noon_Finance_API"))
-                        st.caption(f"صفوف الشيت: {len(_rw) - 1:,} · أعمدة: {len(_rw[0]) if _rw else 0}")
+                        st.caption(f"صفوف الدفتر: {len(_fin_all):,} · أعمدة: {len(_fin_all.columns)} · أوردرات: {0 if _ord_all is None else len(_ord_all):,}")
                         _dg = []
                         for _c in calc.ACCT_FIN_NUM:
                             if _c in _fin_all.columns:
-                                _ix = _rw[0].index(_c) if _c in _rw[0] else -1
-                                _smp = [str(r[_ix]) for r in _rw[1:400] if _ix >= 0 and len(r) > _ix and str(r[_ix]).strip() not in ("", "0")][:4]
-                                _dg.append({"العمود": _c, "صفوف غير صفرية": int((_fin_all[_c] != 0).sum()), "المجموع": round(float(_fin_all[_c].sum()), 2), "عيّنة من الشيت": " | ".join(_smp)})
+                                _dg.append({"العمود": _c, "صفوف غير صفرية": int((_fin_all[_c] != 0).sum()), "المجموع": round(float(_fin_all[_c].sum()), 2),
+                                            "عيّنة": " | ".join(f"{v:,.2f}" for v in _fin_all.loc[_fin_all[_c] != 0, _c].head(4))})
                         st.dataframe(pd.DataFrame(_dg), use_container_width=True, hide_index=True)
                 if _fin_all is None or _fin_all.empty:
                     st.warning("مفيش بيانات في تاب Noon_Finance_API لسه. شغّل بوت Noon_Accounts.py (سحب كامل) مع تفعيل خانة Google Sheet.")
