@@ -4620,31 +4620,7 @@ def ct_parse_date(v, year=None, anchor=None, limit=None, floor=None):
             return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).strftime("%Y-%m-%d")
         m = re.match(r"^(\d{1,2})[./\-](\d{1,2})$", s)
         if m and year:
-            if limit and re.fullmatch(r"[123]", m.group(2)):
-                # 8٫2 ممكن تكون 2 أو 20 أغسطس (الإكسيل بيشيل الصفر): نختار اللي قبل الحد (تاريخ الإبحار)، ولو الاتنين ينفعوا مش هنخمّن
-                try:
-                    c1 = datetime(int(year), int(m.group(1)), int(m.group(2)))
-                    c2 = datetime(int(year), int(m.group(1)), int(m.group(2)) * 10)
-                    ok = [x for x in (c1, c2) if x.strftime("%Y-%m-%d") <= limit]
-                    if len(ok) == 1:
-                        return ok[0].strftime("%Y-%m-%d")
-                    if len(ok) == 2:
-                        return ""
-                except ValueError:
-                    pass
-            if floor and re.fullmatch(r"[123]", m.group(2)):
-                # تاريخ الإبحار 9٫3 ممكن 3 أو 30 سبتمبر: لازم يكون بعد التحميل. لو الاتنين ينفعوا ناخد الأقرب لو الفرق معقول (≤ 25 يوم)
-                try:
-                    c1 = datetime(int(year), int(m.group(1)), int(m.group(2)))
-                    c2 = datetime(int(year), int(m.group(1)), int(m.group(2)) * 10)
-                    ok = [x for x in (c1, c2) if x.strftime("%Y-%m-%d") >= floor]
-                    if len(ok) == 1:
-                        return ok[0].strftime("%Y-%m-%d")
-                    if len(ok) == 2:
-                        fl = datetime.strptime(floor, "%Y-%m-%d")
-                        return c1.strftime("%Y-%m-%d") if (c1 - fl).days <= 25 else ""
-                except ValueError:
-                    pass
+            # 8٫2 = يوم 2 شهر 8 دايمًا (مش يوم 20) — في أي حقل
             day = int(m.group(2))
             if day in (40, 50, 60, 70, 80, 90):      # 5٫8 بتتعرض 5٫80 (خلية بخانتين عشريتين) = 8 مايو، مش يوم 80
                 day //= 10
