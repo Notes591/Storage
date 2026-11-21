@@ -1336,6 +1336,13 @@ def china_row_status(r):
         return max(prog, key=_cs_prog)
     return cands[0]
 
+def _cs_etd_sailed(v):
+    """تاريخ الإبحار الفعلي اتحقق؟ لو في المستقبل (بتوقيت الرياض) = لأ. لو التاريخ مش مفهوم نعتبره سافر (زي الأول)."""
+    d = _china_date(v)
+    if not d:
+        return True
+    return d <= (datetime.utcnow() + timedelta(hours=3)).date()
+
 def _cs_floor(r, code):
     """الحالة ماتقلّش عن اللي التواريخ الفعلية بتقوله (مثلاً وصول فعلي للميناء = على الأقل «وصلت الميناء»)."""
     if code and _cs_prog(code) < 0:
@@ -1345,7 +1352,7 @@ def _cs_floor(r, code):
         implied = "Delivered to Warehouse"
     elif _cf_g(r, "port_arrival_actual"):
         implied = "Arrived at Port"
-    elif _cf_g(r, "actual_etd"):
+    elif _cf_g(r, "actual_etd") and _cs_etd_sailed(_cf_g(r, "actual_etd")):      # إبحار «فعلي» في المستقبل = لسه ماسافرتش
         implied = "Shipped / In Transit"
     elif _cf_g(r, "actual_load_date") and _cf_g(r, "container_no"):      # تاريخ تحميل من غير حاوية = مش تحميل فعلي (ماينفعش يرفع الحالة)
         implied = "Loaded"
