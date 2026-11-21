@@ -5642,8 +5642,9 @@ def acct_rows_to_df(raw):
     if not raw or len(raw) < 2:
         return pd.DataFrame()
     hdr = [str(h).strip() for h in raw[0]]
-    rows = [list(r) + [""] * (len(hdr) - len(r)) for r in raw[1:] if any(str(c).strip() for c in r)]
-    df = pd.DataFrame([r[:len(hdr)] for r in rows], columns=hdr)
+    n = len(hdr)
+    df = pd.DataFrame((r[:n] if len(r) >= n else r + [""] * (n - len(r)) for r in raw[1:] if r and any(c != "" for c in r)),
+                      columns=hdr)
     for c in ACCT_FIN_NUM:
         if c in df.columns:
             df[c] = df[c].map(_acct_num)

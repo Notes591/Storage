@@ -421,12 +421,43 @@ else:
     _LIVE_TAB = ""
 
 # ══ كاش ══
+def _read_big_sheet(sheet, chunk=15000):
+    """قراءة التابات الكبيرة (مئات الألوف من الصفوف) على دفعات، وكل دفعة بتتضغط فورًا —
+    بدل ما get_all_values تنزّل كل الشيت مرة واحدة وتكسر الذاكرة (ده اللي كان بيوقّع التطبيق)."""
+    from gspread.utils import rowcol_to_a1
+    import gc
+    ncol = max(1, getattr(sheet, "col_count", 1))
+    last = rowcol_to_a1(1, ncol).rstrip("0123456789")
+    memo = {}
+    sd = memo.setdefault
+    out = []
+    start = 1
+    total = sheet.row_count
+    while start <= total:
+        end = min(start + chunk - 1, total)
+        _gs_throttle(0.6)
+        part = sheet.get(f"A{start}:{last}{end}")
+        if not part:
+            if start > 1:
+                break
+            part = []
+        out.extend([[sd(c, c) for c in r] for r in part])
+        del part
+        gc.collect()
+        start = end + 1
+    while out and not any(str(c).strip() for c in out[-1]):
+        out.pop()
+    return out
+
+
 def safe_get_all_values(sheet, retries=6, delay=1):
     """زي safe_append بالظبط بس للقراءة — كان ده الناقص اللي بيسبب الكراش."""
     last_err = None
     for attempt in range(retries):
         try:
             _gs_throttle()
+            if getattr(sheet, "row_count", 0) > 40000:
+                return _read_big_sheet(sheet)
             return sheet.get_all_values()
         except gspread.exceptions.APIError as e:
             last_err = e
@@ -743,6 +774,9 @@ def get_tacweed_code_cost_map(*args, **kwargs):
 
 def get_sku_cost(*args, **kwargs):
     return calc.get_sku_cost(_ENV, *args, **kwargs)
+
+def get_sku_company(*args, **kwargs):
+    return calc.get_sku_company(_ENV, *args, **kwargs)
 
 # ══ نفس منطق تكويد نون بالظبط (_build_tacweed_bundle وما بعدها) لكن بالمفتاح
 #    ASIN بدل SKU، مبني على تاب TacweedAmazon | Same logic as the Noon Tacweed
@@ -9652,8 +9686,8 @@ if st.session_state["nav_page"] == "tab_accts":
                     st.rerun()
                 _fin_all = _acct_load("Noon_Finance_API")
                 _ord_all = _acct_load("Noon_Orders_API")
-                if _fin_all is not None and not _fin_all.empty:
-                    with st.expander("🔧 تشخيص البيانات المقروءة من الشيت", expanded=False):
+                if _fin_all is not None and not _fin_all.empty and st.checkbox("🔧 تشخيص البيانات المقروءة من الشيت", value=False, key="acct_noon_diag"):
+                    if True:
                         _rw = get_cached(_acct_ws("Noon_Finance_API"))
                         st.caption(f"صفوف الشيت: {len(_rw) - 1:,} · أعمدة: {len(_rw[0]) if _rw else 0}")
                         _dg = []
@@ -9837,6 +9871,42 @@ if st.session_state["nav_page"] == "tab_accts":
                                            "التكلفة = تكلفة الوحدة × (مبيع − مرتجع) (على افتراض إن المرتجع رجع للمخزون). رسوم الشحن المباشر ورسوم الإعلانات في الكشف مش داخلة هنا لأنها مش على صنف.")
                                 st.download_button("⬇️ تحميل الربحية (Excel)", data=to_excel(_sh[[c for c in _cols if c not in ("📷",)]]), file_name=f"noon_profit_{file_timestamp()}.xlsx",
                                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_p_dl")
+                                # ── تقارير PDF زي G Rep / M Rep عند المحاسب ──
+                                with st.expander("📄 تقارير PDF (متاجر / مجموعات) — زي تقارير المحاسب", expanded=False):
+                                    _rk = st.radio("نوع التقرير", ["🏪 المتاجر (M Rep)", "🗂️ المجموعات (G Rep)"], horizontal=True, key="acct_noon_rep_kind")
+                                    _is_st = _rk.startswith("🏪")
+
+                                    def _grp_of(su):
+                                        for _kx in (su, su.rsplit("-", 1)[0] if "-" in su else su):
+                                            try:
+                                                _gv = get_sku_company(_kx)
+                                            except Exception:
+                                                _gv = ""
+                                            if _gv:
+                                                return _gv
+                                        return ""
+                                    if st.button("🧾 جهّز التقرير", key="acct_noon_rep_go"):
+                                        try:
+                                            import report_pdf
+                                            _rows, _gr = calc.acct_noon_report(_f, _df_from, _df_to, _p_cost, vat=_vat_p, order_items=_ord_all,
+                                                                               by="store" if _is_st else "group", group_fn=None if _is_st else _grp_of)
+                                            if not _rows:
+                                                st.info("مفيش بيانات في الفترة.")
+                                            else:
+                                                _ttl = ("أرباح متاجر نون - متاجر" if _is_st else "أرباح متاجر نون - مجموعات")
+                                                _sub_t = f"{_df_from.strftime('%d-%m-%Y')} حتى {_df_to.strftime('%d-%m-%Y')}" + (" · بدون ضريبة 15%" if _vat_p > 1 else " · شامل الضريبة")
+                                                st.session_state["acct_noon_rep_pdf"] = (report_pdf.build_report_pdf(_ttl, _sub_t, _rows, _gr, "المتجر" if _is_st else "المجموعة"),
+                                                                                         "stores" if _is_st else "groups")
+                                                _nu = [r for r in _rows if r["name"] == "غير مصنف"]
+                                                if _nu and not _is_st:
+                                                    st.warning(f"⚠️ فيه منتجات من غير مجموعة (غير مصنف): {int(_nu[0]['qty']):,} قطعة. شغّل بوت البلات فورم عشان عمود الشركة ينزل في Tacweed.")
+                                        except ImportError:
+                                            st.error("محتاج مكتبات PDF: شغّل  py -m pip install reportlab arabic-reshaper python-bidi  وبعدين اعمل ريستارت للتطبيق.")
+                                        except Exception as _e:
+                                            st.error(f"فشل عمل التقرير: {str(_e)[:200]}")
+                                    _pp = st.session_state.get("acct_noon_rep_pdf")
+                                    if _pp:
+                                        st.download_button("⬇️ تحميل PDF", data=_pp[0], file_name=f"noon_{_pp[1]}_{file_timestamp()}.pdf", mime="application/pdf", key="acct_noon_rep_dl")
                         elif _sub.startswith("🆕"):
                             _lch = st.radio("نوع التنفيذ", ["الكل", "📦 تخزين نون (FBN)", "🏠 عادي (FBP / FBB)"], horizontal=True, key="acct_noon_last_ch")
                             _lkey = "FBN" if "FBN" in _lch else ("FBP" if "FBP" in _lch else "all")
