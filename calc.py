@@ -5731,9 +5731,19 @@ def acct_noon_pending(fin, orders, today=None):
     if o.empty:
         return o
     o["_dd"] = pd.to_datetime(o["delivered_at"].astype(str).str.replace(" UTC", "", regex=False), errors="coerce")
+    start = None
+    try:                                                      # الدفتر بيبدأ من أول معاملة — اللي اتسلّم قبلها مش هيظهر فيه أصلاً فمش بنعدّه «متأخر»
+        start = pd.to_datetime(fin["Transaction Date"], errors="coerce").min()
+        if pd.notna(start):
+            o = o[o["_dd"] >= start]
+    except Exception:
+        start = None
     ref = pd.Timestamp(today) if today else pd.Timestamp.now()
     o["أيام من التسليم"] = (ref - o["_dd"]).dt.days
-    return o.sort_values("_dd")
+    o["الحالة"] = o["أيام من التسليم"].map(lambda d: "⚠️ متأخر" if d > 7 else "عادي (أقل من أسبوع)")
+    o = o.sort_values("_dd")
+    o.attrs["ledger_start"] = start.date() if start is not None and pd.notna(start) else None
+    return o
 
 
 def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):

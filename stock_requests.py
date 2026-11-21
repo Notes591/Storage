@@ -10047,8 +10047,11 @@ if st.session_state["nav_page"] == "tab_accts":
                             if _pd_ is None or _pd_.empty:
                                 st.success("كل الأوردرات المسلّمة ظاهرة في كشوف المالية ✅")
                             else:
-                                st.caption(f"{len(_pd_):,} صنف اتسلّم ومالوش صف مالي لسه (نون بتضيفه في الكشف الجاي، عادي لو أقل من أسبوع).")
-                                _show = [c for c in ("order_nr", "item_nr", "sku", "delivered_at", "أيام من التسليم", "Store") if c in _pd_.columns]
+                                _late = int((_pd_["الحالة"].astype(str).str.startswith("⚠")).sum()) if "الحالة" in _pd_.columns else 0
+                                _ls = _pd_.attrs.get("ledger_start")
+                                st.caption(f"{len(_pd_):,} صنف اتسلّم ومالوش صف مالي: ⚠️ متأخر (أكتر من أسبوع) {_late:,} · عادي (أقل من أسبوع، نون بتضيفه في الكشف الجاي) {len(_pd_) - _late:,}"
+                                           + (f" · الدفتر بيبدأ من {_ls} فاللي اتسلّم قبله مش محسوب." if _ls else ""))
+                                _show = [c for c in ("order_nr", "item_nr", "sku", "delivered_at", "أيام من التسليم", "الحالة", "Store") if c in _pd_.columns]
                                 st.dataframe(_pd_[_show], use_container_width=True, hide_index=True)
                         else:
                             _raw_df = _S["df"].drop(columns=[c for c in ("_d",) if c in _S["df"].columns])
