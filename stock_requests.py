@@ -2644,6 +2644,16 @@ def _china_avail_sentence(g, today, owner=_OWN_CU, hide_missing=False):
     return ("📅 تاريخ وصولها لمخزن الرياض لسه غير مكتوب في ملف الصين"
             + _own_tag(owner, undated, "تاريخ وصولها ناقص"))
 
+def _china_not_sailed(l, today):
+    """«تم التحميل» ولسه ماسافرتش: الحالة تحميل ومفيش ETD فعلي جه، أو الحالة اتحسبت «في البحر» (من الحاوية/التاريخ) بس تاريخ الإبحار لسه جاي."""
+    if l["_idx"] < CHINA_SHIPPED_IDX or l["_idx"] >= 7:
+        return False
+    e = _china_date(l["_d"].get("etd"))
+    if l["_idx"] == CHINA_SHIPPED_IDX:
+        return not (e and e <= today)
+    return bool(e and e > today)
+
+
 def _china_card_parts(inc, today, row=None, sku_up=""):
     """كارت واحد يشرح الكمية القادمة من الصين: كام في المصنع، كام في البحر، كام وصل الميناء، وإمتى كل جزء
     هيبقى متاح للبيع (من تواريخ ملف الصين بس) — وتنبيه الانقطاع لو المخزون هيخلص قبل الوصول."""
@@ -2653,11 +2663,7 @@ def _china_card_parts(inc, today, row=None, sku_up=""):
         if l["_idx"] < CHINA_SHIPPED_IDX:
             _gk = "factory"
         elif l["_idx"] < 7:
-            _gk = "sea"
-            if l["_idx"] == CHINA_SHIPPED_IDX:       # «تم التحميل» ≠ في البحر: لسه ماسافرتش إلا لو تاريخ الإبحار الفعلي جه
-                _etd_l = _china_date(l["_d"]["etd"])
-                if not (_etd_l and _etd_l <= today):
-                    _gk = "loaded"
+            _gk = "loaded" if _china_not_sailed(l, today) else "sea"
         else:
             _gk = "port"
         groups[_gk].append(l)
@@ -2946,8 +2952,7 @@ def render_china_journey(lines, store_skus_fn, today):
         elif x["_idx"] >= 7:
             by["port"] += x["_qty"]
         elif x["_idx"] >= CHINA_SHIPPED_IDX:
-            _el = _china_date(x["_d"]["etd"]) if x["_idx"] == CHINA_SHIPPED_IDX else None
-            if x["_idx"] == CHINA_SHIPPED_IDX and not (_el and _el <= datetime.now().date()):
+            if x["_idx"] < 7 and _china_not_sailed(x, datetime.now().date()):
                 by["loaded"] += x["_qty"]          # «تم التحميل» ولسه ماسافرتش
             else:
                 by["sea"] += x["_qty"]
