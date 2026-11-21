@@ -2648,14 +2648,26 @@ def _china_card_parts(inc, today, row=None, sku_up=""):
     """كارت واحد يشرح الكمية القادمة من الصين: كام في المصنع، كام في البحر، كام وصل الميناء، وإمتى كل جزء
     هيبقى متاح للبيع (من تواريخ ملف الصين بس) — وتنبيه الانقطاع لو المخزون هيخلص قبل الوصول."""
     from html import escape as _esc
-    groups = {"factory": [], "sea": [], "port": []}
+    groups = {"factory": [], "loaded": [], "sea": [], "port": []}
     for l in inc:
-        groups["factory" if l["_idx"] < CHINA_SHIPPED_IDX else ("sea" if l["_idx"] < 7 else "port")].append(l)
+        if l["_idx"] < CHINA_SHIPPED_IDX:
+            _gk = "factory"
+        elif l["_idx"] < 7:
+            _gk = "sea"
+            if l["_idx"] == CHINA_SHIPPED_IDX:       # «تم التحميل» ≠ في البحر: لسه ماسافرتش إلا لو تاريخ الإبحار الفعلي جه
+                _etd_l = _china_date(l["_d"]["etd"])
+                if not (_etd_l and _etd_l <= today):
+                    _gk = "loaded"
+        else:
+            _gk = "port"
+        groups[_gk].append(l)
     q = {k: sum(x["_qty"] for x in v) for k, v in groups.items()}
     total = sum(q.values())
     bits = []
     if q["factory"]:
         bits.append(f"{q['factory']:,} في المصنع")
+    if q["loaded"]:
+        bits.append(f"{q['loaded']:,} محمّلة ومستنية الإبحار")
     if q["sea"]:
         bits.append(f"{q['sea']:,} في البحر")
     if q["port"]:
@@ -2678,6 +2690,14 @@ def _china_card_parts(inc, today, row=None, sku_up=""):
         if _late_q:
             line += " — ولسه ماتشحنتش من الصين" + _own_tag(_OWN_CN, _late_q, "فات ميعاد جاهزيتها ولسه ماتشحنتش")
         _av = _china_avail_sentence(g, today, _OWN_CN, hide_missing=True)
+        items.append(line + (f"<br><span class='cn-sub'>{_av}</span>" if _av else ""))
+
+    g = groups["loaded"]
+    if g:
+        etd_l = _china_range([_china_date(l["_d"]["etd"]) for l in g])
+        line = f"📦 <b>{q['loaded']:,} قطعة</b> محمّلة في الحاوية ولسه ماسافرتش"
+        line += f" — موعد الإبحار {etd_l}" if etd_l else " — موعد الإبحار غير مكتوب" + _own_tag(_OWN_CU, q['loaded'], "موعد الإبحار ناقص")
+        _av = _china_avail_sentence(g, today, _OWN_CU, hide_missing=True)
         items.append(line + (f"<br><span class='cn-sub'>{_av}</span>" if _av else ""))
 
     g = groups["sea"]
@@ -2917,7 +2937,7 @@ def render_china_journey(lines, store_skus_fn, today):
         st.markdown("**SKUs المتجر:** " + (", ".join(f"`{s}`" for s in skus) if skus else "— غير مربوط بالتكويد"))
         st.caption(f"الموديل: {first.get('model_no') or first.get('sku') or '—'} | EN: {first.get('product_name_en') or '—'}")
     tot = sum(x["_qty"] for x in g)
-    by = {"factory": 0, "sea": 0, "port": 0, "recv": 0, "canc": 0}
+    by = {"factory": 0, "loaded": 0, "sea": 0, "port": 0, "recv": 0, "canc": 0}
     for x in g:
         if x["_status"] == "cancelled":
             by["canc"] += x["_qty"]
@@ -2926,13 +2946,17 @@ def render_china_journey(lines, store_skus_fn, today):
         elif x["_idx"] >= 7:
             by["port"] += x["_qty"]
         elif x["_idx"] >= CHINA_SHIPPED_IDX:
-            by["sea"] += x["_qty"]
+            _el = _china_date(x["_d"]["etd"]) if x["_idx"] == CHINA_SHIPPED_IDX else None
+            if x["_idx"] == CHINA_SHIPPED_IDX and not (_el and _el <= datetime.now().date()):
+                by["loaded"] += x["_qty"]          # «تم التحميل» ولسه ماسافرتش
+            else:
+                by["sea"] += x["_qty"]
         else:
             by["factory"] += x["_qty"]
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("إجمالي الكمية | Total", f"{tot:,}")
     m2.metric("في المصنع | Factory", f"{by['factory']:,}")
-    m3.metric("في البحر | At sea", f"{by['sea']:,}")
+    m3.metric("في البحر | At sea", f"{by['sea']:,}", help=(f"+ {by['loaded']:,} محمّلة ومستنية الإبحار (مش محسوبة هنا)" if by["loaded"] else None))
     m4.metric("ميناء/تخليص | Port/Customs", f"{by['port']:,}")
     m5.metric("وصل المستودع | Received", f"{by['recv']:,}")
     if by["canc"]:
