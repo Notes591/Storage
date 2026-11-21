@@ -4612,6 +4612,8 @@ def ct_parse_date(v, year=None, anchor=None, limit=None, floor=None):
     s = str(v).strip().translate(_CT_DIGITS)
     if not s:
         return ""
+    if re.fullmatch(r"\d{5}", s) and 40000 < int(s) < 60000:      # رقم تاريخ الإكسيل جاي كنص (46276 = 2026-09-11)
+        return (datetime(1899, 12, 30) + timedelta(days=int(s))).strftime("%Y-%m-%d")
     m = re.match(r"^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})(?:\D.*)?$", s)
     try:
         if m:
