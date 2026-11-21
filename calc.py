@@ -6895,3 +6895,60 @@ def acct_noon_statement_ads(fin, d_from=None, d_to=None, vat=1.0):
         df = df[df["_d"] <= d_to]
     t = df[df["Transaction Type"].astype(str).str.strip().str.lower() == "statement_fee"]
     return float(pd.to_numeric(t["Total"], errors="coerce").fillna(0.0).sum() / (vat if vat and vat > 1 else 1.0))
+
+
+def _pend_norm(s):
+    return s.astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+
+
+def acct_ty_pending(fin, orders, today=None, late_days=10):
+    """أوردرات تريندول حالتها Delivered ومالهاش أي صف في دفتر المالية (orderNumber) = لسه ماظهرتش.
+    اللي اتطلب قبل أول معاملة في الدفتر مش محسوب (الدفتر مبدأش لسه). بيرجع DataFrame (attrs['ledger_start'])."""
+    import pandas as pd
+    if orders is None or orders.empty or "Order Number" not in orders.columns:
+        return pd.DataFrame()
+    today = today or datetime.now().date()
+    seen = set(_pend_norm(fin["orderNumber"])) if fin is not None and not fin.empty and "orderNumber" in fin.columns else set()
+    o = orders[orders["Order Status"].astype(str).str.strip().str.lower() == "delivered"].copy()
+    o["_on"] = _pend_norm(o["Order Number"])
+    o = o[~o["_on"].isin(seen)]
+    o["_od"] = pd.to_datetime(o["Order Date"], errors="coerce")
+    start = None
+    try:
+        start = pd.to_datetime(fin["transactionDate"], errors="coerce").min()
+        if pd.notna(start):
+            o = o[o["_od"] >= start]
+    except Exception:
+        start = None
+    o["أيام من الطلب"] = (pd.Timestamp(today) - o["_od"]).dt.days
+    o["الحالة"] = o["أيام من الطلب"].map(lambda d: "⚠️ متأخر" if d > late_days else "عادي (لسه جديد)")
+    o["Order Number"] = o["_on"]
+    o = o.sort_values("_od")
+    o.attrs["ledger_start"] = start.date() if start is not None and pd.notna(start) else None
+    return o
+
+
+def acct_amz_pending(fin, orders, today=None, late_days=14):
+    """أوردرات أمازون اتشحنت (Shipped) ومالهاش أي صف في دفتر المالية (order_id) = لسه ماظهرتش.
+    اللي اتطلب قبل أول معاملة في الدفتر مش محسوب. بيرجع DataFrame (attrs['ledger_start'])."""
+    import pandas as pd
+    if orders is None or orders.empty or "amazon-order-id" not in orders.columns:
+        return pd.DataFrame()
+    today = today or datetime.now().date()
+    seen = set(fin["order_id"].astype(str).str.strip()) if fin is not None and not fin.empty and "order_id" in fin.columns else set()
+    st_col = "item-status" if "item-status" in orders.columns else "order-status"
+    o = orders[orders[st_col].astype(str).str.strip().str.lower() == "shipped"].copy()
+    o = o[~o["amazon-order-id"].astype(str).str.strip().isin(seen)]
+    o["_pd"] = pd.to_datetime(o["purchase-date"], errors="coerce")
+    start = None
+    try:
+        start = pd.to_datetime(fin["posted"], errors="coerce").min()
+        if pd.notna(start):
+            o = o[o["_pd"] >= start]
+    except Exception:
+        start = None
+    o["أيام من الطلب"] = (pd.Timestamp(today) - o["_pd"]).dt.days
+    o["الحالة"] = o["أيام من الطلب"].map(lambda d: "⚠️ متأخر" if d > late_days else "عادي (لسه جديد)")
+    o = o.sort_values("_pd")
+    o.attrs["ledger_start"] = start.date() if start is not None and pd.notna(start) else None
+    return o

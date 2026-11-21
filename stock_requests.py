@@ -9381,7 +9381,7 @@ if st.session_state["nav_page"] == "tab_accts":
                                sub=f"{_unp_n:,} صف", help_="صافي الصفوف اللي ماليهاش أمر دفع لسه — ده اللي ليك عند تريندول (بغض النظر عن فلتر التاريخ).")
                         _kc_ty(_g2[3], "🎟️ خصم سلة (معلومة)", _m2(_tk["discount"]), "out",
                                "خصومات السلة بتظهر في التقرير بس مش بتتخصم من الدفعة (اتأكدت بمطابقة أمر دفع للقرش).")
-                        _tsub = st.radio("العرض", ["💹 ربحية المنتجات", "🏷️ العمولة والتوصيل", "🧮 تسوية أوامر الدفع", "⏳ غير المدفوع", "⚠️ الغرامات والفواتير", "📅 يومي", "📄 كل الصفوف"],
+                        _tsub = st.radio("العرض", ["💹 ربحية المنتجات", "🏷️ العمولة والتوصيل", "🧮 تسوية أوامر الدفع", "⏳ غير المدفوع", "🕓 اتسلّمت ولسه ماظهرتش", "⚠️ الغرامات والفواتير", "📅 يومي", "📄 كل الصفوف"],
                                          horizontal=True, key="acct_ty_view", label_visibility="collapsed")
                         if _tsub.startswith("💹"):
                             _tpm = {}
@@ -9474,6 +9474,25 @@ if st.session_state["nav_page"] == "tab_accts":
                             else:
                                 st.caption(f"{_unp_n:,} صف ({_unp_t:,.0f} ريال صافي) لسه ماليهم أمر دفع، مقسمين على أقرب أربعاء متوقع للدفع (تاريخ الدفع المتوقع + أسبوع تحويل).")
                                 st.dataframe(_ug_t, use_container_width=True, hide_index=True, column_config=_acct_fmt(_ug_t))
+                        elif _tsub.startswith("🕓"):
+                            try:
+                                _ws_tyo = _acct_ws(_TY_ORD_TAB)
+                                _ord_ty = _memo_from_sheet(_ws_tyo, "acct_ty_ord_df", calc.acct_rows_to_df) if _ws_tyo is not None else None
+                                _pd_t = calc.acct_ty_pending(_fin_ty, _ord_ty) if _ord_ty is not None else None
+                            except Exception as _ex:
+                                _pd_t = None
+                                st.warning(f"مقدرتش أقرا أوردرات تريندول: {type(_ex).__name__}")
+                            if _pd_t is not None and not _pd_t.empty and "Store" in _pd_t.columns and _tsel:
+                                _pd_t = _pd_t[_pd_t["Store"].astype(str).str.replace(r"\.0$", "", regex=True).isin([str(x) for x in _tsel])]
+                            if _pd_t is None or _pd_t.empty:
+                                st.success("كل أوردرات تريندول المسلّمة ظاهرة في الدفتر ✅")
+                            else:
+                                _latet = int((_pd_t["الحالة"].astype(str).str.startswith("⚠")).sum())
+                                _lst = _pd_t.attrs.get("ledger_start")
+                                st.caption(f"{len(_pd_t):,} صنف اتسلّم ومالوش صف في الدفتر: ⚠️ متأخر (أكتر من 10 أيام) {_latet:,} · عادي {len(_pd_t) - _latet:,}"
+                                           + (f" · الدفتر بيبدأ من {_lst} فاللي اتطلب قبله مش محسوب." if _lst else ""))
+                                _shw = [c for c in ("Store", "Order Number", "Order Date", "Barcode", "Product Name", "Quantity", "Invoice Amount", "أيام من الطلب", "الحالة") if c in _pd_t.columns]
+                                st.dataframe(_pd_t[_shw], use_container_width=True, hide_index=True)
                         elif _tsub.startswith("⚠️"):
                             _ff, _cc = calc.acct_ty_fees(_ft, _tf, _tt)
                             st.markdown("**غرامات ورسوم (فواتير خصم)**")
@@ -9552,7 +9571,7 @@ if st.session_state["nav_page"] == "tab_accts":
                                    help_="أوردرات اتشحنت ولسه أمازون ماأفرجتش عنها (بعد التسليم بحوالي أسبوع) — ده ليك بس لسه ماوصلش.")
                         _acct_card(_g3[3], "💳 إجمالي مستحق ليك", _m2a(_kp_a["open"] + _kp_a["held"]), "in", sub="الجاية + المحجوز",
                                    help_="اللي لسه ماتحوّلش لبنكك.")
-                        _asub = st.radio("العرض", ["💹 ربحية المنتجات", "🏷️ العمولة والتوصيل", "🧮 تسوية الدفعات", "🔒 المحجوز", "🧾 الأوردرات", "📣 إعلانات ورسوم", "📅 يومي", "📄 كل الصفوف"],
+                        _asub = st.radio("العرض", ["💹 ربحية المنتجات", "🏷️ العمولة والتوصيل", "🧮 تسوية الدفعات", "🔒 المحجوز", "🕓 اتشحنت ولسه ماظهرتش", "🧾 الأوردرات", "📣 إعلانات ورسوم", "📅 يومي", "📄 كل الصفوف"],
                                          horizontal=True, key="acct_amz_view", label_visibility="collapsed")
                         if _asub.startswith("💹"):
                             def _a_cost(su, au):
@@ -9674,6 +9693,25 @@ if st.session_state["nav_page"] == "tab_accts":
                                 st.caption(f"{_kp_a['held_n']:,} صف ({_kp_a['held']:,.0f} ريال) اتشحنت ولسه أمازون ماأفرجتش عنها، مقسمة على أسبوع الشحن. "
                                            "الإفراج بيحصل بعد التسليم بحوالي أسبوع (من الداتا: متوسط ~٨ أيام بعد الشحن).")
                                 st.dataframe(_hg_a, use_container_width=True, hide_index=True, column_config=_acct_fmt(_hg_a))
+                        elif _asub.startswith("🕓"):
+                            try:
+                                _ws_azp = _acct_ws("Amazon_Orders_API")
+                                _ord_azp = _memo_from_sheet(_ws_azp, "acct_amz_orders_df", calc.acct_amz_orders_to_df) if _ws_azp is not None else None
+                                _pd_a = calc.acct_amz_pending(_fin_az, _ord_azp) if _ord_azp is not None else None
+                            except Exception as _ex:
+                                _pd_a = None
+                                st.warning(f"مقدرتش أقرا أوردرات أمازون: {type(_ex).__name__}")
+                            if _pd_a is not None and not _pd_a.empty and "Store" in _pd_a.columns and _asel:
+                                _pd_a = _pd_a[_pd_a["Store"].isin(_asel)]
+                            if _pd_a is None or _pd_a.empty:
+                                st.success("كل أوردرات أمازون المشحونة ظاهرة في الدفتر ✅")
+                            else:
+                                _lata = int((_pd_a["الحالة"].astype(str).str.startswith("⚠")).sum())
+                                _lsa = _pd_a.attrs.get("ledger_start")
+                                st.caption(f"{len(_pd_a):,} صنف اتشحن ومالوش صف في الدفتر: ⚠️ متأخر (أكتر من 14 يوم) {_lata:,} · عادي {len(_pd_a) - _lata:,}"
+                                           + (f" · الدفتر بيبدأ من {_lsa} فاللي اتطلب قبله مش محسوب." if _lsa else ""))
+                                _sha = [c for c in ("Store", "amazon-order-id", "purchase-date", "sku", "asin", "product-name", "quantity", "item-price", "أيام من الطلب", "الحالة") if c in _pd_a.columns]
+                                st.dataframe(_pd_a[_sha], use_container_width=True, hide_index=True)
                         elif _asub.startswith("🧾"):
                             _ws_azo = _acct_ws("Amazon_Orders_API")
                             _ord_az = _memo_from_sheet(_ws_azo, "acct_amz_orders_df", calc.acct_amz_orders_to_df) if _ws_azo is not None else None
