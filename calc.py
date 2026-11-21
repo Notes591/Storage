@@ -792,7 +792,7 @@ CHINA_FLAT_COLS = [
  ("CONTAINER","seal_no","رقم الختم",13,"t"),
  ("CONTAINER","container_type","نوع الحاوية",10,"g"),("CONTAINER","shipping_line","شركة الشحن",13,"g"),
  ("CONTAINER","vessel_name","اسم السفينة",18,"g"),("CONTAINER","voyage_no","رقم الرحلة",12,"t"),
- ("CONTAINER","bl_no","رقم B/L",18,"t"),("CONTAINER","port_of_loading","ميناء التحميل",13,"g"),
+ ("CONTAINER","bl_no","رقم B/L",18,"t"),("CONTAINER","actual_load_date","تاريخ التحميل",12,"d"),("CONTAINER","port_of_loading","ميناء التحميل",13,"g"),
  ("CONTAINER","destination_port","ميناء الوصول",13,"g"),("CONTAINER","actual_etd","ETD الفعلي",12,"d"),
  ("CONTAINER","eta_port","ETA الميناء",12,"d"),("CONTAINER","port_arrival_actual","وصول فعلي للميناء",13,"d"),
  ("CONTAINER","warehouse_arrival_actual","وصول فعلي للمستودع",13,"d"),
@@ -806,7 +806,7 @@ CHINA_FLAT_COLS = [
  ("LINE","total_qty","إجمالي الكمية",10,"n"),("LINE","unit_cost","تكلفة الوحدة",10,"n"),("LINE","cbm","CBM",8,"n"),
  ("LINE","gross_weight_kg","وزن إجمالي",9,"n"),("LINE","net_weight_kg","وزن صافي",9,"n"),
  ("LINE","production_ready_date","جاهزية الإنتاج",12,"d"),
- ("LINE","actual_load_date","تاريخ التحميل",12,"d"),("LINE","noon_sku","SKU نون",14,"t"),("LINE","amazon_sku","SKU أمازون",14,"t"),
+ ("LINE","noon_sku","SKU نون",14,"t"),("LINE","amazon_sku","SKU أمازون",14,"t"),
  ("LINE","trendyol_sku","SKU تريندول",14,"t"),("LINE","image_url","رابط الصورة",20,"g"),("LINE","notes","ملاحظات المنتج",22,"g"),
  ("STAMP","last_updated_at","آخر تحديث",12,"d"),("STAMP","updated_by","حدّث بواسطة",11,"g"),
  # أعمدة محسوبة بمعادلة — الموظف مبيكتبش فيها
