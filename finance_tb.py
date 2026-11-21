@@ -402,7 +402,13 @@ def render(st, client, pd):
         return
     tb_df = pd.DataFrame(tb_rows, columns=["Year", "AccountCode", "AccountName", "Main01", "Main02", "Closing", "Period", "Amount"])
     inv_df = pd.DataFrame(inv_rows, columns=["Year", "Barcode", "ItemCode", "ItemName", "Unit", "Qty", "Price", "Value", "Warehouse", "Branch"])
-    t_tb, t_inv = st.tabs(["📒 ميزان المراجعة", "📦 جرد المخزون"])
+    t_dash, t_tb, t_inv = st.tabs(["🧭 لوحة القيادة", "📒 ميزان المراجعة", "📦 جرد المخزون"])
+    with t_dash:
+        try:
+            import finance_dash
+            finance_dash.render(st, pd, tb_df, inv_df)
+        except Exception as e:
+            st.error(f"تعذر عرض لوحة القيادة: {type(e).__name__}: {str(e)[:250]}")
     with t_tb:
         _render_tb(st, pd, tb_df)
     with t_inv:
