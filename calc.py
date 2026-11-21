@@ -55,7 +55,8 @@ def _build_tacweed_bundle(raw):
             sku_up = str(sku_raw).strip().upper()
             code = str(col(row, "Code01", "code01", "Code 01")).strip()
             cost = _f2_or_none(col(row, "Cost", "cost", "التكلفة", "تكلفة"))
-            data_map[sku_up] = {"code": code, "cost": cost}
+            company = str(col(row, "Company", "company", "الشركة", "المجموعة")).strip()
+            data_map[sku_up] = {"code": code, "cost": cost, "company": company}
             if code:
                 code_map[sku_up] = code
             if cost is not None:
@@ -922,6 +923,11 @@ def get_tacweed_code_cost_map(env):
     """كود01 -> تكلفة (بتاخد أول تكلفة مسجلة لأي SKU مرتبط بالكود ده) | Code01 -> cost
     (first recorded cost among the SKUs sharing that code)."""
     return env._get_tacweed_bundle()["code_cost_map"]
+
+def get_sku_company(env, sku_up):
+    """مجموعة/شركة المنتج (عمود Company في تاب Tacweed، من عمود «الشركة» في ملف التكويد) أو "" لو مش مسجلة."""
+    info = env._get_tacweed_bundle()["data"].get(sku_up)
+    return (info or {}).get("company", "") or ""
 
 def get_sku_cost(env, sku_up):
     """يرجع تكلفة الوحدة لهذا الـ SKU: تكلفة مسجلة على نفس الـ SKU في تاب التكويد أولاً،
@@ -5806,11 +5812,12 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat
     it = it.assign(_sold=(it["Net Proceeds"] > 0).astype(int),      # أي صف بنتيجة موجبة = قطعة اتباعت (فيه أوردرات بتنزل order_update موجب من غير صف order — زي إكسيل المحاسب)
                    
                    _ret=((it["Transaction Type"] == "order_update") & (it["Net Proceeds"] < 0)).astype(int),
+                   _np_sold=it["Net Proceeds"].where(it["Net Proceeds"] > 0, 0.0),
                    _fee=it["Referral Fee including VAT"] + it["Fullfilment & Logistics Fees including VAT"] + it["Other Order Fees including VAT"] + it["Non-Order Fees including VAT"],
                    _sub=it["Order Subsidies including VAT"] + it["Non-Order Subsidies including VAT"])
     g = it.groupby("SKUs").agg(**{"المنتج": ("Title", "first"), "Partner SKU": ("Partner SKUs", "first"),
                                   "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum"),
-                                  "صافي المبيعات": ("Net Proceeds", "sum"), "الرسوم": ("_fee", "sum"),
+                                  "صافي المبيعات": ("Net Proceeds", "sum"), "_بيع": ("_np_sold", "sum"), "الرسوم": ("_fee", "sum"),
                                   "دعم": ("_sub", "sum"), "الصافي بعد الرسوم": ("Total", "sum")}).reset_index().rename(columns={"SKUs": "SKU"})
     if alloc_order:                          # رسوم FBB (وإعانتها 20%) بتتسجل على مستوى الأوردر من غير SKU → نوزعها على أصناف الأوردر بالتساوي
         ol = df[tt.isin(["order", "order_update"]) & (df["SKUs"].astype(str).str.strip() == "") & (df["Order Nr"].astype(str).str.strip() != "")]
@@ -5837,12 +5844,12 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat
                 _newsku = [s for s in a.index if s not in set(g["SKU"])]
                 if _newsku:                  # صنف ماتباعش في الفترة بس عليه رسوم أوردر → نضيفه بصف رسوم بس
                     g = pd.concat([g, pd.DataFrame({"SKU": _newsku, "المنتج": "", "Partner SKU": "", "مبيع": 0, "مرتجع": 0,
-                                                    "صافي المبيعات": 0.0, "الرسوم": 0.0, "دعم": 0.0, "الصافي بعد الرسوم": 0.0})], ignore_index=True)
+                                                    "صافي المبيعات": 0.0, "_بيع": 0.0, "الرسوم": 0.0, "دعم": 0.0, "الصافي بعد الرسوم": 0.0})], ignore_index=True)
                 g["الصافي بعد الرسوم"] = g["الصافي بعد الرسوم"] + g["SKU"].map(a["_t"]).fillna(0.0)
                 g["دعم"] = g["دعم"] + g["SKU"].map(a["_s"]).fillna(0.0)
                 g["الرسوم"] = g["الرسوم"] + (g["SKU"].map(a["_t"]).fillna(0.0) - g["SKU"].map(a["_s"]).fillna(0.0))
     if vat and vat > 1:                      # بدون الضريبة: كل أرقام الدفتر (شاملة 15%) ÷ 1.15
-        for _c in ("صافي المبيعات", "الرسوم", "دعم", "الصافي بعد الرسوم"):
+        for _c in ("صافي المبيعات", "_بيع", "الرسوم", "دعم", "الصافي بعد الرسوم"):
             g[_c] = g[_c] / vat
     g["صافي الكمية"] = g["مبيع"] - g["مرتجع"]
     costs, ads, missing = [], [], []
@@ -5860,6 +5867,77 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat
     g["هامش %"] = (g["الربح"] / g["صافي المبيعات"].where(g["صافي المبيعات"] != 0)).fillna(0) * 100
     g["تكلفة ناقصة"] = missing
     return g.sort_values(["صافي الكمية", "الربح"], ascending=False).reset_index(drop=True)
+
+
+def acct_noon_report(fin, d_from=None, d_to=None, cost_fn=None, vat=1.0, order_items=None, by="store", group_fn=None):
+    """تقرير زي G Rep / M Rep عند المحاسب: لكل متجر (by="store") أو مجموعة (by="group") —
+    مبيعات / مرتجع / خصومات و عمولات / تعويض و رد عمولات / إعلانات (للمتاجر بس) بأعمدة الكمية، تكلفة المبيعات، صافي المبيعات، الربح.
+    بيرجع list من {"name","qty","cost","net","profit","rows":[(label, qty, cost, net, profit)]} + إجمالي عام.
+    تكلفة المنتج الناقصة = صفر (زي المحاسب)."""
+    import pandas as pd
+    if fin is None or fin.empty:
+        return [], None
+    extra = []
+    if by == "store":
+        keys = sorted({str(x) for x in fin["Store"].astype(str) if x}) if "Store" in fin.columns else [""]
+    else:
+        keys = None
+    parts = []
+    if by == "store":
+        for stn in keys:
+            f = fin[fin["Store"].astype(str) == stn] if "Store" in fin.columns else fin
+            o = order_items
+            if o is not None and not o.empty and "Store" in o.columns:
+                o = o[o["Store"].astype(str) == stn]
+            pf = acct_noon_profit(f, d_from, d_to, cost_fn, None, vat=vat, alloc_order=True, order_items=o)
+            if pf.empty:
+                continue
+            try:
+                ads = acct_noon_statement_ads(f, d_from, d_to, vat)
+            except Exception:
+                ads = 0.0
+            try:
+                out = acct_noon_outside(f, d_from, d_to, pf, vat)
+            except Exception:
+                out = 0.0
+            parts.append((stn, pf, ads, out - ads))
+    else:
+        pf = acct_noon_profit(fin, d_from, d_to, cost_fn, None, vat=vat, alloc_order=True, order_items=order_items)
+        if pf.empty:
+            return [], None
+        pf = pf.assign(_grp=[(group_fn(str(a).strip().upper()) if group_fn else "") or "غير مصنف" for a in pf["SKU"]])
+        for gn, d in pf.groupby("_grp"):
+            parts.append((gn, d, 0.0, 0.0))
+        try:                                  # إعلانات + رسوم أوردرات مش متوزعة: مش تابعة لمجموعة، بنعرضها لوحدها عشان الإجمالي يطابق المتاجر
+            _ads = acct_noon_statement_ads(fin, d_from, d_to, vat)
+            _out = acct_noon_outside(fin, d_from, d_to, pf, vat)
+        except Exception:
+            _ads, _out = 0.0, 0.0
+        extra = [("إعلانات", -abs(_ads)), ("رسوم أوردرات مش متوزعة", _out - _ads)]
+        extra = [(l, v) for l, v in extra if abs(v) > 0.004]
+    out_rows = []
+    for name, d, ads, oth in parts:
+        cu = d["تكلفة الوحدة"]
+        s_q, r_q = float(d["مبيع"].sum()), -float(d["مرتجع"].sum())
+        s_c, r_c = float((cu * d["مبيع"]).sum()), -float((cu * d["مرتجع"]).sum())
+        s_n = float(d["_بيع"].sum())
+        r_n = float(d["صافي المبيعات"].sum()) - s_n
+        comp = float(d["دعم"].sum())
+        fees = float(d["الصافي بعد الرسوم"].sum()) - float(d["صافي المبيعات"].sum()) - comp + oth
+        rows = [("مبيعات", s_q, s_c, s_n, s_n - s_c), ("مرتجع", r_q, r_c, r_n, r_n - r_c),
+                ("خصومات و عمولات", 0.0, 0.0, fees, fees), ("تعويض و رد عمولات", 0.0, 0.0, comp, comp)]
+        if by == "store":
+            rows.append(("إعلانات", 0.0, 0.0, -abs(ads), -abs(ads)))
+        rows = [r for r in rows if any(abs(x) > 0.004 for x in r[1:])]
+        tot = [sum(r[i] for r in rows) for i in range(1, 5)]
+        out_rows.append({"name": name, "qty": tot[0], "cost": tot[1], "net": tot[2], "profit": tot[3], "rows": rows})
+    out_rows.sort(key=lambda x: -x["qty"])
+    if by != "store" and extra:
+        out_rows.append({"name": "إعلانات ورسوم غير موزعة", "qty": 0.0, "cost": 0.0, "net": sum(v for _, v in extra), "profit": sum(v for _, v in extra),
+                         "rows": [(l, 0.0, 0.0, v, v) for l, v in extra]})
+    grand = {"qty": sum(x["qty"] for x in out_rows), "cost": sum(x["cost"] for x in out_rows),
+             "net": sum(x["net"] for x in out_rows), "profit": sum(x["profit"] for x in out_rows)}
+    return out_rows, grand
 
 
 def acct_noon_recon(fin):
@@ -6509,7 +6587,7 @@ def _noon_items(fin, orders=None):
         fbv = m1.where(m1.notna(), m2)
         model = fbv.map(lambda v: None if v is None or v != v else ("FBN" if bool(v) else "FBB"))
     it["model"] = model
-    return it.drop(columns=["_fee", "_key", "_item"])
+    return it.rename(columns={"_item": "item"}).drop(columns=["_fee", "_key"])
 
 
 def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all", vat=1.0):
