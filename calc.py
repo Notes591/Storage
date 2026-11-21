@@ -1347,7 +1347,7 @@ def _cs_floor(r, code):
         implied = "Arrived at Port"
     elif _cf_g(r, "actual_etd"):
         implied = "Shipped / In Transit"
-    elif _cf_g(r, "actual_load_date"):
+    elif _cf_g(r, "actual_load_date") and _cf_g(r, "container_no"):      # تاريخ تحميل من غير حاوية = مش تحميل فعلي (ماينفعش يرفع الحالة)
         implied = "Loaded"
     elif _cf_g(r, "container_no"):
         implied = "Allocated to Container"
