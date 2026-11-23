@@ -8999,7 +8999,7 @@ if st.session_state["nav_page"] == "tab14":
                             _net = None
                     return _pr, _ci, _net
 
-                def _sku_table(rows, plat):
+                def _sku_table(rows, plat, bn=None):
                     """جدول SKUs المنصة (مرتب بالمبيعات) — الضغط على صف بيفتح تفاصيله تحت. بيرجّع أرقام الصفوف المختارة."""
                     _df = pd.DataFrame([{
                         "📷": (x.get("img") or None), "المعرّف": x["id"], "🔗": (x.get("link") or None), "أمس": x["y"], f"{sales_display_days} أيام": x["tot"], "شهري": x["mon"],
@@ -9027,7 +9027,7 @@ if st.session_state["nav_page"] == "tab14":
                             else:
                                 _c[_n] = st.column_config.NumberColumn(width=px[_n])
                         return _c
-                    _kw = dict(hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t14tbl_{_t14_bn[0]}_{plat}")
+                    _kw = dict(hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t14tbl_{_t14_bn[0] if bn is None else bn}_{plat}")
                     _ev = None
                     for _try in (lambda: st.dataframe(_df, column_config=_cfg(_wpx), width="content", **_kw),
                                  lambda: st.dataframe(_df, column_config=_cfg(_wpx), use_container_width=False, **_kw),
@@ -9224,8 +9224,12 @@ if st.session_state["nav_page"] == "tab14":
                                                       "tot": _tv(_c, "FBN") + _tv(_c, "FBB"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FBN", "FBB") if k in _c),
                                                       "stock": _stk, "price": _pr, "ci": _ci, "net": _net})
-                                    for _i in _sku_table(_rows, "noon"):
-                                        _detail_noon(*noon_tbl[_i])
+                                    # fragment: اختيار صف بيعيد رسم الجدول وتفاصيله بس — مش الصفحة كلها (كان هو سبب البطء)
+                                    @st.fragment
+                                    def _frag_noon(_rows=_rows, _tbl=noon_tbl, _bnk=_t14_bn[0]):
+                                        for _i in _sku_table(_rows, "noon", _bnk):
+                                            _detail_noon(*_tbl[_i])
+                                    _frag_noon()
                                     if len(noon_items) > len(noon_tbl):
                                         st.caption(f"+ {len(noon_items) - len(noon_tbl)} SKU بدون مبيعات أمس (مخفية — ابحث بالكود لإظهارها)")
                                     _noon_low_note(noon_items, noon_tbl)
@@ -9247,11 +9251,14 @@ if st.session_state["nav_page"] == "tab14":
                                         _bc = (f'<span style="font-family:monospace;font-weight:700;user-select:all;">{_k}</span>')
                                         _rows.append({"id": _k, "img": _r.get("img"), "link": get_ty_products().get("url", {}).get(str(_k).upper()), "y": _yv(_c, "TY"), "tot": _tv(_c, "TY"), "mon": _r["sales_month"],
                                                       "stock": "—", "price": _pr, "ci": _ci, "net": _net})
-                                    _sel_ty = _sku_table(_rows, "ty")
-                                    if not ty_fee_set_t14:
-                                        st.caption("ℹ️ توصيل تريندول محسوب 0 — ضيف trendyol_delivery_fee في Settings")
-                                    for _i in _sel_ty:
-                                        _detail_ty(*ty_tbl[_i])
+                                    @st.fragment
+                                    def _frag_ty(_rows=_rows, _tbl=ty_tbl, _bnk=_t14_bn[0]):
+                                        _sel_ty = _sku_table(_rows, "ty", _bnk)
+                                        if not ty_fee_set_t14:
+                                            st.caption("ℹ️ توصيل تريندول محسوب 0 — ضيف trendyol_delivery_fee في Settings")
+                                        for _i in _sel_ty:
+                                            _detail_ty(*_tbl[_i])
+                                    _frag_ty()
                                     if len(ty_items) > len(ty_tbl):
                                         st.caption(f"+ {len(ty_items) - len(ty_tbl)} Barcode بدون مبيعات أمس (مخفية)")
                                 elif _hb and get_trendyol_bundle()["rows"]:
@@ -9282,8 +9289,11 @@ if st.session_state["nav_page"] == "tab14":
                                                       "tot": _tv(_c, "FSAB") + _tv(_c, "FBA"),
                                                       "mon": sum(_c[k]["sales_month"] for k in ("FSAB", "FBA") if k in _c),
                                                       "stock": _stk, "price": _pr, "ci": _ci, "net": _net})
-                                    for _i in _sku_table(_rows, "amz"):
-                                        _detail_amz(*amz_tbl[_i])
+                                    @st.fragment
+                                    def _frag_amz(_rows=_rows, _tbl=amz_tbl, _bnk=_t14_bn[0]):
+                                        for _i in _sku_table(_rows, "amz", _bnk):
+                                            _detail_amz(*_tbl[_i])
+                                    _frag_amz()
                                     if len(amz_items) > len(amz_tbl):
                                         st.caption(f"+ {len(amz_items) - len(amz_tbl)} ASIN بدون مبيعات أمس (مخفية)")
                                 elif amz_items:
