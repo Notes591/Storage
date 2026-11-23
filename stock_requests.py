@@ -9432,9 +9432,13 @@ if st.session_state["nav_page"] == "tab_accts":
             _a_pick = st.radio("المنصة", ["🟢 نون | Noon", "🟣 تريندول | Trendyol", "🟠 أمازون | Amazon"], horizontal=True,
                                key="acct_platform", label_visibility="collapsed")
             _a_noon, _a_ty, _a_amz = (_a_pick.startswith("🟢"), _a_pick.startswith("🟣"), _a_pick.startswith("🟠"))
-            _srcs = {k: v for k, v in _SH.get("src", {}).items() if k in ACCT_BIG_TABS or k in ("Amazon_Payouts_API", "Amazon_Orders_API")}
-            st.caption("📦 المصدر: " + (" · ".join(f"{k.replace('_API', '')}: {v}" for k, v in _srcs.items()) if _srcs else "لسه ما اتحمّلش") +
-                       ("" if _pg_enabled() else " — (PG_READ مش مفعّل في الـ Secrets)"))
+            _src_ph = st.empty()
+
+            def _show_src():
+                _sr = {k: v for k, v in _SH.get("src", {}).items() if k in ACCT_BIG_TABS or k in ("Amazon_Payouts_API", "Amazon_Orders_API")}
+                _src_ph.caption("📦 المصدر: " + (" · ".join(f"{k.replace('_API', '')}: {v}" for k, v in _sr.items()) if _sr else "لسه ما اتحمّلش") +
+                                ("" if _pg_enabled() else " — (PG_READ مش مفعّل في الـ Secrets)"))
+            _show_src()
             if _a_ty:
                 if not hasattr(calc, "acct_ty_rows_to_df"):
                     st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات تريندول).")
@@ -9870,6 +9874,7 @@ if st.session_state["nav_page"] == "tab_accts":
                 # الأوردرات (170 ألف صف) بتتحمّل بس في العروض اللي بتحتاجها — باقي العروض مش محتاجاها فبنوفّر وقت وذاكرة
                 _need_ord = str(st.session_state.get("acct_noon_view", "")).startswith(("💹", "🆕", "🏷️", "⏳"))
                 _ord_all = _acct_load("Noon_Orders_API") if _need_ord else None
+                _show_src()
                 if _fin_all is not None and not _fin_all.empty and st.checkbox("🔧 تشخيص البيانات المقروءة من الشيت", value=False, key="acct_noon_diag"):
                     if True:
                         st.caption(f"صفوف الدفتر: {len(_fin_all):,} · أعمدة: {len(_fin_all.columns)} · أوردرات: {'— (بتتحمّل في العروض اللي بتحتاجها)' if _ord_all is None else format(len(_ord_all), ',')}")
