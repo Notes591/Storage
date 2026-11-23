@@ -5967,6 +5967,42 @@ def acct_noon_profit(fin, d_from=None, d_to=None, cost_fn=None, ads_fn=None, vat
     return g.sort_values(["صافي الكمية", "الربح"], ascending=False).reset_index(drop=True)
 
 
+def acct_noon_storage(stor, stores=None, d_from=None, d_to=None, vat=1.0):
+    """رسوم تخزين FBN (تاب Noon_Storage_API) مقسّمة على الفترة المختارة.
+    الرسوم شهرية: كل شهر بيدخل بنسبة أيامه اللي واقعة جوه (من..إلى). charged_amount من نون من غير ضريبة، فبنضرب ×1.15 لما العرض «شامل الضريبة».
+    بيرجّع (جدول لكل SKU: SKU / الرسوم / الدعم / الصافي ، إجماليات {charge, subsidy, net})."""
+    import calendar
+    import pandas as pd
+    z = {"charge": 0.0, "subsidy": 0.0, "net": 0.0}
+    if stor is None or stor.empty or "charged_amount" not in stor.columns or "service_month" not in stor.columns:
+        return pd.DataFrame(columns=["SKU", "الرسوم", "الدعم", "الصافي"]), z
+    df = stor.copy()
+    if stores and "Store" in df.columns:
+        df = df[df["Store"].isin(list(stores))]
+    df["_amt"] = pd.to_numeric(df["charged_amount"], errors="coerce").fillna(0.0)
+    ym = df["service_month"].astype(str).str.strip().str[:7]
+    w = []
+    for m in ym:
+        try:
+            y, mo = int(m[:4]), int(m[5:7])
+            nd = calendar.monthrange(y, mo)[1]
+            a, b = pd.Timestamp(y, mo, 1).date(), pd.Timestamp(y, mo, nd).date()
+            lo, hi = max(a, d_from) if d_from else a, min(b, d_to) if d_to else b
+            w.append(max((hi - lo).days + 1, 0) / nd)
+        except Exception:
+            w.append(0.0)
+    f = (1.15 if (not vat or vat <= 1) else 1.0)
+    df["_amt"] = df["_amt"] * pd.Series(w, index=df.index) * f
+    df = df[df["_amt"] != 0]
+    if df.empty:
+        return pd.DataFrame(columns=["SKU", "الرسوم", "الدعم", "الصافي"]), z
+    sub = df["description_en"].astype(str).str.contains("subsidy", case=False) if "description_en" in df.columns else (df["_amt"] < 0)
+    df = df.assign(SKU=df["sku"].astype(str).str.strip().str.upper(), _c=df["_amt"].where(~sub, 0.0), _s=df["_amt"].where(sub, 0.0))
+    g = df.groupby("SKU").agg(**{"الرسوم": ("_c", "sum"), "الدعم": ("_s", "sum")}).reset_index()
+    g["الصافي"] = g["الرسوم"] + g["الدعم"]
+    return g, {"charge": float(g["الرسوم"].sum()), "subsidy": float(g["الدعم"].sum()), "net": float(g["الصافي"].sum())}
+
+
 def acct_noon_report(fin, d_from=None, d_to=None, cost_fn=None, vat=1.0, order_items=None, by="store", group_fn=None):
     """تقرير زي G Rep / M Rep عند المحاسب: لكل متجر (by="store") أو مجموعة (by="group") —
     مبيعات / مرتجع / خصومات و عمولات / تعويض و رد عمولات / إعلانات (للمتاجر بس) بأعمدة الكمية، تكلفة المبيعات، صافي المبيعات، الربح.

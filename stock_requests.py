@@ -10246,6 +10246,24 @@ if st.session_state["nav_page"] == "tab_accts":
                             _vat_p = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (العمولة والتوصيل والصافي ÷ 1.15)", value=True, key="acct_noon_p_vat",
                                                                   help="دفتر نون بيعرض كل الأرقام شاملة الضريبة. التفعيل بيقسمها على 1.15 عشان الربح يتحسب بدون الضريبة.") else 1.0
                             _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None, vat=_vat_p, alloc_order=True, order_items=_ord_all)
+                            _stor_on = st.checkbox("🏬 اخصم رسوم التخزين من الربح", value=True, key="acct_noon_p_stor",
+                                                   help="من تاب Noon_Storage_API (رسوم FBN الشهرية). الشهر بيدخل بنسبة أيامه اللي جوه الفترة المختارة.")
+                            _stor_t, _stor_un = None, 0.0
+                            if _stor_on and not _pf.empty and hasattr(calc, "acct_noon_storage"):
+                                try:
+                                    _stor_df = _acct_load("Noon_Storage_API")
+                                    _stor_g, _stor_t = calc.acct_noon_storage(_stor_df, _sel, _df_from, _df_to, _vat_p)
+                                    if _stor_t["net"] == 0 and _stor_t["charge"] == 0:
+                                        _stor_t = None
+                                    else:
+                                        _sm = _stor_g.set_index("SKU")["الصافي"]
+                                        _pf["التخزين"] = _pf["SKU"].astype(str).str.strip().str.upper().map(_sm).fillna(0.0)
+                                        _pf["الربح"] = _pf["الربح"] - _pf["التخزين"]
+                                        _pf["هامش %"] = (_pf["الربح"] / _pf["صافي المبيعات"].where(_pf["صافي المبيعات"] != 0)).fillna(0) * 100
+                                        _stor_un = _stor_t["net"] - float(_pf["التخزين"].sum())
+                                except Exception as _e:
+                                    print("noon storage failed ->", _e)
+                                    _stor_t = None
                             if _pf.empty:
                                 st.info("مفيش مبيعات في الفترة.")
                             else:
@@ -10268,7 +10286,12 @@ if st.session_state["nav_page"] == "tab_accts":
                                 _pc2 = st.columns(3)
                                 _pc2[0].metric("📣 إعلانات نون (من كشف الحساب)", f"{_ads_st:,.0f}", help="صفوف statement_fee — نون بتخصمها من الكشف مباشرة ومش مربوطة بمنتج. دي الإعلانات الحقيقية ومحسوبة مرة واحدة.")
                                 _pc2[1].metric("🧾 رسوم أوردرات مش متوزعة", f"{_oth:,.0f}", help="رسوم على مستوى الأوردر، وأوردرها مالوش أي صنف لا في الدفتر ولا في Noon_Orders_API فمقدرناش نوزعها على منتج")
-                                _pc2[2].metric("✅ الربح بعد كل الرسوم" if _tl + _out >= 0 else "🔻 الخسارة بعد كل الرسوم", f"{_tl + _out:,.0f}", help="ربح المنتجات + مجموع برا المنتجات — ده اللي بيقارن بإكسيل المحاسب")
+                                _pc2[2].metric("✅ الربح بعد كل الرسوم" if _tl + _out - _stor_un >= 0 else "🔻 الخسارة بعد كل الرسوم", f"{_tl + _out - _stor_un:,.0f}", help="ربح المنتجات + مجموع برا المنتجات − تخزين مش مربوط بمنتج (لو التخزين مفعّل). ربح المنتجات نفسه بعد خصم التخزين.")
+                                if _stor_t:
+                                    _ps = st.columns(3)
+                                    _ps[0].metric("🏬 رسوم التخزين", f"{_stor_t['charge']:,.0f}", help="رسوم FBN الشهرية للفترة المختارة")
+                                    _ps[1].metric("🎁 دعم التخزين من نون", f"{-_stor_t['subsidy']:,.0f}", help="دعم نون على التخزين (بيتخصم من الرسوم)")
+                                    _ps[2].metric("🏬 صافي التخزين", f"{_stor_t['net']:,.0f}", help=f"منه {_stor_un:,.0f} مش مربوط بمنتج في الجدول (داخل في «الربح بعد كل الرسوم»)")
                                 _nm = int(_pf["تكلفة ناقصة"].sum())
                                 if _nm:
                                     st.warning(f"⚠️ {_nm} منتج تكلفته غير مسجلة — مش داخلين في الربح/الخسارة فوق ولا في «الرابح/الخاسر». "
@@ -10301,8 +10324,8 @@ if st.session_state["nav_page"] == "tab_accts":
                                     "📷": [_p_img(str(a).strip().upper(), str(b).strip().upper()) for a, b in zip(_sh["SKU"], _sh["Partner SKU"])],
                                     "🔗": [_p_link(str(a).strip(), str(b).strip()) for a, b in zip(_sh["SKU"], _sh["Partner SKU"])]})
                                 _cols = ["📷", "🔗", "الحالة", "المنتج", "SKU", "مبيع", "مرتجع", "صافي الكمية", "صافي المبيعات", "الرسوم", "دعم",
-                                         "الصافي بعد الرسوم", "تكلفة الوحدة", "إجمالي التكلفة"] + (["الإعلانات"] if _use_ads else []) + ["الربح", "هامش %"]
-                                _cfg = {c: st.column_config.NumberColumn(c, format="%.0f") for c in ("صافي المبيعات", "الرسوم", "دعم", "الصافي بعد الرسوم", "إجمالي التكلفة", "الإعلانات", "الربح")}
+                                         "الصافي بعد الرسوم", "تكلفة الوحدة", "إجمالي التكلفة"] + (["الإعلانات"] if _use_ads else []) + (["التخزين"] if "التخزين" in _pf.columns else []) + ["الربح", "هامش %"]
+                                _cfg = {c: st.column_config.NumberColumn(c, format="%.0f") for c in ("صافي المبيعات", "الرسوم", "دعم", "الصافي بعد الرسوم", "إجمالي التكلفة", "الإعلانات", "التخزين", "الربح")}
                                 _cfg["تكلفة الوحدة"] = st.column_config.NumberColumn("تكلفة الوحدة", format="%.2f")
                                 _cfg["هامش %"] = st.column_config.NumberColumn("هامش %", format="%.1f")
                                 _cfg["📷"] = st.column_config.ImageColumn("📷")
