@@ -671,6 +671,83 @@ def _noon_light_recon(stores, ver=0):
     return rc, orph
 
 
+# ══ تاب المبيعات: بدل ما بايثون يلف على كل صفوف الأوردرات (44 ألف نون + 11 ألف أمازون) بنجيب من PostgreSQL آخر أيام بس ══
+_SALES_RECENT_TABS = {"DailyOrders_API": "noon", "DailyOrders": "noon", "DailyOrdersAmazon": "amz"}
+_SALES_MIN_DAYS = 40         # أكبر فترة بيطلبها التاب (30 يوم) + هامش
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _pg_recent_rows(title, since_iso, kind, ver=0):
+    """نفس شكل صفوف الشيت (الأول عناوين) بس للصفوف اللي تاريخها >= since. أي مشكلة بترجّع None (فنرجع للقراءة الكاملة)."""
+    c, r = _pg_q("SELECT table_name, headers, col_names FROM sheet_copy._meta WHERE tab_title = %s", (title,))
+    if not r:
+        return None
+    table, headers, cols = r[0]
+    if kind == "noon":
+        ti = 1                                   # calc بيقرا التاريخ من العمود التاني في شيت نون
+    else:
+        ti = next((i for i, h in enumerate(headers) if str(h).strip().lower() in ("تاريخ شحنة العميل", "order timestamp")), None)
+    if ti is None or ti >= len(cols):
+        return None
+    exp = "regexp_replace(COALESCE(\"%s\", ''), '[\\s\\u00a0]', '', 'g')" % cols[ti]
+    sql = ('SELECT ' + ", ".join('"%s"' % x for x in cols) + ' FROM sheet_copy."%s" WHERE (' % table + exp + ' ~ %s AND left(' + exp + ', 10) >= %s) OR ' + exp + ' ~ %s ORDER BY _row')
+    c2, rows = _pg_q(sql, ("^[0-9]{4}-[0-9]{2}-[0-9]{2}", since_iso, "^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}"))
+    return [list(headers)] + [["" if v is None else v for v in x] for x in rows]
+
+
+class _EnvRecent:
+    """زي _ENV بس قراءة شيتات الأوردرات اليومية بترجّع آخر الأيام بس من PostgreSQL (الباقي زي ما هو)."""
+    def __init__(self, since):
+        self._since = since
+
+    def __getattr__(self, name):
+        return globals()[name]
+
+    def get_cached(self, sheet, force=False):
+        k = _SALES_RECENT_TABS.get(getattr(sheet, "title", ""))
+        if k and _pg_enabled():
+            try:
+                rows = _pg_recent_rows(sheet.title, self._since, k, st.session_state.get("sales_pg_ver", 0))
+                if rows is not None:
+                    _SH.setdefault("src", {})[sheet.title] = "PostgreSQL (آخر أيام بس)"
+                    return rows
+            except Exception as e:
+                print("sales recent rows failed ->", e)
+        return get_cached(sheet, force)
+
+
+def _env_recent(dates=None):
+    since = datetime.now().date() - timedelta(days=_SALES_MIN_DAYS)
+    try:
+        ds = [d for d in (dates or []) if hasattr(d, "isoformat")]
+        if ds:
+            since = min(since, min(ds) - timedelta(days=1))
+    except Exception:
+        pass
+    return _EnvRecent(since.isoformat())
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _pg_tab_count(title):
+    c, r = _pg_q("SELECT table_name FROM sheet_copy._meta WHERE tab_title = %s", (title,))
+    if not r:
+        return None
+    c2, r2 = _pg_q('SELECT count(*) FROM sheet_copy."%s"' % r[0][0])
+    return int(r2[0][0])
+
+
+def _tab_len(sheet):
+    """عدد صفوف التاب (للتوقيع بس) — من PostgreSQL بعدّاد رخيص بدل تحميل التاب كله."""
+    if _pg_enabled():
+        try:
+            n = _pg_tab_count(sheet.title)
+            if n is not None:
+                return n
+        except Exception as e:
+            print("pg count failed ->", e)
+    return len(get_cached(sheet))
+
+
 def _lazy_excel(key, make_df, file_name, label="⬇️ تحميل المعاملات (Excel)"):
     """ملف الإكسيل بيتبني لما تدوس «جهّز» بس — قبل كده كان بيتبني مع كل ضغطة في الصفحة (وده تقيل على الجداول الكبيرة)."""
     if st.button("📥 جهّز ملف Excel", key=key + "_prep"):
@@ -4136,10 +4213,10 @@ def build_daily_orders_map(*args, **kwargs):
     return calc.build_daily_orders_map(_ENV, *args, **kwargs)
 
 def build_daily_orders_counts(*args, **kwargs):
-    return calc.build_daily_orders_counts(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 def build_daily_orders_prices(*args, **kwargs):
-    return calc.build_daily_orders_prices(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 # ══════════════════════════════════════════════════════════════════════════
 # ══ نسخ منفصلة تمامًا لمبيعات FBB (Fulfilled by Partner) — بتفلتر على عمود
@@ -4155,10 +4232,10 @@ def build_daily_orders_prices(*args, **kwargs):
 
 
 def build_daily_orders_counts_fbb(*args, **kwargs):
-    return calc.build_daily_orders_counts_fbb(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_fbb(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 def build_daily_orders_prices_fbb(*args, **kwargs):
-    return calc.build_daily_orders_prices_fbb(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_fbb(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 # ══════════════════════════════════════════════════════════════════════════
 # ══ مبيعات أمازون — نسخة منفصلة تمامًا عن مبيعات نون فوق، بتقرا من شيت
@@ -4179,38 +4256,38 @@ def build_amazon_orders_asin_map(*args, **kwargs):
     return calc.build_amazon_orders_asin_map(_ENV, *args, **kwargs)
 
 def build_daily_orders_counts_amazon(*args, **kwargs):
-    return calc.build_daily_orders_counts_amazon(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_amazon(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 def build_daily_orders_prices_amazon(*args, **kwargs):
-    return calc.build_daily_orders_prices_amazon(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_amazon(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 def build_daily_orders_counts_amazon_all(*args, **kwargs):
-    return calc.build_daily_orders_counts_amazon_all(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_amazon_all(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_counts_amazon_normal(*args, **kwargs):
-    return calc.build_daily_orders_counts_amazon_normal(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_amazon_normal(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_counts_amazon_fba(*args, **kwargs):
-    return calc.build_daily_orders_counts_amazon_fba(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_amazon_fba(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_prices_amazon_all(*args, **kwargs):
-    return calc.build_daily_orders_prices_amazon_all(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_amazon_all(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_prices_amazon_normal(*args, **kwargs):
-    return calc.build_daily_orders_prices_amazon_normal(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_amazon_normal(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_prices_amazon_fba(*args, **kwargs):
-    return calc.build_daily_orders_prices_amazon_fba(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_amazon_fba(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 # ── نسخ مجمّعة على ASIN — تاب مبيعات أمازون (عادي/FBA) بيستخدمها بدل النسخ
 #    اللي فوق المجمّعة على MSKU | ASIN-grouped versions — used by the Amazon
 #    Sales tab (normal/FBA) instead of the MSKU-grouped ones above ──
 def build_daily_orders_counts_amazon_all_asin(*args, **kwargs):
-    return calc.build_daily_orders_counts_amazon_all_asin(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_amazon_all_asin(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_prices_amazon_all_asin(*args, **kwargs):
-    return calc.build_daily_orders_prices_amazon_all_asin(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_amazon_all_asin(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_counts_amazon_normal_asin(*args, **kwargs):
-    return calc.build_daily_orders_counts_amazon_normal_asin(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_amazon_normal_asin(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_counts_amazon_fba_asin(*args, **kwargs):
-    return calc.build_daily_orders_counts_amazon_fba_asin(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_amazon_fba_asin(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_prices_amazon_normal_asin(*args, **kwargs):
-    return calc.build_daily_orders_prices_amazon_normal_asin(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_amazon_normal_asin(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 def build_daily_orders_prices_amazon_fba_asin(*args, **kwargs):
-    return calc.build_daily_orders_prices_amazon_fba_asin(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_amazon_fba_asin(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 def build_amazon_asin_sales_rows(*args, **kwargs):
     return calc.build_amazon_asin_sales_rows(_ENV, *args, **kwargs)
@@ -4619,10 +4696,10 @@ def build_daily_orders_family_stats_fbb(*args, **kwargs):
 #    functions exactly as before, untouched.
 # ══════════════════════════════════════════════════════════════════════════
 def build_daily_orders_counts_fbn(*args, **kwargs):
-    return calc.build_daily_orders_counts_fbn(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_counts_fbn(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 def build_daily_orders_prices_fbn(*args, **kwargs):
-    return calc.build_daily_orders_prices_fbn(_ENV, *args, **kwargs)
+    return calc.build_daily_orders_prices_fbn(_env_recent(args[0] if args else kwargs.get('dates')), *args, **kwargs)
 
 def build_daily_orders_family_stats_fbn(*args, **kwargs):
     return calc.build_daily_orders_family_stats_fbn(_ENV, *args, **kwargs)
@@ -4800,7 +4877,7 @@ def compute_channel_gap(*args, **kwargs):
 
 def channel_gap_cached():
     days = max(int(load_settings().get("sales_display_days", "7") or 7), 30)
-    sig = (len(get_cached(daily_orders_sheet)), len(get_cached(daily_orders_amazon_sheet)), len(get_tacweed_map()),
+    sig = (_tab_len(daily_orders_sheet), _tab_len(daily_orders_amazon_sheet), len(get_tacweed_map()),
            len(get_tacweed_amazon_map()), len(get_warehouse_stock_map()), len(inv_map), len(amz_inv_map_asin),
            len(get_pending_approval_skus()), datetime.now().date(), days, "g1")
     c = st.session_state.get("_gap_cache")
@@ -5031,7 +5108,7 @@ def render_cross_store_tab():
     page_more(items, f"pg_xs_{key}", 25)
 
 def _cross_cached():
-    sig = (len(get_cached(daily_orders_sheet)), len(get_cached(daily_orders_amazon_sheet)),
+    sig = (_tab_len(daily_orders_sheet), _tab_len(daily_orders_amazon_sheet),
            len(get_trendyol_bundle()["rows"]), len(get_tacweed_map()), len(get_warehouse_stock_map()), datetime.now().date(), "v5")
     c = st.session_state.get("_xs_cache")
     if c and c[0] == sig and len(c[1]) == 3:
@@ -7825,7 +7902,7 @@ def _render_ads_performance_tab_amazon():
 # بدل تابين (FBN / FBB): كل كود تكويد له كارت واحد فيه (صورة، شارات المستودع/التكلفة، شحنات الصين)،
 # وتحته كل SKU تابع للكود، وتحت كل SKU مبيعات FBN ومبيعات FBB (لو فيه) بنفس التفاصيل القديمة بالظبط.
 def _t14_build_rows(*args, **kwargs):
-    return calc._t14_build_rows(_ENV, *args, **kwargs)
+    return calc._t14_build_rows(_env_recent(args[1] if len(args) > 1 else None), *args, **kwargs)
 
 def _t14_sku_part(r):
     """الجزء الخاص بالـ SKU نفسه (مرة واحدة لكل SKU): الرابط، الإعلانات، Xdock، السعر والربح وحكم الإعلان."""
@@ -8092,7 +8169,7 @@ def _t14_channel_part(r, ch, with_sku_level, part="all"):
 # ══ أمازون داخل تاب المبيعات الموحد — صفوف ASIN بقناتين: عادي (FSAB) و FBA ══
 # Amazon inside the unified Sales tab — ASIN rows with two channels: normal (FSAB) and FBA.
 def _t14_build_rows_amz(*args, **kwargs):
-    return calc._t14_build_rows_amz(_ENV, *args, **kwargs)
+    return calc._t14_build_rows_amz(_env_recent(args[1] if len(args) > 1 else None), *args, **kwargs)
 
 # ══ متابعة المنافسين (من بوت noon_tracker) | Noon competitor tracking ══
 # التابات NoonTrack_* بيعملها البوت المكتبي أول مرة يشتغل؛ هنا بنقراها (لو موجودة) في طلب واحد
