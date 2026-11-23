@@ -9399,12 +9399,14 @@ if st.session_state["nav_page"] == "tab_accts":
                         m = _SH["memo"].get(key)
                         if m is not None and time.time() - m[0] <= _ttl_for(tab):
                             return m[1]
+                        _t0 = time.time()
                         try:
                             df = _big_df(ws)
                         except Exception:
                             df = calc.acct_rows_to_df(get_cached(ws))
                         _SH["data"].pop(tab, None)
                         _SH["memo"][key] = (time.time(), df)
+                        _SH.setdefault("tm", {})[tab] = (round(time.time() - _t0, 1), len(df), _SH.get("src", {}).get(tab, "؟"))
                         return df
                 return _memo_from_sheet(ws, "acct_df_" + tab, calc.acct_rows_to_df)
 
@@ -9891,8 +9893,12 @@ if st.session_state["nav_page"] == "tab_accts":
                     _o = _ord_all
                     if _o is not None and not _o.empty and "Store" in _o.columns and _sel:
                         _o = _o[_o["Store"].isin(_sel)]
+                    _t_s = time.time()
                     _S = calc.acct_noon_summary(_f, _df_from, _df_to)
                     _k = _S["kpi"]
+                    _tm = _SH.get("tm", {}).get("Noon_Finance_API")
+                    st.caption("⏱️ " + (f"آخر تحميل للدفتر: {_tm[0]} ث ({_tm[1]:,} صف من {_tm[2]}) · " if _tm else "الدفتر من الكاش (من غير تحميل) · ") +
+                               f"حساب الملخص: {time.time() - _t_s:.1f} ث")
                     if not _k:
                         st.info("مفيش معاملات في الفترة دي.")
                     else:
