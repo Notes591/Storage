@@ -458,6 +458,229 @@ def _pg_iter(title, chunk=15000):
         conn.close()
 
 
+# ═══════════════ نون: ملخص الدفتر محسوب جوه PostgreSQL (بدل ما نحمّل 179 ألف صف) ═══════════════
+_N_TYPED = r"(CASE WHEN {c} ~ '^-?[0-9]+(\.[0-9]+)?$' THEN {c}::double precision ELSE sheet_copy.acct_num({c}) END)"
+
+
+def _nt(c):
+    return _N_TYPED.format(c=c)
+
+
+NOON_ACCT_NUM_SQL = r"""
+CREATE OR REPLACE FUNCTION sheet_copy.acct_num(x text) RETURNS double precision
+LANGUAGE plpgsql IMMUTABLE AS $f$
+DECLARE t text; neg boolean; parts text[]; v double precision;
+BEGIN
+  IF x IS NULL THEN RETURN 0; END IF;
+  t := btrim(x);
+  IF t = '' THEN RETURN 0; END IF;
+  IF t ~ '^-?[0-9]+(\.[0-9]+)?$' THEN RETURN t::double precision; END IF;
+  t := translate(t, '٠١٢٣٤٥٦٧٨٩٫٬', '0123456789.,');
+  t := replace(replace(replace(replace(t, '−', '-'), '–', '-'), chr(160), ''), ' ', '');
+  neg := left(t, 1) = '(' AND right(t, 1) = ')';
+  t := btrim(t, '()');
+  IF position(',' in t) > 0 AND position('.' in t) > 0 THEN
+    IF strpos(reverse(t), '.') < strpos(reverse(t), ',') THEN
+      t := replace(t, ',', '');
+    ELSE
+      t := replace(replace(t, '.', ''), ',', '.');
+    END IF;
+  ELSIF position(',' in t) > 0 THEN
+    parts := string_to_array(t, ',');
+    IF length(parts[array_length(parts, 1)]) = 3 AND array_length(parts, 1) > 1 AND ltrim(parts[1], '-') <> '0' THEN
+      t := replace(t, ',', '');
+    ELSE
+      t := replace(t, ',', '.');
+    END IF;
+  END IF;
+  BEGIN
+    v := t::double precision;
+  EXCEPTION WHEN others THEN
+    RETURN 0;
+  END;
+  IF neg THEN RETURN -v; END IF;
+  RETURN v;
+END $f$;
+"""
+
+# الدفتر بأنواعه الصحيحة (CTE) — بنقراه مباشرة من جدول التاب (من غير View عشان إعادة بناء الجدول ما تتعطلش)
+NOON_FIN_CTE = ("""
+WITH f AS (
+  SELECT store, COALESCE(reference_nr, '') AS ref, COALESCE(item_nr, '') AS item, transaction_type AS tt,
+         CASE WHEN transaction_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN left(transaction_date, 10)::date END AS d,
+         """ + _nt("net_proceeds") + """ AS net,
+         """ + _nt("referral_fee_including_vat") + """ AS referral,
+         """ + _nt("fullfilment_logistics_fees_including_vat") + """ AS fulfil,
+         """ + _nt("shipping_credits_including_vat") + """ AS shipcr,
+         """ + _nt("other_order_fees_including_vat") + """ AS other_fees,
+         """ + _nt("order_subsidies_including_vat") + """ AS subsidy,
+         """ + _nt("non_order_fees_including_vat") + """ AS nof,
+         """ + _nt("non_order_subsidies_including_vat") + """ AS nos,
+         """ + _nt("total") + """ AS total
+  FROM sheet_copy.noon_finance_api
+  WHERE (%(stores)s::text[] IS NULL OR store = ANY(%(stores)s))
+)
+""")
+
+_EARN = "('order','order_update','statement_fee')"
+
+NOON_KPI_SQL = NOON_FIN_CTE + f"""
+SELECT
+  COALESCE(SUM(net) FILTER (WHERE tt IN {_EARN}), 0) AS net,
+  COALESCE(SUM(referral) FILTER (WHERE tt IN {_EARN}), 0) AS referral,
+  COALESCE(SUM(fulfil) FILTER (WHERE tt IN {_EARN}), 0) AS fulfil,
+  COALESCE(SUM(other_fees) FILTER (WHERE tt IN {_EARN}), 0) AS other_fees,
+  COALESCE(SUM(subsidy) FILTER (WHERE tt IN {_EARN}), 0) AS subsidy,
+  COALESCE(SUM(nof) FILTER (WHERE tt = 'statement_fee'), 0) AS ads,
+  COALESCE(SUM(nof) FILTER (WHERE tt IN ('order','order_update')), 0) AS nonorder_fees_other,
+  COALESCE(SUM(nos) FILTER (WHERE tt IN {_EARN}), 0) AS nonorder_sub,
+  COALESCE(SUM(total) FILTER (WHERE tt IN {_EARN}), 0) AS earned,
+  COALESCE(-SUM(total) FILTER (WHERE tt = 'payment'), 0) AS paid,
+  COALESCE(-SUM(total) FILTER (WHERE tt = 'balance_transfer'), 0) AS transfers,
+  COALESCE(SUM(total), 0) AS balance,
+  COUNT(*) FILTER (WHERE tt = 'order' AND net > 0) AS orders_n,
+  COUNT(*) FILTER (WHERE tt = 'order_update' AND net < 0) AS returns_n,
+  COALESCE(SUM(net) FILTER (WHERE tt = 'order_update' AND net < 0), 0) AS returns_amt,
+  COUNT(*) AS n
+FROM f
+WHERE d >= %(d_from)s AND d <= %(d_to)s
+"""
+
+NOON_STM_SQL = NOON_FIN_CTE + f"""
+SELECT ref AS "Reference Nr", MAX(d) AS "تاريخ الكشف", COUNT(*) AS "صفوف",
+  SUM(net) AS "Net Proceeds", SUM(referral) AS "Referral Fee including VAT", SUM(fulfil) AS "Fullfilment & Logistics Fees including VAT",
+  SUM(shipcr) AS "Shipping Credits including VAT", SUM(other_fees) AS "Other Order Fees including VAT",
+  SUM(subsidy) AS "Order Subsidies including VAT", SUM(nof) AS "Non-Order Fees including VAT",
+  SUM(nos) AS "Non-Order Subsidies including VAT", SUM(total) AS "Total"
+FROM f
+WHERE tt IN {_EARN} AND ref LIKE 'PS-%%' AND d >= %(d_from)s AND d <= %(d_to)s
+GROUP BY ref
+ORDER BY MAX(d) DESC NULLS LAST
+"""
+
+# تفقيط الكشف: body = صفوف الأوردرات/الكشف، money = الدفعات وتحويلات الرصيد. picks = كشوف محددة (أو NULL = كل الفترة)
+NOON_BRK_SQL = NOON_FIN_CTE + f""",
+b AS (
+  SELECT * FROM f WHERE tt IN {_EARN} AND (
+    CASE WHEN %(picks)s::text[] IS NULL THEN d >= %(d_from)s AND d <= %(d_to)s ELSE ref = ANY(%(picks)s) END)
+),
+lim AS (SELECT MAX(d) AS dmax FROM b),
+m AS (
+  SELECT * FROM f WHERE tt IN ('payment','balance_transfer') AND (
+    CASE WHEN %(picks)s::text[] IS NULL THEN d >= %(d_from)s AND d <= %(d_to)s
+         ELSE (SELECT dmax FROM lim) IS NULL OR d <= (SELECT dmax FROM lim) END)
+)
+SELECT
+  (SELECT COALESCE(SUM(net), 0) FROM b) AS net,
+  (SELECT COALESCE(SUM(nos), 0) FROM b) AS nos,
+  (SELECT COALESCE(SUM(subsidy) FILTER (WHERE NOT (btrim(item) = '' OR (ABS(subsidy - (-fulfil) * 0.2) < 0.02 AND fulfil < 0 AND subsidy > 0))), 0) FROM b) AS sub_ref,
+  (SELECT COALESCE(SUM(subsidy) FILTER (WHERE (btrim(item) = '' OR (ABS(subsidy - (-fulfil) * 0.2) < 0.02 AND fulfil < 0 AND subsidy > 0))), 0) FROM b) AS sub_dlv,
+  (SELECT COALESCE(SUM(other_fees), 0) FROM b) AS oth,
+  (SELECT COALESCE(SUM(nof) FILTER (WHERE tt = 'statement_fee'), 0) FROM b) AS ads,
+  (SELECT COALESCE(SUM(referral), 0) FROM b) AS referral,
+  (SELECT COALESCE(SUM(fulfil) FILTER (WHERE btrim(item) = ''), 0) FROM b) AS ship_direct,
+  (SELECT COALESCE(SUM(fulfil) FILTER (WHERE btrim(item) <> ''), 0) FROM b) AS ship_fbn,
+  (SELECT COALESCE(SUM(nof) FILTER (WHERE tt <> 'statement_fee'), 0) FROM b) AS warranty,
+  (SELECT COALESCE(SUM(total) FILTER (WHERE tt = 'payment'), 0) FROM m) AS pay,
+  (SELECT COALESCE(SUM(total) FILTER (WHERE tt = 'balance_transfer'), 0) FROM m) AS bt
+"""
+
+# مدخلات التسوية بشكل مصغّر: كل كشف (متجر + مرجع) صف واحد، والدفعات/التحويلات صفوف صفوف، + أحدث تاريخ
+NOON_RECON_STM_SQL = NOON_FIN_CTE + f"""
+SELECT store AS "Store", ref AS "Reference Nr", MAX(d) AS "Transaction Date", 'order' AS "Transaction Type", SUM(total) AS "Total"
+FROM f WHERE tt IN {_EARN} AND ref LIKE 'PS-%%' GROUP BY store, ref ORDER BY store, ref
+"""
+NOON_RECON_PAY_SQL = NOON_FIN_CTE + """
+SELECT store AS "Store", ref AS "Reference Nr", d AS "Transaction Date", tt AS "Transaction Type", total AS "Total"
+FROM f WHERE tt IN ('payment','balance_transfer') ORDER BY store, d NULLS LAST
+"""
+NOON_META_SQL = """
+SELECT (SELECT array_agg(DISTINCT store ORDER BY store) FROM sheet_copy.noon_finance_api WHERE COALESCE(store, '') <> '') AS stores,
+       MIN(CASE WHEN transaction_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN left(transaction_date, 10)::date END) AS dmin,
+       MAX(CASE WHEN transaction_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN left(transaction_date, 10)::date END) AS dmax
+FROM sheet_copy.noon_finance_api
+"""
+
+
+def _pg_q(sql, params=None):
+    """بينفّذ استعلام على PostgreSQL ويرجّع (أسماء الأعمدة، الصفوف). أي خطأ بيطلع للي ناداه (اللي بيرجع للطريقة القديمة)."""
+    import psycopg2
+    conn = psycopg2.connect(host=_pg_cfg("PG_HOST", "localhost"), port=int(_pg_cfg("PG_PORT", "5432") or 5432),
+                            user=_pg_cfg("PG_USER", "postgres"), password=_pg_cfg("PG_PASS", ""),
+                            dbname=_pg_cfg("PG_DB", "trial"), connect_timeout=15, sslmode=_pg_cfg("PG_SSLMODE", "prefer"))
+    try:
+        cur = conn.cursor()
+        if not _SH.get("noon_fn"):
+            cur.execute(NOON_ACCT_NUM_SQL)          # دالة قراءة الأرقام (بنفس منطق calc._acct_num) — بتتعمل مرة واحدة
+            conn.commit()
+            _SH["noon_fn"] = True
+        cur.execute(sql, params if params is not None else None)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        conn.commit()
+        return cols, rows
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_meta(ver=0):
+    c, r = _pg_q(NOON_META_SQL)
+    stores, dmin, dmax = r[0]
+    return {"stores": list(stores or []), "dmin": dmin, "dmax": dmax}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_summary(stores, d_from, d_to, ver=0):
+    """مؤشرات + جدول الكشوف من PostgreSQL (نفس شكل calc.acct_noon_summary: kpi + statements)."""
+    prm = {"stores": list(stores) if stores else None, "d_from": d_from, "d_to": d_to}
+    c, r = _pg_q(NOON_KPI_SQL, prm)
+    row = dict(zip(c, r[0]))
+    n = int(row.pop("n", 0))
+    if not n:
+        return {"kpi": {}, "statements": pd.DataFrame()}
+    for k in ("orders_n", "returns_n"):
+        row[k] = int(row[k])
+    for k in row:
+        if k not in ("orders_n", "returns_n"):
+            row[k] = float(row[k])
+    c, r = _pg_q(NOON_STM_SQL, prm)
+    return {"kpi": row, "statements": pd.DataFrame(r, columns=c)}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_brk(stores, picks, d_from, d_to, ver=0):
+    c, r = _pg_q(NOON_BRK_SQL, {"stores": list(stores) if stores else None, "picks": list(picks) if picks else None,
+                                "d_from": d_from, "d_to": d_to})
+    return calc.acct_noon_brk_labels(dict(zip(c, r[0])))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_recon(stores, ver=0):
+    """تسوية الكشوف: بنجيب مدخلات مصغّرة (كل كشف صف + الدفعات + أحدث تاريخ) ونشغّل نفس calc.acct_noon_recon."""
+    prm = {"stores": list(stores) if stores else None}
+    c1, r1 = _pg_q(NOON_RECON_STM_SQL, prm)
+    c2, r2 = _pg_q(NOON_RECON_PAY_SQL, prm)
+    c3, r3 = _pg_q(NOON_FIN_CTE + "SELECT MAX(d) FROM f", prm)
+    red = pd.DataFrame(r1 + r2, columns=c1)
+    red = pd.concat([red, pd.DataFrame([{"Store": "", "Reference Nr": "", "Transaction Date": r3[0][0], "Transaction Type": "_asof", "Total": 0.0}])],
+                    ignore_index=True)
+    rc, orph = calc.acct_noon_recon(red)
+    if len(rc):
+        rc = rc[rc["المتجر"] != ""].reset_index(drop=True)
+    return rc, orph
+
+
+def _lazy_excel(key, make_df, file_name, label="⬇️ تحميل المعاملات (Excel)"):
+    """ملف الإكسيل بيتبني لما تدوس «جهّز» بس — قبل كده كان بيتبني مع كل ضغطة في الصفحة (وده تقيل على الجداول الكبيرة)."""
+    if st.button("📥 جهّز ملف Excel", key=key + "_prep"):
+        with st.spinner("بجهّز الملف..."):
+            st.session_state[key + "_xl"] = to_excel(make_df())
+    if st.session_state.get(key + "_xl") is not None:
+        st.download_button(label, data=st.session_state[key + "_xl"], file_name=file_name,
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=key)
+
+
 def _iter_sheet_chunks(sheet, chunk=15000):
     """بيقرا الشيت على دفعات (كل دفعة قايمة صفوف مضغوطة). أول دفعة فيها صف العناوين. لو PostgreSQL مفعّل بيقرا منه الأول."""
     if _pg_enabled():
@@ -9615,9 +9838,8 @@ if st.session_state["nav_page"] == "tab_accts":
                         else:
                             _raw_t = _TS["df"].drop(columns=[c for c in _TS["df"].columns if c.startswith("_")])
                             st.dataframe(_raw_t, use_container_width=True, hide_index=True)
-                        _xl_t = _TS["df"].drop(columns=[c for c in _TS["df"].columns if c.startswith("_")])
-                        st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_t), file_name=f"trendyol_accounts_{file_timestamp()}.xlsx",
-                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_ty_dl")
+                        _lazy_excel("acct_ty_dl", lambda: _TS["df"].drop(columns=[c for c in _TS["df"].columns if c.startswith("_")]),
+                                    f"trendyol_accounts_{file_timestamp()}.xlsx")
             if _a_amz:
                 if not hasattr(calc, "acct_amz_rows_to_df"):
                     st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات أمازون).")
@@ -9860,17 +10082,29 @@ if st.session_state["nav_page"] == "tab_accts":
                         else:
                             _raw_a = _AS["df"].drop(columns=[c for c in _AS["df"].columns if c.startswith("_")])
                             st.dataframe(_raw_a, use_container_width=True, hide_index=True)
-                        _xl_a = _AS["df"].drop(columns=[c for c in _AS["df"].columns if c.startswith("_")])
-                        st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_a), file_name=f"amazon_accounts_{file_timestamp()}.xlsx",
-                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_amz_dl")
+                        _lazy_excel("acct_amz_dl", lambda: _AS["df"].drop(columns=[c for c in _AS["df"].columns if c.startswith("_")]),
+                                    f"amazon_accounts_{file_timestamp()}.xlsx")
             if _a_noon:
                 if st.button("🔄 تحديث البيانات من الشيت", key="acct_noon_refresh"):
+                    st.session_state["acct_noon_ver"] = st.session_state.get("acct_noon_ver", 0) + 1
                     for _t in ("Noon_Finance_API", "Noon_Orders_API"):
                         _w = _acct_ws(_t)
                         if _w is not None:
                             clear_cache(_w)
                     st.rerun()
-                _fin_all = _acct_load("Noon_Finance_API")
+                _nver = st.session_state.get("acct_noon_ver", 0)
+                _nv0 = str(st.session_state.get("acct_noon_view", ""))
+                _lmeta = None
+                if _pg_enabled() and hasattr(calc, "acct_noon_brk_labels") and (_nv0 == "" or _nv0.startswith("📊")):
+                    # عرض «ملخص زي نون»: بيتحسب جوه PostgreSQL من غير ما نحمّل الدفتر كله (لو فشل بنرجع للطريقة القديمة)
+                    try:
+                        _lmeta = _noon_light_meta(_nver)
+                        if not _lmeta.get("stores") or _lmeta.get("dmin") is None:
+                            _lmeta = None
+                    except Exception as _e:
+                        print("noon light meta failed ->", _e)
+                        _lmeta = None
+                _fin_all = None if _lmeta is not None else _acct_load("Noon_Finance_API")
                 # الأوردرات (170 ألف صف) بتتحمّل بس في العروض اللي بتحتاجها — باقي العروض مش محتاجاها فبنوفّر وقت وذاكرة
                 _need_ord = str(st.session_state.get("acct_noon_view", "")).startswith(("💹", "🆕", "🏷️", "⏳"))
                 _ord_all = _acct_load("Noon_Orders_API") if _need_ord else None
@@ -9884,26 +10118,48 @@ if st.session_state["nav_page"] == "tab_accts":
                                 _dg.append({"العمود": _c, "صفوف غير صفرية": int((_fin_all[_c] != 0).sum()), "المجموع": round(float(_fin_all[_c].sum()), 2),
                                             "عيّنة": " | ".join(f"{v:,.2f}" for v in _fin_all.loc[_fin_all[_c] != 0, _c].head(4))})
                         st.dataframe(pd.DataFrame(_dg), use_container_width=True, hide_index=True)
-                if _fin_all is None or _fin_all.empty:
+                if _lmeta is None and (_fin_all is None or _fin_all.empty):
                     st.warning("مفيش بيانات في تاب Noon_Finance_API لسه. شغّل بوت Noon_Accounts.py (سحب كامل) مع تفعيل خانة Google Sheet.")
                 else:
-                    _stores = sorted({x for x in _fin_all.get("Store", pd.Series(dtype=str)).astype(str) if x}) or [""]
+                    if _lmeta is not None:
+                        _stores = _lmeta["stores"]
+                    else:
+                        _stores = sorted({x for x in _fin_all.get("Store", pd.Series(dtype=str)).astype(str) if x}) or [""]
                     _c1, _c2, _c3 = st.columns([2, 1, 1])
                     _sel = _c1.multiselect("المتجر | Store", _stores, default=_stores, key="acct_noon_stores")
-                    _dmin = pd.to_datetime(_fin_all["Transaction Date"], errors="coerce").dt.date.min()
-                    _dmax = pd.to_datetime(_fin_all["Transaction Date"], errors="coerce").dt.date.max()
+                    if _lmeta is not None:
+                        _dmin, _dmax = _lmeta["dmin"], _lmeta["dmax"]
+                    else:
+                        _dmin = pd.to_datetime(_fin_all["Transaction Date"], errors="coerce").dt.date.min()
+                        _dmax = pd.to_datetime(_fin_all["Transaction Date"], errors="coerce").dt.date.max()
                     _df_from = _c2.date_input("من (تاريخ المعاملة)", value=_dmin, min_value=_dmin, max_value=_dmax, key="acct_noon_from")
                     _df_to = _c3.date_input("إلى", value=_dmax, min_value=_dmin, max_value=_dmax, key="acct_noon_to")
-                    _f = _fin_all[_fin_all["Store"].isin(_sel)] if "Store" in _fin_all.columns and _sel else _fin_all
+                    _f = None if _lmeta is not None else (_fin_all[_fin_all["Store"].isin(_sel)] if "Store" in _fin_all.columns and _sel else _fin_all)
                     _o = _ord_all
                     if _o is not None and not _o.empty and "Store" in _o.columns and _sel:
                         _o = _o[_o["Store"].isin(_sel)]
                     _t_s = time.time()
-                    _S = calc.acct_noon_summary(_f, _df_from, _df_to)
+                    _lok = _lmeta is not None
+                    if _lok:
+                        try:
+                            _S = _noon_light_summary(tuple(_sel) if _sel else None, _df_from, _df_to, _nver)
+                            _SH.setdefault("src", {})["Noon_Finance_API"] = "PostgreSQL (SQL)"
+                        except Exception as _e:
+                            print("noon light summary failed ->", _e)
+                            _lok = False
+                    if not _lok:
+                        if _fin_all is None:
+                            _fin_all = _acct_load("Noon_Finance_API")
+                        _f = _fin_all[_fin_all["Store"].isin(_sel)] if "Store" in _fin_all.columns and _sel else _fin_all
+                        _S = calc.acct_noon_summary(_f, _df_from, _df_to)
                     _k = _S["kpi"]
                     _tm = _SH.get("tm", {}).get("Noon_Finance_API")
-                    st.caption("⏱️ " + (f"آخر تحميل للدفتر: {_tm[0]} ث ({_tm[1]:,} صف من {_tm[2]}) · " if _tm else "الدفتر من الكاش (من غير تحميل) · ") +
-                               f"حساب الملخص: {time.time() - _t_s:.1f} ث")
+                    if _lok:
+                        st.caption(f"⚡ محسوب جوه PostgreSQL من غير تحميل الدفتر: {time.time() - _t_s:.1f} ث")
+                    else:
+                        st.caption("⏱️ " + (f"آخر تحميل للدفتر: {_tm[0]} ث ({_tm[1]:,} صف من {_tm[2]}) · " if _tm else "الدفتر من الكاش (من غير تحميل) · ") +
+                                   f"حساب الملخص: {time.time() - _t_s:.1f} ث")
+                    _show_src()
                     if not _k:
                         st.info("مفيش معاملات في الفترة دي.")
                     else:
@@ -9928,7 +10184,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         _r3 = st.columns(4)
                         _kc(_r3[0], "🔁 تحويل رصيد", _m(_k["transfers"]), "out", "جزء بيتخصم من قيمة كشف وبيتسوّى بتحويل رصيد بدل ما ينزل في البنك (اتأكدت من مطابقة الكشوف في عرض التسوية).")
                         try:
-                            _rc, _orph = calc.acct_noon_recon(_f)
+                            _rc, _orph = _noon_light_recon(tuple(_sel) if _sel else None, _nver) if _lok else calc.acct_noon_recon(_f)
                             _unp = _rc[_rc["الحالة"].str.contains("لسه")]
                             _kc(_r3[1], f"⏳ لسه ماتحوّلش ({len(_unp)} كشف)", _m(float(_unp["قيمة الكشف"].sum())), "in",
                                 "مجموع الكشوف اللي ماليها دفعة لسه — ده اللي ليك عند نون. (بغض النظر عن فلتر التاريخ فوق)")
@@ -9946,7 +10202,8 @@ if st.session_state["nav_page"] == "tab_accts":
                             _refs = list(_stm_all["Reference Nr"]) if not _stm_all.empty else []
                             _pick = st.multiselect("الكشوف (سيبها فاضية = كل الفترة المحددة فوق)", _refs, key="acct_noon_stm_pick",
                                                    help="اختار نفس الكشوف اللي في صفحة نون عشان تطابق الأرقام — التحويلات البنكية بتتحسب لحد تاريخ آخر كشف مختار.")
-                            _L, _tot = calc.acct_noon_breakdown(_f, _pick or None, _df_from, _df_to)
+                            _L, _tot = (_noon_light_brk(tuple(_sel) if _sel else None, tuple(_pick) if _pick else None, _df_from, _df_to, _nver)
+                                        if _lok else calc.acct_noon_breakdown(_f, _pick or None, _df_from, _df_to))
                             _bd = pd.DataFrame([{"البند": l, "القيمة": v} for l, v, _kd in _L])
                             _bd.loc[len(_bd)] = {"البند": "الإجمالي (المستحق − المدفوع)", "القيمة": _tot}
                             _kmap = {l: _kd for l, v, _kd in _L}
@@ -10205,7 +10462,8 @@ if st.session_state["nav_page"] == "tab_accts":
                         else:
                             _raw_df = _S["df"].drop(columns=[c for c in ("_d",) if c in _S["df"].columns])
                             st.dataframe(_raw_df, use_container_width=True, hide_index=True)
-                        _xl_df = _S["df"].drop(columns=[c for c in ("_d",) if c in _S["df"].columns])
-                        st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_df),
-                                           file_name=f"noon_accounts_{file_timestamp()}.xlsx",
-                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_noon_dl")
+                        if not _lok:
+                            _lazy_excel("acct_noon_dl", lambda: _S["df"].drop(columns=[c for c in ("_d",) if c in _S["df"].columns]),
+                                        f"noon_accounts_{file_timestamp()}.xlsx")
+                        else:
+                            st.caption("📄 تحميل كل المعاملات (Excel) بيظهر في عرض «كل الصفوف».")

@@ -5859,21 +5859,32 @@ def acct_noon_breakdown(fin, statements=None, d_from=None, d_to=None):
     _is_dlv = noitem | (((_so - (-_fl) * 0.2).abs() < 0.02) & (_fl < 0) & (_so > 0))   # إعانة التوصيل: على سطر الأوردر (من غير SKU) أو = 20% من رسم الشحن على نفس السطر
     _sub_dlv = float(_so[_is_dlv].sum())
     _sub_ref = float(_so[~_is_dlv].sum())
-    L = [
-        ("صافي العائدات", S(body, "Net Proceeds"), "in"),
-        ("رسوم الإعلان (تخفيض)", S(body, "Non-Order Subsidies including VAT"), "in"),
-        ("إعانة رسوم الإحالة (≈5% من السعر — FBN)", _sub_ref, "in"),
-        ("رسوم التصدير الخارجي (إعانة التوصيل 20% — FBB)", _sub_dlv, "in"),
-        ("رسوم عودة التالفة / إدارية للإرجاع (مجمّعة — نون بتفصلهم)", float(oth.sum()), "in"),
-        ("رسوم الإعلان", S(sf, "Non-Order Fees including VAT"), "out"),
-        ("رسوم الإحالة", S(body, "Referral Fee including VAT"), "out"),
-        ("رسوم الشحن المباشر", S(body[noitem], "Fullfilment & Logistics Fees including VAT"), "out"),
-        ("رسوم الصادرة FBN", S(body[~noitem], "Fullfilment & Logistics Fees including VAT"), "out"),
-        ("رسوم الضمان", S(it_rows, "Non-Order Fees including VAT"), "out"),
-    ]
     mt = money["Transaction Type"].astype(str)
-    L.append(("تحويل بنكي", S(money[mt == "payment"], "Total"), "pay"))
-    L.append(("تحويل الرصيد", S(money[mt == "balance_transfer"], "Total"), "pay"))
+    return acct_noon_brk_labels(dict(
+        net=S(body, "Net Proceeds"), nos=S(body, "Non-Order Subsidies including VAT"), sub_ref=_sub_ref, sub_dlv=_sub_dlv,
+        oth=float(oth.sum()), ads=S(sf, "Non-Order Fees including VAT"), referral=S(body, "Referral Fee including VAT"),
+        ship_direct=S(body[noitem], "Fullfilment & Logistics Fees including VAT"),
+        ship_fbn=S(body[~noitem], "Fullfilment & Logistics Fees including VAT"),
+        warranty=S(it_rows, "Non-Order Fees including VAT"),
+        pay=S(money[mt == "payment"], "Total"), bt=S(money[mt == "balance_transfer"], "Total")))
+
+
+def acct_noon_brk_labels(b):
+    """بنود تفقيط الكشف من مجاميع جاهزة (b = dict) — بتتستخدم من الحساب العادي ومن حساب PostgreSQL، فالأسماء في مكان واحد."""
+    L = [
+        ("صافي العائدات", float(b["net"]), "in"),
+        ("رسوم الإعلان (تخفيض)", float(b["nos"]), "in"),
+        ("إعانة رسوم الإحالة (≈5% من السعر — FBN)", float(b["sub_ref"]), "in"),
+        ("رسوم التصدير الخارجي (إعانة التوصيل 20% — FBB)", float(b["sub_dlv"]), "in"),
+        ("رسوم عودة التالفة / إدارية للإرجاع (مجمّعة — نون بتفصلهم)", float(b["oth"]), "in"),
+        ("رسوم الإعلان", float(b["ads"]), "out"),
+        ("رسوم الإحالة", float(b["referral"]), "out"),
+        ("رسوم الشحن المباشر", float(b["ship_direct"]), "out"),
+        ("رسوم الصادرة FBN", float(b["ship_fbn"]), "out"),
+        ("رسوم الضمان", float(b["warranty"]), "out"),
+        ("تحويل بنكي", float(b["pay"]), "pay"),
+        ("تحويل الرصيد", float(b["bt"]), "pay"),
+    ]
     total = sum(v for _l, v, _k in L)
     return L, total
 
