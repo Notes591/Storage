@@ -9602,7 +9602,7 @@ if st.session_state["nav_page"] == "tab_accts":
 
             # حفظ الفلاتر (بحث / اختيارات / تشيك بوكس) لما تنقل بين التابات — ستريمليت بيمسح قيمة أي ويدجت مش ظاهر، فبنعيد تثبيتها كل مرة
             for _k in list(st.session_state.keys()):
-                if isinstance(_k, str) and _k.startswith("acct_") and not _k.endswith(("_dl", "_refresh", "_go")):   # الأزرار (تحميل/تحديث) مينفعش نعيّن قيمتها
+                if isinstance(_k, str) and _k.startswith("acct_") and not _k.endswith(("_dl", "_refresh", "_go", "_prep")):   # الأزرار (تحميل/تحديث) مينفعش نعيّن قيمتها
                     try:
                         st.session_state[_k] = st.session_state[_k]
                     except Exception:
