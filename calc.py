@@ -5719,7 +5719,11 @@ def acct_rows_to_df(raw):
                       columns=hdr)
     for c in ACCT_FIN_NUM:
         if c in df.columns:
-            df[c] = df[c].map(_acct_num)
+            v = pd.to_numeric(df[c], errors="coerce")      # الأرقام العادية بسرعة؛ اللي مش عادي (فواصل/أقواس/هندي) بيعدّي على _acct_num زي الأول
+            bad = v.isna()
+            if bad.any():
+                v[bad] = df.loc[bad, c].map(_acct_num)
+            df[c] = v.astype(float)
     return df
 
 
