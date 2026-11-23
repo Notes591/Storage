@@ -8586,6 +8586,7 @@ if st.session_state["nav_page"] == "tab14":
             if not inv_map and not amz_inv_map_asin and not get_trendyol_bundle()["rows"]:
                 st.info("ارفع ملف المخزون أولاً (نون: تاب «رفع ملف» / أمازون: StockAmazon) | Upload Inventory first")
             else:
+                _t14_t0 = time.time()
                 rows_fbn_t14, multi_fbn_t14 = _t14_build_rows("fbn", sales_dates, sales_display_days)
                 rows_fbb_all_t14, multi_fbb_t14 = _t14_build_rows("fbb", sales_dates, sales_display_days)
                 # FBB: بنعرض بس SKUs اللي باعت FBB في الفترة (أو مش في ملف المخزون) — عشان الكارت ميتملاش بصفوف صفرية
@@ -8606,6 +8607,9 @@ if st.session_state["nav_page"] == "tab14":
                 tot_fsab = {d: sum(dc.get(d, 0) for dc in multi_fsab_t14.values()) for d in sales_dates}
                 tot_fba = {d: sum(dc.get(d, 0) for dc in multi_fba_t14.values()) for d in sales_dates}
                 tot_ty = {d: sum(dc.get(d, 0) for dc in multi_ty_t14.values()) for d in sales_dates}
+                _sr14 = {k: v for k, v in _SH.get("src", {}).items() if k in ("DailyOrders_API", "DailyOrdersAmazon")}
+                st.caption("📦 المصدر: " + (" · ".join(f"{k.replace('_API', '')}: {v}" for k, v in _sr14.items()) if _sr14 else "الشيت") +
+                           ("" if _pg_enabled() else " — (PG_READ مش مفعّل في الـ Secrets)") + f" · ⏱️ حساب المبيعات {time.time() - _t14_t0:.1f} ث")
                 st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
                 total_cols = st.columns(min(len(sales_dates), sales_display_days))
                 for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
