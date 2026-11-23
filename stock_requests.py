@@ -425,8 +425,55 @@ else:
     _LIVE_TAB = ""
 
 # ══ كاش ══
+def _pg_iter(title, chunk=15000):
+    """بيقرا تاب من PostgreSQL على دفعات (cursor على السيرفر) — أول دفعة فيها العناوين. مفيش حاجة لو التاب مش موجود."""
+    import psycopg2
+    conn = psycopg2.connect(host=_pg_cfg("PG_HOST", "localhost"), port=int(_pg_cfg("PG_PORT", "5432") or 5432),
+                            user=_pg_cfg("PG_USER", "postgres"), password=_pg_cfg("PG_PASS", ""),
+                            dbname=_pg_cfg("PG_DB", "trial"), connect_timeout=15, sslmode=_pg_cfg("PG_SSLMODE", "prefer"))
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT table_name, headers, col_names FROM sheet_copy._meta WHERE tab_title = %s", (title,))
+        m = cur.fetchone()
+        cur.close()
+        if not m:
+            return
+        table, headers, cols = m
+        sc = conn.cursor(name="pg_iter_cur")
+        sc.itersize = chunk
+        sc.execute("SELECT " + ", ".join('"%s"' % c for c in cols) + ' FROM sheet_copy."%s" ORDER BY _row' % table)
+        memo = {}
+        sd = memo.setdefault
+        first = True
+        while True:
+            part = sc.fetchmany(chunk)
+            rows = [["" if v is None else sd(v, v) for v in r] for r in part]
+            if first:
+                rows = [list(headers)] + rows
+                first = False
+            yield rows
+            if len(part) < chunk:
+                break
+    finally:
+        conn.close()
+
+
 def _iter_sheet_chunks(sheet, chunk=15000):
-    """بيقرا الشيت على دفعات (كل دفعة قايمة صفوف مضغوطة). أول دفعة فيها صف العناوين."""
+    """بيقرا الشيت على دفعات (كل دفعة قايمة صفوف مضغوطة). أول دفعة فيها صف العناوين. لو PostgreSQL مفعّل بيقرا منه الأول."""
+    if _pg_enabled():
+        _got = False
+        try:
+            for _rows in _pg_iter(sheet.title, chunk):
+                _got = True
+                _SH.setdefault("src", {})[sheet.title] = "PostgreSQL"
+                yield _rows
+        except Exception as e:
+            if _got:
+                raise
+            print("PG chunk read failed for", sheet.title, "->", e)
+        if _got:
+            return
+    _SH.setdefault("src", {})[sheet.title] = "Google Sheet"
     from gspread.utils import rowcol_to_a1
     import gc
     ncol = max(1, getattr(sheet, "col_count", 1))
@@ -564,7 +611,10 @@ def get_cached(sheet, force=False):
                 return e2[1]
             rows = _pg_rows(t)
             if rows is None:
+                _SH.setdefault("src", {})[t] = "Google Sheet"
                 rows = safe_get_all_values(sheet)
+            else:
+                _SH.setdefault("src", {})[t] = "PostgreSQL"
             rows = _compact_rows(rows)
             _SH["data"][t] = (time.time(), rows)
             return rows
@@ -9380,6 +9430,9 @@ if st.session_state["nav_page"] == "tab_accts":
             _a_pick = st.radio("المنصة", ["🟢 نون | Noon", "🟣 تريندول | Trendyol", "🟠 أمازون | Amazon"], horizontal=True,
                                key="acct_platform", label_visibility="collapsed")
             _a_noon, _a_ty, _a_amz = (_a_pick.startswith("🟢"), _a_pick.startswith("🟣"), _a_pick.startswith("🟠"))
+            _srcs = {k: v for k, v in _SH.get("src", {}).items() if k in ACCT_BIG_TABS or k in ("Amazon_Payouts_API", "Amazon_Orders_API")}
+            st.caption("📦 المصدر: " + (" · ".join(f"{k.replace('_API', '')}: {v}" for k, v in _srcs.items()) if _srcs else "لسه ما اتحمّلش") +
+                       ("" if _pg_enabled() else " — (PG_READ مش مفعّل في الـ Secrets)"))
             if _a_ty:
                 if not hasattr(calc, "acct_ty_rows_to_df"):
                     st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات تريندول).")
