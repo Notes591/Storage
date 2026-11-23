@@ -8587,13 +8587,22 @@ if st.session_state["nav_page"] == "tab14":
                 st.info("ارفع ملف المخزون أولاً (نون: تاب «رفع ملف» / أمازون: StockAmazon) | Upload Inventory first")
             else:
                 _t14_t0 = time.time()
+                _t14_tm = []
+                def _t14_mark(n):
+                    _t14_tm.append((n, time.time() - (_t14_tm_last[0])))
+                    _t14_tm_last[0] = time.time()
+                _t14_tm_last = [time.time()]
                 rows_fbn_t14, multi_fbn_t14 = _t14_build_rows("fbn", sales_dates, sales_display_days)
+                _t14_mark("نون FBN")
                 rows_fbb_all_t14, multi_fbb_t14 = _t14_build_rows("fbb", sales_dates, sales_display_days)
+                _t14_mark("نون FBB")
                 # FBB: بنعرض بس SKUs اللي باعت FBB في الفترة (أو مش في ملف المخزون) — عشان الكارت ميتملاش بصفوف صفرية
                 rows_fbb_t14 = [r for r in rows_fbb_all_t14 if r["total_recent"] > 0 or r.get("not_in_inventory")]
                 # أمازون: عادي FSAB (كل ASIN في مخزون أمازون + اليتامى اللي باعت) و FBA (اللي باع بس)
                 rows_fsab_t14, multi_fsab_t14 = _t14_build_rows_amz("FSAB", sales_dates, sales_display_days)
+                _t14_mark("أمازون FSAB")
                 rows_fba_all_t14, multi_fba_t14 = _t14_build_rows_amz("FBA", sales_dates, sales_display_days)
+                _t14_mark("أمازون FBA")
                 rows_fba_t14 = [r for r in rows_fba_all_t14 if r["total_recent"] > 0 or r.get("not_in_inventory")]
                 # تريندول: Barcode = SKU (نفس تكويد نون)
                 _dates30_ty = [today_t14 - timedelta(days=i) for i in range(1, 31)]
@@ -8602,6 +8611,7 @@ if st.session_state["nav_page"] == "tab14":
                                                         build_daily_orders_counts_trendyol(_dates30_ty), sales_dates, sales_display_days)
 
                 # ══ إجماليات اليومية في الأعلى (نون FBN+FBB + أمازون FSAB+FBA) من صفوف الأوردرز الخام ══
+                _t14_mark("تريندول")
                 tot_fbn = {d: sum(dc.get(d, 0) for dc in multi_fbn_t14.values()) for d in sales_dates}
                 tot_fbb = {d: sum(dc.get(d, 0) for dc in multi_fbb_t14.values()) for d in sales_dates}
                 tot_fsab = {d: sum(dc.get(d, 0) for dc in multi_fsab_t14.values()) for d in sales_dates}
@@ -8609,7 +8619,7 @@ if st.session_state["nav_page"] == "tab14":
                 tot_ty = {d: sum(dc.get(d, 0) for dc in multi_ty_t14.values()) for d in sales_dates}
                 _sr14 = {k: v for k, v in _SH.get("src", {}).items() if k in ("DailyOrders_API", "DailyOrdersAmazon", "DailyOrdersTrendyol_API")}
                 st.caption("📦 المصدر: " + (" · ".join(f"{k.replace('_API', '')}: {v}" for k, v in _sr14.items()) if _sr14 else "الشيت") +
-                           ("" if _pg_enabled() else " — (PG_READ مش مفعّل في الـ Secrets)") + f" · ⏱️ حساب المبيعات {time.time() - _t14_t0:.1f} ث")
+                           ("" if _pg_enabled() else " — (PG_READ مش مفعّل في الـ Secrets)") + f" · ⏱️ حساب المبيعات {time.time() - _t14_t0:.1f} ث (" + " | ".join(f"{n} {t:.1f}" for n, t in _t14_tm) + ")")
                 st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
                 total_cols = st.columns(min(len(sales_dates), sales_display_days))
                 for ci, (d, lbl) in enumerate(zip(sales_dates, sales_labels)):
