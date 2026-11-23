@@ -96,6 +96,10 @@ scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis
 # ده كان سبب البطء في أول فتح وسبب وقوع التطبيق («Oh no») لما الذاكرة بتخلص. دلوقتي نسخة واحدة للكل.
 import threading
 SHEET_TTL = 900     # ثواني — الشيت بيتقرا تاني من جوجل لو عدّى الوقت ده أو اتمسح كاشه بعد كتابة
+ACCT_BIG_TTL = 7200  # ثواني — دفاتر حسابات المتاجر الكبيرة (بيكتبها البوت مرات قليلة في اليوم؛ زرار «🔄 تحديث» بيجدّدها فورًا)
+ACCT_BIG_TABS = {"Noon_Finance_API", "Noon_Orders_API", "Trendyol_Finance_API", "Amazon_Finance_API"}
+def _ttl_for(title):
+    return ACCT_BIG_TTL if title in ACCT_BIG_TABS else SHEET_TTL
 
 
 @st.cache_resource(show_spinner=False)
@@ -550,10 +554,10 @@ def get_cached(sheet, force=False):
     """بيانات الشيت الخام — نسخة واحدة مشتركة بين كل الجلسات، بتتجدد كل SHEET_TTL ثانية أو بعد clear_cache/force."""
     t = sheet.title
     e = _SH["data"].get(t)
-    if force or e is None or time.time() - e[0] > SHEET_TTL:
+    if force or e is None or time.time() - e[0] > _ttl_for(t):
         with _SH["rd"]:      # قراءة واحدة في المرة؛ ولو جلسة تانية جدّدت نفس الشيت وإحنا مستنيين، نستخدم نتيجتها
             e2 = _SH["data"].get(t)
-            if not force and e2 is not None and time.time() - e2[0] <= SHEET_TTL:
+            if not force and e2 is not None and time.time() - e2[0] <= _ttl_for(t):
                 return e2[1]
             if force and e2 is not None and time.time() - e2[0] < 3:
                 return e2[1]
@@ -9338,11 +9342,11 @@ if st.session_state["nav_page"] == "tab_accts":
                     # تاب كبير: بنبني الجدول على دفعات ونحتفظ بالجدول بس (من غير النسخة الخام) — ده اللي كان بيوقّع التطبيق
                     key = "acct_df_" + tab
                     m = _SH["memo"].get(key)
-                    if m is not None and time.time() - m[0] <= SHEET_TTL:
+                    if m is not None and time.time() - m[0] <= _ttl_for(tab):
                         return m[1]
                     with _SH["rd"]:
                         m = _SH["memo"].get(key)
-                        if m is not None and time.time() - m[0] <= SHEET_TTL:
+                        if m is not None and time.time() - m[0] <= _ttl_for(tab):
                             return m[1]
                         try:
                             df = _big_df(ws)
@@ -9807,10 +9811,12 @@ if st.session_state["nav_page"] == "tab_accts":
                             clear_cache(_w)
                     st.rerun()
                 _fin_all = _acct_load("Noon_Finance_API")
-                _ord_all = _acct_load("Noon_Orders_API")
+                # الأوردرات (170 ألف صف) بتتحمّل بس في العروض اللي بتحتاجها — باقي العروض مش محتاجاها فبنوفّر وقت وذاكرة
+                _need_ord = str(st.session_state.get("acct_noon_view", "")).startswith(("💹", "🆕", "🏷️", "⏳"))
+                _ord_all = _acct_load("Noon_Orders_API") if _need_ord else None
                 if _fin_all is not None and not _fin_all.empty and st.checkbox("🔧 تشخيص البيانات المقروءة من الشيت", value=False, key="acct_noon_diag"):
                     if True:
-                        st.caption(f"صفوف الدفتر: {len(_fin_all):,} · أعمدة: {len(_fin_all.columns)} · أوردرات: {0 if _ord_all is None else len(_ord_all):,}")
+                        st.caption(f"صفوف الدفتر: {len(_fin_all):,} · أعمدة: {len(_fin_all.columns)} · أوردرات: {'— (بتتحمّل في العروض اللي بتحتاجها)' if _ord_all is None else format(len(_ord_all), ',')}")
                         _dg = []
                         for _c in calc.ACCT_FIN_NUM:
                             if _c in _fin_all.columns:
