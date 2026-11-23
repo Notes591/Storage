@@ -533,7 +533,8 @@ def _pg_rows(title):
         import psycopg2
         conn = psycopg2.connect(host=_pg_cfg("PG_HOST", "localhost"), port=int(_pg_cfg("PG_PORT", "5432") or 5432),
                                 user=_pg_cfg("PG_USER", "postgres"), password=_pg_cfg("PG_PASS", ""),
-                                dbname=_pg_cfg("PG_DB", "trial"), connect_timeout=5)
+                                dbname=_pg_cfg("PG_DB", "trial"), connect_timeout=15,
+                                sslmode=_pg_cfg("PG_SSLMODE", "prefer"))
         try:
             cur = conn.cursor()
             cur.execute("SELECT table_name, headers, col_names FROM sheet_copy._meta WHERE tab_title = %s", (title,))
