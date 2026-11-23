@@ -8169,7 +8169,19 @@ def _t14_channel_part(r, ch, with_sku_level, part="all"):
 # ══ أمازون داخل تاب المبيعات الموحد — صفوف ASIN بقناتين: عادي (FSAB) و FBA ══
 # Amazon inside the unified Sales tab — ASIN rows with two channels: normal (FSAB) and FBA.
 def _t14_build_rows_amz(*args, **kwargs):
-    return calc._t14_build_rows_amz(_env_recent(args[1] if len(args) > 1 else None), *args, **kwargs)
+    # بناء صفوف أمازون بيلف على كل ASIN في المخزون (مئات الآلاف) — فبنحفظ النتيجة 5 دقايق (بتتجدد لو عدد الأوردرات/المخزون اتغيّر)
+    try:
+        _k = ("t14amz", tuple(args[:1]), tuple(args[1]) if len(args) > 1 else (), args[2] if len(args) > 2 else None,
+              _tab_len(daily_orders_amazon_sheet), len(amz_inv_map_asin), str(datetime.now().date()))
+        _m = _SH["memo"].get("t14amz_" + str(args[0]))
+        if _m is not None and _m[1] == _k and time.time() - _m[0] < 300:
+            return _m[2]
+    except Exception:
+        _k = None
+    _res = calc._t14_build_rows_amz(_env_recent(args[1] if len(args) > 1 else None), *args, **kwargs)
+    if _k is not None:
+        _SH["memo"]["t14amz_" + str(args[0])] = (time.time(), _k, _res)
+    return _res
 
 # ══ متابعة المنافسين (من بوت noon_tracker) | Noon competitor tracking ══
 # التابات NoonTrack_* بيعملها البوت المكتبي أول مرة يشتغل؛ هنا بنقراها (لو موجودة) في طلب واحد
