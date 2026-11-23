@@ -2702,28 +2702,36 @@ def _china_card_parts(inc, today, row=None, sku_up=""):
     if g:
         etd_l = _china_range([_china_date(l["_d"]["etd"]) for l in g])
         line = f"📦 <b>{q['loaded']:,} قطعة</b> محمّلة في الحاوية ولسه ماسافرتش"
-        line += f" — موعد الإبحار {etd_l}" if etd_l else " — موعد الإبحار غير مكتوب" + _own_tag(_OWN_CU, q['loaded'], "موعد الإبحار ناقص")
+        line += f" — موعد الإبحار (متوقع) {etd_l}" if etd_l else " — موعد الإبحار غير مكتوب" + _own_tag(_OWN_CU, q['loaded'], "موعد الإبحار ناقص")
         _av = _china_avail_sentence(g, today, _OWN_CU, hide_missing=True)
         items.append(line + (f"<br><span class='cn-sub'>{_av}</span>" if _av else ""))
 
-    g = groups["sea"]
-    if g:
+    _sea_all = groups["sea"]
+    _late_g = [l for l in _sea_all if (_china_date(l["_d"]["eta_port"]) and _china_date(l["_d"]["eta_port"]) < today)]
+    _rest_g = [l for l in _sea_all if l not in _late_g]
+    for g, _is_late in ((_late_g, True), (_rest_g, False)):
+        if not g:
+            continue
+        qg = sum(x["_qty"] for x in g)
         etd = _china_range([_china_date(l["_d"]["etd"]) for l in g])
         etas = [_china_date(l["_d"]["eta_port"]) for l in g]
         ports = sorted({_CH_PORTS_AR.get((l["_ctr"].get("destination_port") or l["_ship"].get("destination_port") or "").upper(),
                                          l["_ctr"].get("destination_port") or l["_ship"].get("destination_port") or "") for l in g} - {""})
         port_txt = " " + " و".join(_esc(x) for x in ports) if ports else ""
-        line = f"🚢 <b>{q['sea']:,} قطعة</b> في البحر"
-        if etd:
-            line += f" — خرجت من الصين {etd}"
-        if any(etas):
-            late = max(e for e in etas if e) < today
-            line += (f"، وكان متوقع تصل ميناء{port_txt} {_china_range(etas, today)} ولسه ماوصلتش" if late
-                     else f"، ومتوقع تصل ميناء{port_txt} {_china_range(etas, today)}")
-            if late:
-                line += _own_tag(_OWN_CU, q['sea'], "فات ميعاد وصولها للميناء")
+        if _is_late:
+            _days = max((today - e).days for e in etas if e)
+            line = f"🚢 <b>{qg:,} قطعة</b> في البحر ومتأخرة {_days} يوم"
+            if etd:
+                line += f" — خرجت من الصين {etd}"
+            line += f"، وكان متوقع تصل ميناء{port_txt} {_china_range(etas, today)} ولسه ماوصلتش" + _own_tag(_OWN_CU, qg, "فات ميعاد وصولها للميناء")
         else:
-            line += "، وموعد وصولها للميناء غير مكتوب" + _own_tag(_OWN_CU, q['sea'], "موعد وصولها للميناء ناقص")
+            line = f"🚢 <b>{qg:,} قطعة</b> في البحر"
+            if etd:
+                line += f" — خرجت من الصين {etd}"
+            if any(etas):
+                line += f"، ومتوقع تصل ميناء{port_txt} {_china_range(etas, today)}"
+            else:
+                line += "، وموعد وصولها للميناء غير مكتوب" + _own_tag(_OWN_CU, qg, "موعد وصولها للميناء ناقص")
         _av = _china_avail_sentence(g, today, _OWN_CU, hide_missing=True)
         items.append(line + (f"<br><span class='cn-sub'>{_av}</span>" if _av else ""))
 
@@ -9363,8 +9371,11 @@ if st.session_state["nav_page"] == "tab_accts":
                 col.markdown(f'<div{_tp} style="padding:2px 0 12px 0"><div style="font-size:0.8rem;opacity:0.7">{label}</div>'
                              f'<div style="font-size:1.4rem;font-weight:500;color:{_cl};line-height:1.3">{val}</div>{_sb}</div>', unsafe_allow_html=True)
 
-            _a_noon, _a_ty, _a_amz = st.tabs(["🟢 نون | Noon", "🟣 تريندول | Trendyol", "🟠 أمازون | Amazon"])
-            with _a_ty:
+            # اختيار المنصة: بنشغّل كود المنصة المختارة بس (st.tabs كان بينفّذ التلاتة مع بعض ويحمّل كل البيانات الكبيرة في كل مرة = كراش)
+            _a_pick = st.radio("المنصة", ["🟢 نون | Noon", "🟣 تريندول | Trendyol", "🟠 أمازون | Amazon"], horizontal=True,
+                               key="acct_platform", label_visibility="collapsed")
+            _a_noon, _a_ty, _a_amz = (_a_pick.startswith("🟢"), _a_pick.startswith("🟣"), _a_pick.startswith("🟠"))
+            if _a_ty:
                 if not hasattr(calc, "acct_ty_rows_to_df"):
                     st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات تريندول).")
                     st.stop()
@@ -9543,7 +9554,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         _xl_t = _TS["df"].drop(columns=[c for c in _TS["df"].columns if c.startswith("_")])
                         st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_t), file_name=f"trendyol_accounts_{file_timestamp()}.xlsx",
                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_ty_dl")
-            with _a_amz:
+            if _a_amz:
                 if not hasattr(calc, "acct_amz_rows_to_df"):
                     st.error("ملف calc.py قديم — ارفع النسخة الجديدة (فيها دوال حسابات أمازون).")
                     st.stop()
@@ -9788,7 +9799,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         _xl_a = _AS["df"].drop(columns=[c for c in _AS["df"].columns if c.startswith("_")])
                         st.download_button("⬇️ تحميل المعاملات (Excel)", data=to_excel(_xl_a), file_name=f"amazon_accounts_{file_timestamp()}.xlsx",
                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="acct_amz_dl")
-            with _a_noon:
+            if _a_noon:
                 if st.button("🔄 تحديث البيانات من الشيت", key="acct_noon_refresh"):
                     for _t in ("Noon_Finance_API", "Noon_Orders_API"):
                         _w = _acct_ws(_t)
