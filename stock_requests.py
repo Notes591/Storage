@@ -8607,7 +8607,7 @@ if st.session_state["nav_page"] == "tab14":
                 tot_fsab = {d: sum(dc.get(d, 0) for dc in multi_fsab_t14.values()) for d in sales_dates}
                 tot_fba = {d: sum(dc.get(d, 0) for dc in multi_fba_t14.values()) for d in sales_dates}
                 tot_ty = {d: sum(dc.get(d, 0) for dc in multi_ty_t14.values()) for d in sales_dates}
-                _sr14 = {k: v for k, v in _SH.get("src", {}).items() if k in ("DailyOrders_API", "DailyOrdersAmazon")}
+                _sr14 = {k: v for k, v in _SH.get("src", {}).items() if k in ("DailyOrders_API", "DailyOrdersAmazon", "DailyOrdersTrendyol_API")}
                 st.caption("📦 المصدر: " + (" · ".join(f"{k.replace('_API', '')}: {v}" for k, v in _sr14.items()) if _sr14 else "الشيت") +
                            ("" if _pg_enabled() else " — (PG_READ مش مفعّل في الـ Secrets)") + f" · ⏱️ حساب المبيعات {time.time() - _t14_t0:.1f} ث")
                 st.markdown("#### 📊 إجمالي المبيعات اليومية | Daily Sales Totals")
