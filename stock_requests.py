@@ -425,6 +425,42 @@ else:
     _LIVE_TAB = ""
 
 # ══ كاش ══
+def _pg_df(title):
+    """DataFrame الدفتر مباشرة من PostgreSQL بـ COPY: الأرقام بتتحوّل جوه السيرفر، فمفيش لفة بايثون على ملايين الخلايا.
+    نفس شكل calc.acct_rows_to_df بالظبط. بيرجّع None لو التاب مش موجود في PostgreSQL."""
+    import psycopg2, tempfile
+    conn = psycopg2.connect(host=_pg_cfg("PG_HOST", "localhost"), port=int(_pg_cfg("PG_PORT", "5432") or 5432),
+                            user=_pg_cfg("PG_USER", "postgres"), password=_pg_cfg("PG_PASS", ""),
+                            dbname=_pg_cfg("PG_DB", "trial"), connect_timeout=15, sslmode=_pg_cfg("PG_SSLMODE", "prefer"))
+    try:
+        cur = conn.cursor()
+        if not _SH.get("noon_fn"):
+            cur.execute(NOON_ACCT_NUM_SQL)
+            conn.commit()
+            _SH["noon_fn"] = True
+        cur.execute("SELECT table_name, headers, col_names FROM sheet_copy._meta WHERE tab_title = %s", (title,))
+        m = cur.fetchone()
+        if not m:
+            return None
+        table, headers, cols = m
+        hdr = [str(h).strip() for h in headers]
+        num = set(calc.ACCT_FIN_NUM)
+        sel = [('(CASE WHEN "%s" ~ \'^-?[0-9]+(\\.[0-9]+)?$\' THEN "%s"::double precision ELSE sheet_copy.acct_num("%s") END)' % (c, c, c)) if h in num else ('COALESCE("%s", \'\')' % c) for h, c in zip(hdr, cols)]
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as tf:
+            cur.copy_expert('COPY (SELECT ' + ", ".join(sel) + ' FROM sheet_copy."%s" ORDER BY _row) TO STDOUT WITH CSV' % table, tf)
+            tf.seek(0)
+            dt = {i: (float if h in num else str) for i, h in enumerate(hdr)}
+            df = pd.read_csv(tf, header=None, dtype=dt, keep_default_na=False, na_values=[], engine="c")
+        df.columns = hdr
+        sc = [h for h in hdr if h not in num]
+        if sc:                                   # نفس تنظيف acct_rows_to_df: الصفوف الفاضية خالص بتتشال
+            df = df[(df[sc] != "").any(axis=1) | (df[[h for h in hdr if h in num]] != 0).any(axis=1)] if any(h in num for h in hdr) else df[(df[sc] != "").any(axis=1)]
+            df = df.reset_index(drop=True)
+        return df
+    finally:
+        conn.close()
+
+
 def _pg_iter(title, chunk=15000):
     """بيقرا تاب من PostgreSQL على دفعات (cursor على السيرفر) — أول دفعة فيها العناوين. مفيش حاجة لو التاب مش موجود."""
     import psycopg2
@@ -523,6 +559,70 @@ WITH f AS (
 """)
 
 _EARN = "('order','order_update','statement_fee')"
+
+# نسخة من الدفتر فيها أعمدة إضافية (SKU/العنوان/ترتيب الصف) للعروض التفصيلية فقط — الاستعلامات التانية بتفضل خفيفة
+NOON_FIN_CTE_X = NOON_FIN_CTE.replace("COALESCE(item_nr, '') AS item,",
+                                      "COALESCE(item_nr, '') AS item, COALESCE(skus, '') AS skus, COALESCE(partner_skus, '') AS pskus, COALESCE(title, '') AS title, _row,", 1)
+assert "AS pskus" in NOON_FIN_CTE_X
+
+NOON_PAY_SQL = NOON_FIN_CTE_X + """
+SELECT d AS "التاريخ", ref AS "Reference Nr", title AS "Title", tt AS "Transaction Type", total AS "Total"
+FROM f WHERE tt IN ('payment','balance_transfer') AND d >= %(d_from)s AND d <= %(d_to)s
+ORDER BY d DESC, _row DESC
+"""
+NOON_SKU_SQL = NOON_FIN_CTE_X + f"""
+SELECT skus AS "SKUs", (array_agg(pskus ORDER BY _row))[1] AS "Partner SKU",
+  COUNT(*) FILTER (WHERE net > 0) AS "مبيع",
+  COUNT(*) FILTER (WHERE tt = 'order_update' AND net < 0) AS "مرتجع",
+  SUM(net) AS "Net Proceeds", SUM(referral) AS "Referral Fee including VAT",
+  SUM(fulfil) AS "Fullfilment & Logistics Fees including VAT", SUM(other_fees) AS "Other Order Fees including VAT",
+  SUM(subsidy) AS "Order Subsidies including VAT", SUM(total) AS "Total"
+FROM f
+WHERE tt IN {_EARN} AND btrim(item) <> '' AND btrim(skus) <> '' AND d >= %(d_from)s AND d <= %(d_to)s
+GROUP BY skus ORDER BY SUM(total) DESC, skus
+"""
+NOON_UNALLOC_SQL = NOON_FIN_CTE + f"""
+SELECT COALESCE(SUM(total), 0) FROM f
+WHERE tt IN {_EARN} AND btrim(item) = '' AND tt <> 'statement_fee' AND d >= %(d_from)s AND d <= %(d_to)s
+"""
+NOON_FIN_CTE_O = NOON_FIN_CTE_X.replace("_row,", "_row, COALESCE(order_nr, '') AS onr,", 1)
+assert "AS onr" in NOON_FIN_CTE_O
+
+# ربحية المنتجات — المرحلة الأولى (تجميع الدفتر) = calc.acct_noon_profit_raw
+NOON_PROFIT_G_SQL = NOON_FIN_CTE_X + """
+SELECT skus AS "SKU", (array_agg(title ORDER BY _row))[1] AS "المنتج", (array_agg(pskus ORDER BY _row))[1] AS "Partner SKU",
+  COUNT(*) FILTER (WHERE net > 0) AS "مبيع",
+  COUNT(*) FILTER (WHERE tt = 'order_update' AND net < 0) AS "مرتجع",
+  SUM(net) AS "صافي المبيعات",
+  COALESCE(SUM(net) FILTER (WHERE net > 0), 0) AS "_بيع",
+  SUM(referral + fulfil + other_fees + nof) AS "الرسوم",
+  SUM(subsidy + nos) AS "دعم",
+  SUM(total) AS "الصافي بعد الرسوم"
+FROM f
+WHERE tt IN ('order','order_update') AND btrim(item) <> '' AND btrim(skus) <> '' AND d >= %(d_from)s AND d <= %(d_to)s
+GROUP BY skus ORDER BY skus COLLATE "C"
+"""
+NOON_PROFIT_O_SQL = NOON_FIN_CTE_O + """
+SELECT btrim(onr) AS on_, SUM(total) AS tot, SUM(subsidy) AS sub
+FROM f
+WHERE tt IN ('order','order_update') AND btrim(skus) = '' AND btrim(onr) <> '' AND d >= %(d_from)s AND d <= %(d_to)s
+GROUP BY btrim(onr)
+"""
+NOON_PROFIT_IM_SQL = NOON_FIN_CTE_O + """
+SELECT DISTINCT ON (btrim(onr), item) btrim(onr) AS on_, skus AS "SKUs"
+FROM f
+WHERE tt IN ('order','order_update') AND btrim(item) <> '' AND btrim(skus) <> '' AND btrim(onr) <> '' AND d >= %(d_from)s AND d <= %(d_to)s
+ORDER BY btrim(onr), item, _row
+"""
+NOON_OUTSIDE_SQL = NOON_FIN_CTE + f"""
+SELECT COALESCE(SUM(total) FILTER (WHERE tt IN {_EARN}), 0), COALESCE(SUM(total) FILTER (WHERE tt = 'statement_fee'), 0)
+FROM f WHERE d >= %(d_from)s AND d <= %(d_to)s
+"""
+NOON_DAILY_SQL = NOON_FIN_CTE + f"""
+SELECT d AS "التاريخ", SUM(net) AS "Net Proceeds", SUM(total) AS "Total"
+FROM f WHERE tt IN {_EARN} AND d >= %(d_from)s AND d <= %(d_to)s
+GROUP BY d ORDER BY d
+"""
 
 NOON_KPI_SQL = NOON_FIN_CTE + f"""
 SELECT
@@ -646,6 +746,66 @@ def _noon_light_summary(stores, d_from, d_to, ver=0):
             row[k] = float(row[k])
     c, r = _pg_q(NOON_STM_SQL, prm)
     return {"kpi": row, "statements": pd.DataFrame(r, columns=c)}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_view(view, stores, d_from, d_to, ver=0):
+    """جداول العروض التفصيلية (الدفعات / الأصناف / اليومي) من PostgreSQL — نفس أعمدة calc.acct_noon_summary."""
+    prm = {"stores": list(stores) if stores else None, "d_from": d_from, "d_to": d_to}
+    out = {}
+    if view == "pay":
+        c, r = _pg_q(NOON_PAY_SQL, prm)
+        out["payments"] = pd.DataFrame(r, columns=c)
+    elif view == "sku":
+        c, r = _pg_q(NOON_SKU_SQL, prm)
+        sk = pd.DataFrame(r, columns=c)
+        for col in sk.columns:
+            if col not in ("SKUs", "Partner SKU"):
+                sk[col] = pd.to_numeric(sk[col]).astype(float if col not in ("مبيع", "مرتجع") else int)
+        out["skus"] = sk
+        c, r = _pg_q(NOON_UNALLOC_SQL, prm)
+        out["unallocated"] = float(r[0][0] or 0)
+    elif view == "daily":
+        c, r = _pg_q(NOON_DAILY_SQL, prm)
+        dl = pd.DataFrame(r, columns=c)
+        for col in ("Net Proceeds", "Total"):
+            dl[col] = pd.to_numeric(dl[col]).astype(float)
+        out["daily"] = dl
+    return out
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_profit(stores, d_from, d_to, ver=0):
+    """المرحلة الأولى من ربحية المنتجات من PostgreSQL: نفس (g, o_tot, o_sub, im) بتاعة calc.acct_noon_profit_raw + (إجمالي المستحق, إعلانات الكشف)."""
+    prm = {"stores": list(stores) if stores else None, "d_from": d_from, "d_to": d_to}
+    c, r = _pg_q(NOON_PROFIT_G_SQL, prm)
+    g = pd.DataFrame(r, columns=c)
+    c, r = _pg_q(NOON_OUTSIDE_SQL, prm)
+    earn_tot, ads_tot = float(r[0][0]), float(r[0][1])
+    if g.empty:
+        return None, earn_tot, ads_tot
+    for col in g.columns:
+        if col not in ("SKU", "المنتج", "Partner SKU"):
+            g[col] = pd.to_numeric(g[col]).astype(int) if col in ("مبيع", "مرتجع") else pd.to_numeric(g[col]).astype(float).round(6)   # التقريب بيشيل ضوضاء 1e-13 (صافي صفر لازم يبقى صفر)
+    c, r = _pg_q(NOON_PROFIT_O_SQL, prm)
+    o_tot = o_sub = im = None
+    if r:
+        od = pd.DataFrame(r, columns=c)
+        o_tot = pd.Series(od["tot"].astype(float).values, index=od["on_"].values)
+        o_sub = pd.Series(od["sub"].astype(float).values, index=od["on_"].values)
+        o_tot.index.name = o_sub.index.name = "_on"
+        c, r = _pg_q(NOON_PROFIT_IM_SQL, prm)
+        im = pd.DataFrame(r, columns=c).rename(columns={"on_": "_on"})
+        im = im[im["_on"].isin(o_tot.index)].reset_index(drop=True)
+    return (g, o_tot, o_sub, im), earn_tot, ads_tot
+
+
+def _noon_pg_order_items(miss):
+    """أصناف أوردرات رسومها وصلت من غير صنف في الدفتر — بنجيبها من Noon_Orders_API (للأوردرات الناقصة بس)."""
+    if not miss:
+        return None
+    c, r = _pg_q("SELECT order_nr, sku, item_nr FROM sheet_copy.noon_orders_api WHERE btrim(order_nr) = ANY(%s)", (list(miss),))
+    return pd.DataFrame(r, columns=c)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -9736,10 +9896,20 @@ if st.session_state["nav_page"] == "tab_accts":
                         if m is not None and time.time() - m[0] <= _ttl_for(tab):
                             return m[1]
                         _t0 = time.time()
-                        try:
-                            df = _big_df(ws)
-                        except Exception:
-                            df = calc.acct_rows_to_df(get_cached(ws))
+                        df = None
+                        if _pg_enabled():
+                            try:
+                                df = _pg_df(tab)
+                                if df is not None:
+                                    _SH.setdefault("src", {})[tab] = "PostgreSQL (COPY سريع)"
+                            except Exception as _e:
+                                print("pg_df failed ->", tab, _e)
+                                df = None
+                        if df is None:
+                            try:
+                                df = _big_df(ws)
+                            except Exception:
+                                df = calc.acct_rows_to_df(get_cached(ws))
                         _SH["data"].pop(tab, None)
                         _SH["memo"][key] = (time.time(), df)
                         _SH.setdefault("tm", {})[tab] = (round(time.time() - _t0, 1), len(df), _SH.get("src", {}).get(tab, "؟"))
@@ -9785,7 +9955,10 @@ if st.session_state["nav_page"] == "tab_accts":
                         clear_cache(_w)
                     st.rerun()
                 _ws_ty = _acct_ws("Trendyol_Finance_API")
+                _t_ld = time.time()
                 _fin_ty = _memo_from_sheet(_ws_ty, "acct_ty_df", calc.acct_ty_rows_to_df) if _ws_ty is not None else None
+                if _fin_ty is not None and not _fin_ty.empty:
+                    st.caption(f"📦 المصدر: Trendyol_Finance_API ← {_SH.get('src', {}).get('Trendyol_Finance_API', '؟')} · {len(_fin_ty):,} صف · ⏱️ تحميل وتجهيز {time.time() - _t_ld:.1f} ث (0 = من الكاش)")
                 if _fin_ty is None or _fin_ty.empty:
                     st.warning("مفيش بيانات في تاب Trendyol_Finance_API لسه. شغّل بوت Trendyol_Accounts.py (سحب كامل) مع تفعيل خانة Google Sheet.")
                 else:
@@ -9965,7 +10138,10 @@ if st.session_state["nav_page"] == "tab_accts":
                     st.session_state.pop("_amz_img_api_map", None)
                     st.rerun()
                 _ws_az = _acct_ws("Amazon_Finance_API")
+                _t_ld = time.time()
                 _fin_az = _memo_from_sheet(_ws_az, "acct_amz_df", calc.acct_amz_rows_to_df) if _ws_az is not None else None
+                if _fin_az is not None and not _fin_az.empty:
+                    st.caption(f"📦 المصدر: Amazon_Finance_API ← {_SH.get('src', {}).get('Amazon_Finance_API', '؟')} · {len(_fin_az):,} صف · ⏱️ تحميل وتجهيز {time.time() - _t_ld:.1f} ث (0 = من الكاش)")
                 _ws_azg = _acct_ws("Amazon_Payouts_API")
                 _grp_az = _memo_from_sheet(_ws_azg, "acct_amz_groups_df", calc.acct_amz_groups_to_df) if _ws_azg is not None else None
                 if _fin_az is None or _fin_az.empty:
@@ -10208,7 +10384,7 @@ if st.session_state["nav_page"] == "tab_accts":
                 _nver = st.session_state.get("acct_noon_ver", 0)
                 _nv0 = str(st.session_state.get("acct_noon_view", ""))
                 _lmeta = None
-                if _pg_enabled() and hasattr(calc, "acct_noon_brk_labels") and (_nv0 == "" or _nv0.startswith("📊")):
+                if _pg_enabled() and hasattr(calc, "acct_noon_brk_labels") and (_nv0 == "" or _nv0.startswith(("📊", "🧾", "📦", "📅", "💹"))):
                     # عرض «ملخص زي نون»: بيتحسب جوه PostgreSQL من غير ما نحمّل الدفتر كله (لو فشل بنرجع للطريقة القديمة)
                     try:
                         _lmeta = _noon_light_meta(_nver)
@@ -10219,7 +10395,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         _lmeta = None
                 _fin_all = None if _lmeta is not None else _acct_load("Noon_Finance_API")
                 # الأوردرات (170 ألف صف) بتتحمّل بس في العروض اللي بتحتاجها — باقي العروض مش محتاجاها فبنوفّر وقت وذاكرة
-                _need_ord = str(st.session_state.get("acct_noon_view", "")).startswith(("💹", "🆕", "🏷️", "⏳"))
+                _need_ord = str(st.session_state.get("acct_noon_view", "")).startswith(("🆕", "🏷️", "⏳") if _lmeta is not None else ("💹", "🆕", "🏷️", "⏳"))
                 _ord_all = _acct_load("Noon_Orders_API") if _need_ord else None
                 _show_src()
                 if _fin_all is not None and not _fin_all.empty and st.checkbox("🔧 تشخيص البيانات المقروءة من الشيت", value=False, key="acct_noon_diag"):
@@ -10256,6 +10432,14 @@ if st.session_state["nav_page"] == "tab_accts":
                     if _lok:
                         try:
                             _S = _noon_light_summary(tuple(_sel) if _sel else None, _df_from, _df_to, _nver)
+                            _vk_ = "pay" if _nv0.startswith("🧾") else ("sku" if _nv0.startswith("📦") else ("daily" if _nv0.startswith("📅") else ""))
+                            if _vk_ and _S.get("kpi"):
+                                _S = dict(_S)
+                                _S.update(_noon_light_view(_vk_, tuple(_sel) if _sel else None, _df_from, _df_to, _nver))
+                                _S.setdefault("payments", pd.DataFrame())
+                                _S.setdefault("skus", pd.DataFrame())
+                                _S.setdefault("daily", pd.DataFrame())
+                                _S.setdefault("unallocated", 0.0)
                             _SH.setdefault("src", {})["Noon_Finance_API"] = "PostgreSQL (SQL)"
                         except Exception as _e:
                             print("noon light summary failed ->", _e)
@@ -10358,7 +10542,22 @@ if st.session_state["nav_page"] == "tab_accts":
                                 return None
                             _vat_p = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (العمولة والتوصيل والصافي ÷ 1.15)", value=True, key="acct_noon_p_vat",
                                                                   help="دفتر نون بيعرض كل الأرقام شاملة الضريبة. التفعيل بيقسمها على 1.15 عشان الربح يتحسب بدون الضريبة.") else 1.0
-                            _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None, vat=_vat_p, alloc_order=True, order_items=_ord_all)
+                            _pf, _sql_tot = None, None
+                            if _lok:
+                                try:
+                                    _pp, _e_tot, _a_tot = _noon_light_profit(tuple(_sel) if _sel else None, _df_from, _df_to, _nver)
+                                    _pf = calc.acct_noon_profit_finish(_pp, _p_cost, _p_ads if _use_ads else None, _vat_p, True, _noon_pg_order_items)
+                                    _sql_tot = (_e_tot, _a_tot)
+                                except Exception as _e:
+                                    print("noon light profit failed ->", _e)
+                                    _pf = None
+                                    if _fin_all is None:
+                                        _fin_all = _acct_load("Noon_Finance_API")
+                                    _f = _fin_all[_fin_all["Store"].isin(_sel)] if "Store" in _fin_all.columns and _sel else _fin_all
+                                    if _ord_all is None:
+                                        _ord_all = _acct_load("Noon_Orders_API")
+                            if _pf is None:
+                                _pf = calc.acct_noon_profit(_f, _df_from, _df_to, _p_cost, _p_ads if _use_ads else None, vat=_vat_p, alloc_order=True, order_items=_ord_all)
                             _stor_on = st.checkbox("🏬 اخصم رسوم التخزين من الربح", value=True, key="acct_noon_p_stor",
                                                    help="من تاب Noon_Storage_API (رسوم FBN الشهرية). الشهر بيدخل بنسبة أيامه اللي جوه الفترة المختارة.")
                             _stor_t, _stor_un = None, 0.0
@@ -10387,14 +10586,19 @@ if st.session_state["nav_page"] == "tab_accts":
                                 _pc[1].metric("💰 صافي بعد الرسوم (كل المنتجات)", f"{_pf['الصافي بعد الرسوم'].sum():,.0f}", help="صافي المبيعات − العمولة والرسوم + الدعم لكل المنتجات، من غير شرط التكلفة — بيقارن مباشرة بإكسيل المحاسب (بعد خصم الإعلانات)")
                                 _pc[2].metric("🧮 تكلفة البضاعة", f"{_known['إجمالي التكلفة'].sum():,.0f}", help="تكلفة المنتجات المباعة فقط — الإعلانات مش داخلة هنا، بتتخصم في الصف اللي تحته")
                                 _pc[3].metric("✅ ربح المنتجات" if _tl >= 0 else "🔻 خسارة المنتجات", f"{_tl:,.0f}", help="صافي بعد رسوم نون ناقص تكلفة البضاعة — قبل الإعلانات والرسوم اللي برا المنتجات")
-                                try:
-                                    _out = calc.acct_noon_outside(_f, _df_from, _df_to, _pf, _vat_p)
-                                except Exception:
-                                    _out = 0.0
-                                try:
-                                    _ads_st = calc.acct_noon_statement_ads(_f, _df_from, _df_to, _vat_p)
-                                except Exception:
-                                    _ads_st = 0.0
+                                if _sql_tot is not None:
+                                    _vv = _vat_p if (_vat_p and _vat_p > 1) else 1.0
+                                    _out = _sql_tot[0] / _vv - float(_pf["الصافي بعد الرسوم"].sum())
+                                    _ads_st = _sql_tot[1] / _vv
+                                else:
+                                    try:
+                                        _out = calc.acct_noon_outside(_f, _df_from, _df_to, _pf, _vat_p)
+                                    except Exception:
+                                        _out = 0.0
+                                    try:
+                                        _ads_st = calc.acct_noon_statement_ads(_f, _df_from, _df_to, _vat_p)
+                                    except Exception:
+                                        _ads_st = 0.0
                                 _oth = _out - _ads_st
                                 _pc2 = st.columns(3)
                                 _pc2[0].metric("📣 إعلانات نون (من كشف الحساب)", f"{_ads_st:,.0f}", help="صفوف statement_fee — نون بتخصمها من الكشف مباشرة ومش مربوطة بمنتج. دي الإعلانات الحقيقية ومحسوبة مرة واحدة.")
@@ -10472,6 +10676,11 @@ if st.session_state["nav_page"] == "tab_accts":
                                     if st.button("🧾 جهّز التقرير", key="acct_noon_rep_go"):
                                         try:
                                             import report_pdf
+                                            if _f is None:           # التقرير بيلف على كل متجر/صنف — بنحمّل الدفتر كامل عند الطلب بس
+                                                _fa = _acct_load("Noon_Finance_API")
+                                                _f = _fa[_fa["Store"].isin(_sel)] if "Store" in _fa.columns and _sel else _fa
+                                            if _ord_all is None:
+                                                _ord_all = _acct_load("Noon_Orders_API")
                                             _rows, _gr = calc.acct_noon_report(_f, _df_from, _df_to, _p_cost, vat=_vat_p, order_items=_ord_all,
                                                                                by="store" if _is_st else "group", group_fn=None if _is_st else _grp_of)
                                             if not _rows:
