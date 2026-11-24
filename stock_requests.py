@@ -5397,6 +5397,12 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 with st.sidebar:
+    if _pg_mode() == "pg":
+        st.success("🐘 PostgreSQL فقط — الشيت مش مستخدم (غير الصين)")
+    elif _pg_enabled():
+        st.info("📄+🐘 الشيت + PostgreSQL مع بعض")
+    else:
+        st.warning("📄 الشيت فقط")
     _mm = _mem_mb()
     if _mm:
         st.caption(f"🧠 ذاكرة التطبيق: {_mm:,.0f} MB")
