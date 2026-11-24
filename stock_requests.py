@@ -495,211 +495,9 @@ def _pg_iter(title, chunk=15000):
 
 
 # ═══════════════ نون: ملخص الدفتر محسوب جوه PostgreSQL (بدل ما نحمّل 179 ألف صف) ═══════════════
-_N_TYPED = r"(CASE WHEN {c} ~ '^-?[0-9]+(\.[0-9]+)?$' THEN {c}::double precision ELSE sheet_copy.acct_num({c}) END)"
-
-
-def _nt(c):
-    return _N_TYPED.format(c=c)
-
-
-NOON_ACCT_NUM_SQL = r"""
-CREATE OR REPLACE FUNCTION sheet_copy.acct_num(x text) RETURNS double precision
-LANGUAGE plpgsql IMMUTABLE AS $f$
-DECLARE t text; neg boolean; parts text[]; v double precision;
-BEGIN
-  IF x IS NULL THEN RETURN 0; END IF;
-  t := btrim(x);
-  IF t = '' THEN RETURN 0; END IF;
-  IF t ~ '^-?[0-9]+(\.[0-9]+)?$' THEN RETURN t::double precision; END IF;
-  t := translate(t, '٠١٢٣٤٥٦٧٨٩٫٬', '0123456789.,');
-  t := replace(replace(replace(replace(t, '−', '-'), '–', '-'), chr(160), ''), ' ', '');
-  neg := left(t, 1) = '(' AND right(t, 1) = ')';
-  t := btrim(t, '()');
-  IF position(',' in t) > 0 AND position('.' in t) > 0 THEN
-    IF strpos(reverse(t), '.') < strpos(reverse(t), ',') THEN
-      t := replace(t, ',', '');
-    ELSE
-      t := replace(replace(t, '.', ''), ',', '.');
-    END IF;
-  ELSIF position(',' in t) > 0 THEN
-    parts := string_to_array(t, ',');
-    IF length(parts[array_length(parts, 1)]) = 3 AND array_length(parts, 1) > 1 AND ltrim(parts[1], '-') <> '0' THEN
-      t := replace(t, ',', '');
-    ELSE
-      t := replace(t, ',', '.');
-    END IF;
-  END IF;
-  BEGIN
-    v := t::double precision;
-  EXCEPTION WHEN others THEN
-    RETURN 0;
-  END;
-  IF neg THEN RETURN -v; END IF;
-  RETURN v;
-END $f$;
-"""
-
-# الدفتر بأنواعه الصحيحة (CTE) — بنقراه مباشرة من جدول التاب (من غير View عشان إعادة بناء الجدول ما تتعطلش)
-NOON_FIN_CTE = ("""
-WITH f AS (
-  SELECT store, COALESCE(reference_nr, '') AS ref, COALESCE(item_nr, '') AS item, transaction_type AS tt,
-         CASE WHEN transaction_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN left(transaction_date, 10)::date END AS d,
-         """ + _nt("net_proceeds") + """ AS net,
-         """ + _nt("referral_fee_including_vat") + """ AS referral,
-         """ + _nt("fullfilment_logistics_fees_including_vat") + """ AS fulfil,
-         """ + _nt("shipping_credits_including_vat") + """ AS shipcr,
-         """ + _nt("other_order_fees_including_vat") + """ AS other_fees,
-         """ + _nt("order_subsidies_including_vat") + """ AS subsidy,
-         """ + _nt("non_order_fees_including_vat") + """ AS nof,
-         """ + _nt("non_order_subsidies_including_vat") + """ AS nos,
-         """ + _nt("total") + """ AS total
-  FROM sheet_copy.noon_finance_api
-  WHERE (%(stores)s::text[] IS NULL OR store = ANY(%(stores)s))
-)
-""")
-
-_EARN = "('order','order_update','statement_fee')"
-
-# نسخة من الدفتر فيها أعمدة إضافية (SKU/العنوان/ترتيب الصف) للعروض التفصيلية فقط — الاستعلامات التانية بتفضل خفيفة
-NOON_FIN_CTE_X = NOON_FIN_CTE.replace("COALESCE(item_nr, '') AS item,",
-                                      "COALESCE(item_nr, '') AS item, COALESCE(skus, '') AS skus, COALESCE(partner_skus, '') AS pskus, COALESCE(title, '') AS title, _row,", 1)
-assert "AS pskus" in NOON_FIN_CTE_X
-
-NOON_PAY_SQL = NOON_FIN_CTE_X + """
-SELECT d AS "التاريخ", ref AS "Reference Nr", title AS "Title", tt AS "Transaction Type", total AS "Total"
-FROM f WHERE tt IN ('payment','balance_transfer') AND d >= %(d_from)s AND d <= %(d_to)s
-ORDER BY d DESC, _row DESC
-"""
-NOON_SKU_SQL = NOON_FIN_CTE_X + f"""
-SELECT skus AS "SKUs", (array_agg(pskus ORDER BY _row))[1] AS "Partner SKU",
-  COUNT(*) FILTER (WHERE net > 0) AS "مبيع",
-  COUNT(*) FILTER (WHERE tt = 'order_update' AND net < 0) AS "مرتجع",
-  SUM(net) AS "Net Proceeds", SUM(referral) AS "Referral Fee including VAT",
-  SUM(fulfil) AS "Fullfilment & Logistics Fees including VAT", SUM(other_fees) AS "Other Order Fees including VAT",
-  SUM(subsidy) AS "Order Subsidies including VAT", SUM(total) AS "Total"
-FROM f
-WHERE tt IN {_EARN} AND btrim(item) <> '' AND btrim(skus) <> '' AND d >= %(d_from)s AND d <= %(d_to)s
-GROUP BY skus ORDER BY SUM(total) DESC, skus
-"""
-NOON_UNALLOC_SQL = NOON_FIN_CTE + f"""
-SELECT COALESCE(SUM(total), 0) FROM f
-WHERE tt IN {_EARN} AND btrim(item) = '' AND tt <> 'statement_fee' AND d >= %(d_from)s AND d <= %(d_to)s
-"""
-NOON_FIN_CTE_O = NOON_FIN_CTE_X.replace("_row,", "_row, COALESCE(order_nr, '') AS onr,", 1)
-assert "AS onr" in NOON_FIN_CTE_O
-
-# ربحية المنتجات — المرحلة الأولى (تجميع الدفتر) = calc.acct_noon_profit_raw
-NOON_PROFIT_G_SQL = NOON_FIN_CTE_X + """
-SELECT skus AS "SKU", (array_agg(title ORDER BY _row))[1] AS "المنتج", (array_agg(pskus ORDER BY _row))[1] AS "Partner SKU",
-  COUNT(*) FILTER (WHERE net > 0) AS "مبيع",
-  COUNT(*) FILTER (WHERE tt = 'order_update' AND net < 0) AS "مرتجع",
-  SUM(net) AS "صافي المبيعات",
-  COALESCE(SUM(net) FILTER (WHERE net > 0), 0) AS "_بيع",
-  SUM(referral + fulfil + other_fees + nof) AS "الرسوم",
-  SUM(subsidy + nos) AS "دعم",
-  SUM(total) AS "الصافي بعد الرسوم"
-FROM f
-WHERE tt IN ('order','order_update') AND btrim(item) <> '' AND btrim(skus) <> '' AND d >= %(d_from)s AND d <= %(d_to)s
-GROUP BY skus ORDER BY skus COLLATE "C"
-"""
-NOON_PROFIT_O_SQL = NOON_FIN_CTE_O + """
-SELECT btrim(onr) AS on_, SUM(total) AS tot, SUM(subsidy) AS sub
-FROM f
-WHERE tt IN ('order','order_update') AND btrim(skus) = '' AND btrim(onr) <> '' AND d >= %(d_from)s AND d <= %(d_to)s
-GROUP BY btrim(onr)
-"""
-NOON_PROFIT_IM_SQL = NOON_FIN_CTE_O + """
-SELECT DISTINCT ON (btrim(onr), item) btrim(onr) AS on_, skus AS "SKUs"
-FROM f
-WHERE tt IN ('order','order_update') AND btrim(item) <> '' AND btrim(skus) <> '' AND btrim(onr) <> '' AND d >= %(d_from)s AND d <= %(d_to)s
-ORDER BY btrim(onr), item, _row
-"""
-NOON_OUTSIDE_SQL = NOON_FIN_CTE + f"""
-SELECT COALESCE(SUM(total) FILTER (WHERE tt IN {_EARN}), 0), COALESCE(SUM(total) FILTER (WHERE tt = 'statement_fee'), 0)
-FROM f WHERE d >= %(d_from)s AND d <= %(d_to)s
-"""
-NOON_DAILY_SQL = NOON_FIN_CTE + f"""
-SELECT d AS "التاريخ", SUM(net) AS "Net Proceeds", SUM(total) AS "Total"
-FROM f WHERE tt IN {_EARN} AND d >= %(d_from)s AND d <= %(d_to)s
-GROUP BY d ORDER BY d
-"""
-
-NOON_KPI_SQL = NOON_FIN_CTE + f"""
-SELECT
-  COALESCE(SUM(net) FILTER (WHERE tt IN {_EARN}), 0) AS net,
-  COALESCE(SUM(referral) FILTER (WHERE tt IN {_EARN}), 0) AS referral,
-  COALESCE(SUM(fulfil) FILTER (WHERE tt IN {_EARN}), 0) AS fulfil,
-  COALESCE(SUM(other_fees) FILTER (WHERE tt IN {_EARN}), 0) AS other_fees,
-  COALESCE(SUM(subsidy) FILTER (WHERE tt IN {_EARN}), 0) AS subsidy,
-  COALESCE(SUM(nof) FILTER (WHERE tt = 'statement_fee'), 0) AS ads,
-  COALESCE(SUM(nof) FILTER (WHERE tt IN ('order','order_update')), 0) AS nonorder_fees_other,
-  COALESCE(SUM(nos) FILTER (WHERE tt IN {_EARN}), 0) AS nonorder_sub,
-  COALESCE(SUM(total) FILTER (WHERE tt IN {_EARN}), 0) AS earned,
-  COALESCE(-SUM(total) FILTER (WHERE tt = 'payment'), 0) AS paid,
-  COALESCE(-SUM(total) FILTER (WHERE tt = 'balance_transfer'), 0) AS transfers,
-  COALESCE(SUM(total), 0) AS balance,
-  COUNT(*) FILTER (WHERE tt = 'order' AND net > 0) AS orders_n,
-  COUNT(*) FILTER (WHERE tt = 'order_update' AND net < 0) AS returns_n,
-  COALESCE(SUM(net) FILTER (WHERE tt = 'order_update' AND net < 0), 0) AS returns_amt,
-  COUNT(*) AS n
-FROM f
-WHERE d >= %(d_from)s AND d <= %(d_to)s
-"""
-
-NOON_STM_SQL = NOON_FIN_CTE + f"""
-SELECT ref AS "Reference Nr", MAX(d) AS "تاريخ الكشف", COUNT(*) AS "صفوف",
-  SUM(net) AS "Net Proceeds", SUM(referral) AS "Referral Fee including VAT", SUM(fulfil) AS "Fullfilment & Logistics Fees including VAT",
-  SUM(shipcr) AS "Shipping Credits including VAT", SUM(other_fees) AS "Other Order Fees including VAT",
-  SUM(subsidy) AS "Order Subsidies including VAT", SUM(nof) AS "Non-Order Fees including VAT",
-  SUM(nos) AS "Non-Order Subsidies including VAT", SUM(total) AS "Total"
-FROM f
-WHERE tt IN {_EARN} AND ref LIKE 'PS-%%' AND d >= %(d_from)s AND d <= %(d_to)s
-GROUP BY ref
-ORDER BY MAX(d) DESC NULLS LAST
-"""
-
-# تفقيط الكشف: body = صفوف الأوردرات/الكشف، money = الدفعات وتحويلات الرصيد. picks = كشوف محددة (أو NULL = كل الفترة)
-NOON_BRK_SQL = NOON_FIN_CTE + f""",
-b AS (
-  SELECT * FROM f WHERE tt IN {_EARN} AND (
-    CASE WHEN %(picks)s::text[] IS NULL THEN d >= %(d_from)s AND d <= %(d_to)s ELSE ref = ANY(%(picks)s) END)
-),
-lim AS (SELECT MAX(d) AS dmax FROM b),
-m AS (
-  SELECT * FROM f WHERE tt IN ('payment','balance_transfer') AND (
-    CASE WHEN %(picks)s::text[] IS NULL THEN d >= %(d_from)s AND d <= %(d_to)s
-         ELSE (SELECT dmax FROM lim) IS NULL OR d <= (SELECT dmax FROM lim) END)
-)
-SELECT
-  (SELECT COALESCE(SUM(net), 0) FROM b) AS net,
-  (SELECT COALESCE(SUM(nos), 0) FROM b) AS nos,
-  (SELECT COALESCE(SUM(subsidy) FILTER (WHERE NOT (btrim(item) = '' OR (ABS(subsidy - (-fulfil) * 0.2) < 0.02 AND fulfil < 0 AND subsidy > 0))), 0) FROM b) AS sub_ref,
-  (SELECT COALESCE(SUM(subsidy) FILTER (WHERE (btrim(item) = '' OR (ABS(subsidy - (-fulfil) * 0.2) < 0.02 AND fulfil < 0 AND subsidy > 0))), 0) FROM b) AS sub_dlv,
-  (SELECT COALESCE(SUM(other_fees), 0) FROM b) AS oth,
-  (SELECT COALESCE(SUM(nof) FILTER (WHERE tt = 'statement_fee'), 0) FROM b) AS ads,
-  (SELECT COALESCE(SUM(referral), 0) FROM b) AS referral,
-  (SELECT COALESCE(SUM(fulfil) FILTER (WHERE btrim(item) = ''), 0) FROM b) AS ship_direct,
-  (SELECT COALESCE(SUM(fulfil) FILTER (WHERE btrim(item) <> ''), 0) FROM b) AS ship_fbn,
-  (SELECT COALESCE(SUM(nof) FILTER (WHERE tt <> 'statement_fee'), 0) FROM b) AS warranty,
-  (SELECT COALESCE(SUM(total) FILTER (WHERE tt = 'payment'), 0) FROM m) AS pay,
-  (SELECT COALESCE(SUM(total) FILTER (WHERE tt = 'balance_transfer'), 0) FROM m) AS bt
-"""
-
-# مدخلات التسوية بشكل مصغّر: كل كشف (متجر + مرجع) صف واحد، والدفعات/التحويلات صفوف صفوف، + أحدث تاريخ
-NOON_RECON_STM_SQL = NOON_FIN_CTE + f"""
-SELECT store AS "Store", ref AS "Reference Nr", MAX(d) AS "Transaction Date", 'order' AS "Transaction Type", SUM(total) AS "Total"
-FROM f WHERE tt IN {_EARN} AND ref LIKE 'PS-%%' GROUP BY store, ref ORDER BY store, ref
-"""
-NOON_RECON_PAY_SQL = NOON_FIN_CTE + """
-SELECT store AS "Store", ref AS "Reference Nr", d AS "Transaction Date", tt AS "Transaction Type", total AS "Total"
-FROM f WHERE tt IN ('payment','balance_transfer') ORDER BY store, d NULLS LAST
-"""
-NOON_META_SQL = """
-SELECT (SELECT array_agg(DISTINCT store ORDER BY store) FROM sheet_copy.noon_finance_api WHERE COALESCE(store, '') <> '') AS stores,
-       MIN(CASE WHEN transaction_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN left(transaction_date, 10)::date END) AS dmin,
-       MAX(CASE WHEN transaction_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN left(transaction_date, 10)::date END) AS dmax
-FROM sheet_copy.noon_finance_api
-"""
+# استعلامات SQL (في ملف acct_sql.py جنب التطبيق) — بنحمّل كل أسمائها هنا
+import acct_sql as _asql
+globals().update({_k: _v for _k, _v in vars(_asql).items() if _k.startswith("NOON_") or _k in ("_N_TYPED", "_nt", "_EARN")})
 
 
 def _pg_q(sql, params=None):
@@ -806,6 +604,22 @@ def _noon_pg_order_items(miss):
         return None
     c, r = _pg_q("SELECT order_nr, sku, item_nr FROM sheet_copy.noon_orders_api WHERE btrim(order_nr) = ANY(%s)", (list(miss),))
     return pd.DataFrame(r, columns=c)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_com(stores, d_from, d_to, chan, ver=0):
+    return _asql.noon_com(_pg_q, stores, d_from, d_to, chan)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_last(stores, d_from, d_to, chan, ver=0):
+    rows, today = _asql.noon_last(_pg_q, stores, d_from, d_to, chan)
+    return (calc.acct_noon_last_from_sql(rows) if len(rows) else rows), today
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _noon_light_pending(stores, today_iso, ver=0):
+    return _asql.noon_pending(_pg_q, stores, datetime.fromisoformat(today_iso).date())
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -10384,7 +10198,7 @@ if st.session_state["nav_page"] == "tab_accts":
                 _nver = st.session_state.get("acct_noon_ver", 0)
                 _nv0 = str(st.session_state.get("acct_noon_view", ""))
                 _lmeta = None
-                if _pg_enabled() and hasattr(calc, "acct_noon_brk_labels") and (_nv0 == "" or _nv0.startswith(("📊", "🧾", "📦", "📅", "💹"))):
+                if _pg_enabled() and hasattr(calc, "acct_noon_brk_labels") and (_nv0 == "" or _nv0.startswith(("📊", "🧾", "📦", "📅", "💹", "🆕", "🏷️", "⏳", "🧮"))):
                     # عرض «ملخص زي نون»: بيتحسب جوه PostgreSQL من غير ما نحمّل الدفتر كله (لو فشل بنرجع للطريقة القديمة)
                     try:
                         _lmeta = _noon_light_meta(_nver)
@@ -10395,7 +10209,7 @@ if st.session_state["nav_page"] == "tab_accts":
                         _lmeta = None
                 _fin_all = None if _lmeta is not None else _acct_load("Noon_Finance_API")
                 # الأوردرات (170 ألف صف) بتتحمّل بس في العروض اللي بتحتاجها — باقي العروض مش محتاجاها فبنوفّر وقت وذاكرة
-                _need_ord = str(st.session_state.get("acct_noon_view", "")).startswith(("🆕", "🏷️", "⏳") if _lmeta is not None else ("💹", "🆕", "🏷️", "⏳"))
+                _need_ord = str(st.session_state.get("acct_noon_view", "")).startswith(() if _lmeta is not None else ("💹", "🆕", "🏷️", "⏳"))
                 _ord_all = _acct_load("Noon_Orders_API") if _need_ord else None
                 _show_src()
                 if _fin_all is not None and not _fin_all.empty and st.checkbox("🔧 تشخيص البيانات المقروءة من الشيت", value=False, key="acct_noon_diag"):
@@ -10429,6 +10243,13 @@ if st.session_state["nav_page"] == "tab_accts":
                         _o = _o[_o["Store"].isin(_sel)]
                     _t_s = time.time()
                     _lok = _lmeta is not None
+
+                    def _noon_full_load():
+                        """الطريقة القديمة (احتياطي): الدفتر والأوردرات كاملين من الشيت/PostgreSQL."""
+                        _fa = _fin_all if _fin_all is not None else _acct_load("Noon_Finance_API")
+                        _ff = _fa[_fa["Store"].isin(_sel)] if "Store" in _fa.columns and _sel else _fa
+                        _oo = _ord_all if _ord_all is not None else _acct_load("Noon_Orders_API")
+                        return _ff, _oo
                     if _lok:
                         try:
                             _S = _noon_light_summary(tuple(_sel) if _sel else None, _df_from, _df_to, _nver)
@@ -10705,8 +10526,20 @@ if st.session_state["nav_page"] == "tab_accts":
                             _lkey = "FBN" if "FBN" in _lch else ("FBP" if "FBP" in _lch else "all")
                             _vat_l = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (العمولة والتوصيل والإعانات والصافي)", value=True, key="acct_noon_last_vat",
                                                                   help="سعر البيع بيفضل سعر العميل الشامل. الباقي ÷ 1.15.") else 1.0
-                            _nl = calc.acct_noon_last(_f, _df_from, _df_to, _ord_all, _lkey, vat=_vat_l)
-                            if _lkey != "all" and (_ord_all is None or _ord_all.empty):
+                            _nl, _ord_empty = None, (_ord_all is None or _ord_all.empty)
+                            if _lok:
+                                try:
+                                    _lr, _lt = _noon_light_last(tuple(_sel) if _sel else None, _df_from, _df_to, _lkey, _nver)
+                                    _nl = calc.acct_noon_last_finish(_lr, _lt, _vat_l) if len(_lr) else pd.DataFrame()
+                                    _ord_empty = (_pg_tab_count("Noon_Orders_API") or 0) == 0
+                                except Exception as _e:
+                                    print("noon light last failed ->", _e)
+                                    _nl = None
+                            if _nl is None:
+                                _f, _ord_all = _noon_full_load()
+                                _ord_empty = (_ord_all is None or _ord_all.empty)
+                                _nl = calc.acct_noon_last(_f, _df_from, _df_to, _ord_all, _lkey, vat=_vat_l)
+                            if _lkey != "all" and _ord_empty:
                                 st.warning("تاب Noon_Orders_API فاضي — مفيش طريقة نفصل بيها نوع التنفيذ.")
                             elif _nl is None or _nl.empty:
                                 st.info("مفيش أوردرات في الفترة دي.")
@@ -10730,8 +10563,20 @@ if st.session_state["nav_page"] == "tab_accts":
                             _nkey = "FBN" if "FBN" in _nch else ("FBP" if "FBP" in _nch else "all")
                             _vat_c = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (زي تاب المبيعات)", value=True, key="acct_noon_com_vat",
                                                                   help="نون بتعرض العمولة والتوصيل شاملين الضريبة (مثلاً 17.25% = 15% + ضريبة عليها). التفعيل بيعرضهم بدون الضريبة.") else 1.0
-                            _ncom = calc.acct_noon_com(_f, _df_from, _df_to, _ord_all, _nkey, vat=_vat_c)
-                            if _nkey != "all" and (_ord_all is None or _ord_all.empty):
+                            _ncom, _ord_empty = None, (_ord_all is None or _ord_all.empty)
+                            if _lok:
+                                try:
+                                    _cg, _cu, _ci = _noon_light_com(tuple(_sel) if _sel else None, _df_from, _df_to, _nkey, _nver)
+                                    _ncom = calc.acct_noon_com_finish(_cg, _vat_c, _cu, _ci)
+                                    _ord_empty = (_pg_tab_count("Noon_Orders_API") or 0) == 0
+                                except Exception as _e:
+                                    print("noon light com failed ->", _e)
+                                    _ncom = None
+                            if _ncom is None:
+                                _f, _ord_all = _noon_full_load()
+                                _ord_empty = (_ord_all is None or _ord_all.empty)
+                                _ncom = calc.acct_noon_com(_f, _df_from, _df_to, _ord_all, _nkey, vat=_vat_c)
+                            if _nkey != "all" and _ord_empty:
                                 st.warning("تاب Noon_Orders_API فاضي — مفيش طريقة نفصل بيها نوع التنفيذ. شغّل بوت نون وحدّث الأوردرات.")
                             elif _nkey != "all" and _ncom.attrs.get("unknown"):
                                 st.caption(f"⚠️ {_ncom.attrs['unknown']} صف بيع مالوش أوردر في Noon_Orders_API (قديم أو لسه ماتسحبش) — مش داخل في الفصل ده.")
@@ -10794,7 +10639,17 @@ if st.session_state["nav_page"] == "tab_accts":
                                 st.bar_chart(_dl.set_index("التاريخ")[["Total"]])
                                 st.dataframe(_dl, use_container_width=True, hide_index=True, column_config=_acct_fmt(_dl))
                         elif _sub.startswith("⏳"):
-                            _pd_ = calc.acct_noon_pending(_f, _o) if _o is not None else pd.DataFrame()
+                            _pd_ = None
+                            if _lok:
+                                try:
+                                    _pd_ = _noon_light_pending(tuple(_sel) if _sel else None, datetime.now().date().isoformat(), _nver)
+                                except Exception as _e:
+                                    print("noon light pending failed ->", _e)
+                                    _pd_ = None
+                            if _pd_ is None:
+                                _f, _ord_all = _noon_full_load()
+                                _o = _ord_all[_ord_all["Store"].isin(_sel)] if _ord_all is not None and not _ord_all.empty and "Store" in _ord_all.columns and _sel else _ord_all
+                                _pd_ = calc.acct_noon_pending(_f, _o) if _o is not None else pd.DataFrame()
                             if _pd_ is None or _pd_.empty:
                                 st.success("كل الأوردرات المسلّمة ظاهرة في كشوف المالية ✅")
                             else:

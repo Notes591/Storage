@@ -6777,9 +6777,6 @@ def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all", vat=1
     g = it.groupby("SKU").agg(**{"Partner SKU": ("Partner SKU", "first"), "المنتج": ("المنتج", "first"), "قطع": ("_one", "sum"),
                                  "مبيعات": ("net", "sum"), "عمولة": ("ref", "sum"), "توصيل": ("dlv", "sum"),
                                  "تانية": ("_x", "sum")}).reset_index()
-    if vat and vat > 1:                      # بدون الضريبة: العمولة والتوصيل ÷ 1.15 (نسبة العمولة بتبقى من سعر البيع الشامل)
-        g["عمولة"] = g["عمولة"] / vat
-        g["توصيل"] = g["توصيل"] / vat
     # إعانة العمولة (Order Subsidies على صف الصنف، موجبة أو سالبة) — مش دايماً بتنزل، فبنعرض حالتها لكل صنف
     _t = fin[fin["Transaction Type"].astype(str).str.strip().str.lower().isin(["order", "order_update"])]
     _t = _t.assign(_sku=_t["SKUs"].astype(str).str.split(",").str[0].str.strip().str.upper(), _on=_t["Order Nr"].astype(str).str.strip(),
@@ -6790,6 +6787,22 @@ def acct_noon_com(fin, d_from=None, d_to=None, orders=None, channel="all", vat=1
     it["_hs"] = (it["_sub"] != 0).astype(float)
     _gs = it.groupby("SKU").agg(_s=("_sub", "sum"), _h=("_hs", "sum")).reset_index()
     g = g.merge(_gs, on="SKU", how="left")
+    return acct_noon_com_finish(g, vat, unknown, incomplete)
+
+
+def acct_noon_com_finish(g, vat=1.0, unknown=0, incomplete=0):
+    """آخر مرحلة في العمولة والتوصيل: g = جدول الأصناف (SKU, Partner SKU, المنتج, قطع, مبيعات, عمولة, توصيل, تانية, _s, _h) قبل الضريبة.
+    الجزء الأول (التجميع) بيتحسب في PostgreSQL (acct_sql.noon_com) أو في بايثون (acct_noon_com)."""
+    import pandas as pd
+    if g is None or g.empty:
+        out = pd.DataFrame()
+        out.attrs["unknown"] = unknown
+        out.attrs["incomplete"] = incomplete
+        return out
+    g = g.copy()
+    if vat and vat > 1:                      # بدون الضريبة: العمولة والتوصيل ÷ 1.15 (نسبة العمولة بتبقى من سعر البيع الشامل)
+        g["عمولة"] = g["عمولة"] / vat
+        g["توصيل"] = g["توصيل"] / vat
     g["_s"] = g["_s"].fillna(0.0)
     g["_h"] = g["_h"].fillna(0.0)
     g = _com_finish(g)
@@ -6865,8 +6878,30 @@ def acct_noon_last(fin, d_from=None, d_to=None, orders=None, channel="all", vat=
     it = it.sort_values(["date", "order"])
     it = it.sort_values(["_cp", "date", "order"])          # آخر أوردر مكتمل لو موجود، وإلا آخر أوردر ولو التوصيل لسه ماظهرش
     last = it.groupby("SKU", as_index=False).tail(1)
-    last = last.assign(dlv=pd.to_numeric(last["dlv"], errors="coerce").fillna(0.0))
     today = pd.to_datetime(fin["Transaction Date"], errors="coerce").max()
+    return acct_noon_last_finish(last, today, vat)
+
+
+def acct_noon_last_from_sql(rows):
+    """بيحوّل صفوف acct_sql.noon_last (آخر صف لكل SKU + أرقام الأوردر) لنفس شكل `last` اللي بيطلع من بايثون:
+    نفس تعديلات التوصيل والإعانة بالظبط (التوصيل الإجمالي، إعانة الصنف، إعانة وتوصيل مستوى الأوردر)."""
+    import pandas as pd
+    r = rows.copy()
+    n = r["n_sku"].astype(float)
+    r["_isub"] = r["isub_v"] / n
+    gross = -r["ifl_v"] / n
+    dlv = r["dlv"].where(~(r["own"] & (gross > 0)), gross)
+    nord = r["n_ord"].astype(float)
+    not_own = ~r["own"]
+    r["_ocr"] = (r["ocr_v"] / nord).where(not_own & (r["ocr_v"] != 0), 0.0)
+    r["dlv"] = (-r["ogfl_v"] / nord).where(not_own & (r["ogfl_v"] < 0), dlv)
+    return r.rename(columns={"model": "model"})[["SKU", "Partner SKU", "المنتج", "order", "date", "model", "net", "ref", "dlv", "_isub", "_ocr", "_cp"]]
+
+
+def acct_noon_last_finish(last, today, vat=1.0):
+    """آخر مرحلة في «آخر أوردر»: last = آخر صف لكل SKU (بعد تعديلات التوصيل والإعانة) + today = أحدث تاريخ في الدفتر."""
+    import pandas as pd
+    last = last.assign(dlv=pd.to_numeric(last["dlv"], errors="coerce").fillna(0.0))
     v = vat if (vat and vat > 1) else 1.0
     out = []
     for _, r in last.iterrows():
