@@ -171,6 +171,26 @@ def _shared_gs():
 
 
 client, ss = _shared_gs()
+
+
+# ══ PG_MODE = "pg": التطبيق يقرا/يكتب في PostgreSQL بس (الشيت للصين فقط). الافتراضي بدونه = زي الأول ══
+def _pg_mode():
+    try:
+        return str(st.secrets.get("PG_MODE", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+if _pg_mode() == "pg":
+    import psycopg2 as _psy
+    import pg_sheet as _pgs
+
+    def _pg_connect():
+        g = lambda k, d="": str(st.secrets.get(k, d) or d)
+        return _psy.connect(host=g("PG_HOST", "localhost"), port=int(g("PG_PORT", "5432") or 5432), user=g("PG_USER", "postgres"),
+                            password=g("PG_PASS", ""), dbname=g("PG_DB", "trial"), connect_timeout=15, sslmode=g("PG_SSLMODE", "prefer"))
+
+    ss = _pgs.PGSpreadsheet(_pg_connect, ss, lambda t: str(t).strip().lower().startswith("china"))
 st.session_state["_gs_client"], st.session_state["_gs_ss"] = client, ss
 
 
@@ -886,6 +906,8 @@ def _pg_sheet_only(title):
 
 
 def _pg_write_on():
+    if _pg_mode() == "pg":
+        return False           # في وضع pg الكتابة أصلاً بتروح PostgreSQL مباشرة (مفيش نسخ من الشيت)
     v = _pg_cfg("PG_WRITE", "").strip().lower()
     if v in ("0", "off", "no", "false", "sheet"):
         return False
