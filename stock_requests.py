@@ -5285,6 +5285,27 @@ def _cross_cached():
 ordinal_map = {1:"الثانية|Second",2:"الثالثة|Third",3:"الرابعة|Fourth",4:"الخامسة|Fifth"}
 
 
+# ══ بوابة الدخول: لو في أي كلمة سر متسجلة، لازم تدخل مرة واحدة الأول، وبعدها كل الأقسام تتفتح (ومفيش حاجة تظهر قبلها) ══
+def _global_login_gate():
+    try:
+        _locks = get_tab_lock_map()
+    except Exception:
+        return
+    if not _locks or st.session_state.get("_all_tabs_unlocked"):
+        return
+    st.title("🔒 تسجيل الدخول | Login")
+    _pw_in = st.text_input("🔑 كلمة السر | Password", type="password", key="_global_pw_input")
+    if st.button("دخول | Unlock", key="_global_pw_btn"):
+        if _pw_in and any(_pw_in == str(v) for v in _locks.values()):
+            st.session_state["_all_tabs_unlocked"] = True
+            st.rerun()
+        else:
+            st.error("❌ كلمة السر غلط | Wrong password")
+    st.stop()
+
+
+_global_login_gate()
+
 # ══════════════════════════════════════════════
 st.title("🏢 عالم الرشاقة للتجارة | Fitness World Trading")
 
