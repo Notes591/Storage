@@ -850,6 +850,8 @@ def _pg_rows(title):
     """نفس شكل get_all_values (قايمة صفوف، الأولى هيدر بأسمائه الأصلية) من جدول التاب في sheet_copy، أو None لو التاب مش موجود/في خطأ."""
     if not _pg_enabled():
         return None
+    if _pg_sheet_only(title) or title in _SH.get("pg_dirty", {}):
+        return None            # تابات الصين دايماً من الشيت · وتاب لسه متكتب فيه ومالحقش يتنسخ لـ PostgreSQL → من الشيت (أحدث)
     try:
         import psycopg2
         conn = psycopg2.connect(host=_pg_cfg("PG_HOST", "localhost"), port=int(_pg_cfg("PG_PORT", "5432") or 5432),
@@ -870,6 +872,173 @@ def _pg_rows(title):
     except Exception as e:
         print("PG read failed for", title, "->", e)
         return None
+
+
+# ══════════ كتابة PostgreSQL مع كل كتابة في الشيت (write-through) ══════════
+# أي كتابة في التطبيق على تاب في الشيت (إضافة/تعديل/حذف) بنعلّم التاب «متغيّر»، وبعد ~5 ثواني من آخر كتابة بنقرا حالته النهائية من الشيت
+# وننسخها لـ PostgreSQL (نفس جداول sheet_copy اللي بيقراها التطبيق). لحد ما النسخ يخلص، التاب بيتقرا من الشيت (أحدث).
+# تابات الصين (اسمها بيبدأ بـ China) بتفضل على الشيت بس. التشغيل: افتراضي شغّال لو PG_READ مفعّل، أو PG_WRITE = "both" / "off".
+_PG_SHEET_ONLY = ("china",)
+
+
+def _pg_sheet_only(title):
+    return str(title).strip().lower().startswith(_PG_SHEET_ONLY)
+
+
+def _pg_write_on():
+    v = _pg_cfg("PG_WRITE", "").strip().lower()
+    if v in ("0", "off", "no", "false", "sheet"):
+        return False
+    if v in ("1", "on", "yes", "true", "both"):
+        return True
+    return _pg_enabled()
+
+
+def _pg_snake_names(headers):
+    import re as _re
+    used, out = set(), []
+    for h in headers:
+        s_ = _re.sub(r"[^0-9a-zA-Z]+", "_", str(h)).strip("_").lower()
+        if not s_:
+            s_ = f"c_{len(used) + 1}"
+        if s_[0].isdigit():
+            s_ = "c_" + s_
+        s_ = s_[:60]
+        base, i = s_, 2
+        while s_ in used:
+            s_, i = f"{base}_{i}", i + 1
+        used.add(s_)
+        out.append(s_)
+    return out
+
+
+def _pg_put_tab(title, vals):
+    """بيستبدل جدول التاب في PostgreSQL بحالة الشيت النهائية (vals = get_all_values). في transaction واحدة."""
+    import io as _io, csv as _csv, json as _json, re as _re, zlib
+    import psycopg2
+    if not vals or not any(str(h).strip() for h in vals[0]):
+        return
+    hdr = [str(h).strip() for h in vals[0]]
+    w = len(hdr)
+    while w and not hdr[w - 1]:
+        w -= 1
+    hdr = hdr[:w]
+    rows = [(list(r) + [""] * w)[:w] for r in vals[1:] if any(str(x).strip() for x in r[:w])]
+    cols = _pg_snake_names(hdr)
+    conn = psycopg2.connect(host=_pg_cfg("PG_HOST", "localhost"), port=int(_pg_cfg("PG_PORT", "5432") or 5432),
+                            user=_pg_cfg("PG_USER", "postgres"), password=_pg_cfg("PG_PASS", ""),
+                            dbname=_pg_cfg("PG_DB", "trial"), connect_timeout=15, sslmode=_pg_cfg("PG_SSLMODE", "prefer"))
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE SCHEMA IF NOT EXISTS sheet_copy")
+        cur.execute("CREATE TABLE IF NOT EXISTS sheet_copy._meta (table_name TEXT PRIMARY KEY, tab_title TEXT, headers JSONB, col_names JSONB, copied_at TIMESTAMPTZ DEFAULT now())")
+        cur.execute("SELECT table_name FROM sheet_copy._meta WHERE tab_title = %s", (title,))
+        m = cur.fetchone()
+        if m:
+            table = m[0]
+        else:
+            base = _re.sub(r"[^0-9a-zA-Z]+", "_", title).strip("_").lower()[:55] or ("t_%d" % (zlib.crc32(title.encode("utf-8")) % 1000000))
+            if base[0].isdigit():
+                base = "t_" + base
+            cur.execute("SELECT 1 FROM sheet_copy._meta WHERE table_name = %s", (base,))
+            table = base if not cur.fetchone() else "%s_%d" % (base[:50], zlib.crc32(title.encode("utf-8")) % 1000000)
+        cur.execute('DROP TABLE IF EXISTS sheet_copy."%s"' % table)
+        cur.execute('CREATE TABLE sheet_copy."%s" (' % table + ", ".join('"%s" TEXT' % c for c in cols) + ", _row BIGSERIAL)")
+        cur.execute("INSERT INTO sheet_copy._meta (table_name, tab_title, headers, col_names, copied_at) VALUES (%s,%s,%s,%s,now()) "
+                    "ON CONFLICT (table_name) DO UPDATE SET tab_title=EXCLUDED.tab_title, headers=EXCLUDED.headers, col_names=EXCLUDED.col_names, copied_at=now()",
+                    (table, title, _json.dumps(hdr, ensure_ascii=False), _json.dumps(cols)))
+        if rows:
+            buf = _io.StringIO()
+            wr = _csv.writer(buf)
+            for r in rows:
+                wr.writerow(r)
+            buf.seek(0)
+            cur.copy_expert('COPY sheet_copy."%s" (' % table + ", ".join('"%s"' % c for c in cols) + ") FROM STDIN WITH CSV", buf)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _pg_flush(title, token):
+    d = _SH.setdefault("pg_dirty", {})
+    ent = d.get(title)
+    if ent is None or ent[1] != token:
+        return                                        # فيه كتابة أحدث — الـ timer بتاعها هو اللي هينسخ
+    ws = ent[0]
+    try:
+        if getattr(ws, "row_count", 0) > 40000:
+            vals = _read_big_sheet(ws)
+        else:
+            vals = ws.get_all_values()
+        _pg_put_tab(title, vals)
+        cur_ent = d.get(title)
+        if cur_ent is not None and cur_ent[1] == token:
+            d.pop(title, None)
+            _SH["data"].pop(title, None)              # الكاش يتقرا من PostgreSQL المحدّث
+        print("🐘 PostgreSQL اتحدّث:", title, "—", max(len(vals) - 1, 0), "صف")
+    except Exception as e:
+        print("🐘 تعذّر تحديث PostgreSQL للتاب", title, "->", str(e)[:200], "(التاب بيتقرا من الشيت لحد ما ينجح)")
+        _SH.setdefault("pg_fail", {})[title] = str(e)[:200]
+        t = threading.Timer(60, _pg_flush, args=(title, token))     # محاولة تانية بعد دقيقة
+        t.daemon = True
+        t.start()
+
+
+def _pg_mark_dirty(ws):
+    title = ws.title
+    if _pg_sheet_only(title) or not _pg_write_on():
+        return
+    d = _SH.setdefault("pg_dirty", {})
+    old = d.get(title)
+    token = time.time()
+    d[title] = (ws, token)
+    tm = _SH.setdefault("pg_timers", {})
+    if tm.get(title) is not None:
+        tm[title].cancel()
+    t = threading.Timer(5, _pg_flush, args=(title, token))
+    t.daemon = True
+    tm[title] = t
+    t.start()
+
+
+def _pg_install_hooks():
+    """بنلفّ دوال الكتابة في gspread (مرة واحدة للسيرفر) — أي كتابة على تاب في الشيت بتعلّمه للنسخ."""
+    if _SH.get("pg_hooks"):
+        return
+    _SH["pg_hooks"] = True
+    W = getattr(gspread, "Worksheet", None)
+    if W is None:
+        try:
+            from gspread.models import Worksheet as W
+        except Exception:
+            return
+    ss_id = getattr(ss, "id", None)
+
+    def _wrap(name):
+        orig = getattr(W, name, None)
+        if orig is None:
+            return
+
+        def w(self, *a, **k):
+            r = orig(self, *a, **k)
+            try:
+                if getattr(getattr(self, "spreadsheet", None), "id", ss_id) == ss_id:
+                    _pg_mark_dirty(self)
+            except Exception:
+                pass
+            return r
+        w.__name__ = name
+        w.__doc__ = orig.__doc__
+        setattr(W, name, w)
+    for n in ("append_row", "append_rows", "update", "update_cell", "update_cells", "update_acell", "batch_update", "delete_rows", "delete_row",
+              "insert_row", "insert_rows", "clear", "batch_clear", "add_rows", "sort"):
+        _wrap(n)
+
+
+_pg_install_hooks()
 
 
 def get_cached(sheet, force=False):
