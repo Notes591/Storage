@@ -10044,7 +10044,9 @@ if st.session_state["nav_page"] == "tab_accts":
                                     if _cv is not None:
                                         return _cv
                                 return None
-                            _tpf = calc.acct_ty_profit(_ft, _tf, _tt, _t_cost, lambda bu: (_tpm.get("name") or {}).get(bu))
+                            _tvat = calc.NOON_VAT if st.checkbox("🧾 بدون ضريبة 15% (الصافي والمبيعات والعمولة ÷ 1.15 — زي حساب المحاسب)", value=True, key="acct_ty_p_vat",
+                                                                 help="تريندول بتدفع المبلغ شامل الضريبة؛ المحاسب بيخصم الضريبة قبل الربح. شيله لو عايز الأرقام شاملة الضريبة.") else 1.0
+                            _tpf = calc.acct_ty_profit(_ft, _tf, _tt, _t_cost, lambda bu: (_tpm.get("name") or {}).get(bu), vat=_tvat)
                             if _tpf.empty:
                                 st.info("مفيش مبيعات في الفترة.")
                             else:

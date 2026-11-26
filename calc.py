@@ -6301,9 +6301,10 @@ def acct_ty_recon(fin):
     return rc, ug, unpaid_total, unpaid_n
 
 
-def acct_ty_profit(fin, d_from=None, d_to=None, cost_fn=None, name_fn=None):
+def acct_ty_profit(fin, d_from=None, d_to=None, cost_fn=None, name_fn=None, vat=1.0):
     """ربحية كل منتج (Barcode). الصافي بعد الرسوم = مجموع صافي البائع (مبيعات − مرتجعات) بعد العمولة.
-    cost_fn(barcode_up) -> تكلفة الوحدة أو None. الربح = الصافي − (التكلفة × الكمية الصافية). الرسوم/الغرامات على الفواتير مش على منتج فمش داخلة."""
+    cost_fn(barcode_up) -> تكلفة الوحدة أو None. الربح = الصافي − (التكلفة × الكمية الصافية). الرسوم/الغرامات على الفواتير مش على منتج فمش داخلة.
+    vat > 1 (مثلًا 1.15): الأرقام المالية بتتقسم على الضريبة قبل الربح (زي ما المحاسب بيحسب)."""
     import pandas as pd
     if fin is None or fin.empty or "_ttype" not in fin.columns:
         return pd.DataFrame()
@@ -6318,6 +6319,9 @@ def acct_ty_profit(fin, d_from=None, d_to=None, cost_fn=None, name_fn=None):
     g = it.groupby("barcode").agg(**{"المنتج": ("description", "first"), "مبيع": ("_sold", "sum"), "مرتجع": ("_ret", "sum"),
                                      "إجمالي المبيعات": ("_sales", "sum"), "قيمة المرتجع": ("_retamt", "sum"),
                                      "العمولة": ("_comm", "sum"), "الصافي بعد الرسوم": ("_net", "sum")}).reset_index().rename(columns={"barcode": "Barcode"})
+    if vat and vat > 1:     # بدون ضريبة 15% (زي المحاسب): المبيعات والمرتجع والعمولة والصافي ÷ 1.15 — التكلفة زي ما هي
+        for _c in ("إجمالي المبيعات", "قيمة المرتجع", "العمولة", "الصافي بعد الرسوم"):
+            g[_c] = g[_c] / vat
     g["صافي الكمية"] = g["مبيع"] - g["مرتجع"]
     costs, missing, names = [], [], []
     for _, r in g.iterrows():
