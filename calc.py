@@ -37,6 +37,22 @@ def gap_action(need, whq, avg, cov_days, sched="none"):
         return "low_wh"
     return "send_nowh"
 
+def _norm_key(v):
+    """يطبّع SKU/كود رقمي جه كـ float أو نص (5515551555.0 أو 5.515551555E9) إلى نص صحيح (5515551555)
+    عشان المطابقة مع باركود تريندول/نون تشتغل. أي نص عادي بيرجع زي ما هو."""
+    s = str(v).strip()
+    try:
+        if re.fullmatch(r"-?\d+\.0+", s):
+            return s.split(".")[0]
+        if re.fullmatch(r"-?\d+(\.\d+)?[eE][+-]?\d+", s):
+            from decimal import Decimal
+            d = Decimal(s)
+            if d == d.to_integral_value():
+                return str(int(d))
+    except Exception:
+        pass
+    return s
+
 def _build_tacweed_bundle(raw):
     data_map, code_map, cost_map, code_cost_map = {}, {}, {}, {}
     if raw and len(raw) >= 2:
@@ -52,8 +68,8 @@ def _build_tacweed_bundle(raw):
             sku_raw = col(row, "SKU", "Sku", "sku")
             if not str(sku_raw).strip():
                 continue
-            sku_up = str(sku_raw).strip().upper()
-            code = str(col(row, "Code01", "code01", "Code 01")).strip()
+            sku_up = _norm_key(sku_raw).upper()
+            code = _norm_key(col(row, "Code01", "code01", "Code 01"))
             cost = _f2_or_none(col(row, "Cost", "cost", "التكلفة", "تكلفة"))
             company = str(col(row, "Company", "company", "الشركة", "المجموعة")).strip()
             data_map[sku_up] = {"code": code, "cost": cost, "company": company}
@@ -80,8 +96,8 @@ def _build_tacweed_amazon_bundle(raw):
             asin_raw = col(row, "ASIN", "Asin", "asin")
             if not str(asin_raw).strip():
                 continue
-            asin_up = str(asin_raw).strip().upper()
-            code = str(col(row, "Code01", "code01", "Code 01")).strip()
+            asin_up = _norm_key(asin_raw).upper()
+            code = _norm_key(col(row, "Code01", "code01", "Code 01"))
             cost = _f2_or_none(col(row, "Cost", "cost", "التكلفة", "تكلفة"))
             data_map[asin_up] = {"code": code, "cost": cost}
             if code:
