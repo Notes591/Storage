@@ -9208,7 +9208,8 @@ if st.session_state["nav_page"] == "tab14":
                         _ci = calc.noon_ex_vat(_ci)
                     if _pr is not None and _ci:
                         try:
-                            _net = compute_net_price_after_fees(_pr, _ci, ex_vat=noon)[0]
+                            # نون: الصافي بعد خصم ضريبة البيع (السعر ÷ 1.15 − العمولة − التوصيل، وهما بدون ضريبة). باقي المنصات زي ما كانت.
+                            _net = compute_net_price_after_fees(_pr, _ci, ex_vat=noon)[1 if noon else 0]
                         except Exception:
                             _net = None
                     return _pr, _ci, _net
