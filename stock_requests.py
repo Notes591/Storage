@@ -9375,6 +9375,17 @@ if st.session_state["nav_page"] == "tab14":
                         get_noon_track()
                     except Exception:
                         pass
+                    # تابات الملاحظات والجدولة اللي الكارت بيقراها (بتتخزن مرة وتتشارك بين الجلسات)
+                    for _wsh in (unavailable_sheet, ordered_sheet, expired_sheet, sheets.get("Check")):
+                        try:
+                            if _wsh is not None:
+                                get_cached(_wsh)
+                        except Exception:
+                            pass
+                    try:
+                        calc.get_scheduled_normalized(_ENV)
+                    except Exception:
+                        pass
                 for g in groups_show_t14:
                     top_b = g["blocks"][0]
                     noon_items = [(s, sku_rows_t14[s]) for s in sorted(g["skus"], key=_sku_sales, reverse=True)
