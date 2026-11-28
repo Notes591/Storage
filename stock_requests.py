@@ -6991,10 +6991,17 @@ def render_ads_reco_chip(sku_up):
         pass
 
 
+@st.cache_resource
+def _gcache():
+    """كاش عام على مستوى التطبيق (مش لكل جلسة) — أول جلسة بتحسب والباقي بيستفيد."""
+    return {}
+
+
 def _ads_reco_compute(force=False):
     """بيحسب توصيات كل الـ SKUs مرة واحدة ويكاشيها 10 دقايق (بتستخدمها شاشة التوصيات وكارت المبيعات)."""
-    c = st.session_state.get("_ads_reco_calc")
+    c = st.session_state.get("_ads_reco_calc") or _gcache().get("ads_reco")
     if c and not force and time.time() - c[0] < ADS_RECO_TTL and c[1].get("v") == ADS_RECO_VER:
+        st.session_state["_ads_reco_calc"] = c
         return c[1]
     try:
         out = _ads_reco_compute_inner()
@@ -7002,6 +7009,7 @@ def _ads_reco_compute(force=False):
         out = {"status": "error", "err": str(e)[:200]}
     out["v"] = ADS_RECO_VER
     st.session_state["_ads_reco_calc"] = (time.time(), out)
+    _gcache()["ads_reco"] = st.session_state["_ads_reco_calc"]
     return out
 
 
@@ -7101,6 +7109,7 @@ def render_ads_reco_section():
         st.session_state.pop("_ads_monthly_rows", None)
         get_noon_track(force=True)
         st.session_state.pop("_ads_reco_calc", None)
+        _gcache().pop("ads_reco", None)
         st.session_state.pop("_ads_daily_rows", None)
     D = _ads_reco_compute()
     if D.get("status") == "error":
@@ -8381,8 +8390,9 @@ def _t14_build_rows_amz(*args, **kwargs):
 NOON_TRACK_TTL = 600
 
 def get_noon_track(force=False):
-    c = st.session_state.get("_noon_track")
+    c = st.session_state.get("_noon_track") or _gcache().get("noon_track")
     if c and not force and time.time() - c[0] < NOON_TRACK_TTL:
+        st.session_state["_noon_track"] = c
         return c[1]
     data = {}
     try:
@@ -8396,6 +8406,7 @@ def get_noon_track(force=False):
     except Exception:
         data = c[1] if c else {}
     st.session_state["_noon_track"] = (time.time(), data)
+    _gcache()["noon_track"] = st.session_state["_noon_track"]
     return data
 
 NT_SKUS_TAB = "NoonTrack_SKUs"
@@ -9357,6 +9368,13 @@ if st.session_state["nav_page"] == "tab14":
                                    placeholder="اختار الأعمدة بالترتيب اللي عايزه")
                     st.button("↺ الترتيب الافتراضي وكل الأعمدة", key="t14_cols_reset", on_click=_reset_t14_cols)
                     st.caption("ترتيب الأعمدة في الجدول = ترتيب اختيارك. بيتحفظ ومبيرجعش لوحده. لو فضيتها كلها بيظهروا كلهم.")
+                # تسخين: بنحسب توصيات الإعلانات والمنافسين مرة هنا — عشان الضغط على صف يفتح الكارت فورًا
+                if _vw in ("all", "noon"):
+                    try:
+                        _ads_reco_compute()
+                        get_noon_track()
+                    except Exception:
+                        pass
                 for g in groups_show_t14:
                     top_b = g["blocks"][0]
                     noon_items = [(s, sku_rows_t14[s]) for s in sorted(g["skus"], key=_sku_sales, reverse=True)
